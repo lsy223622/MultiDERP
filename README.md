@@ -148,13 +148,15 @@ For example, the Nginx deployment below has this topology:
 
 ~~~text
 DERPMap -> https://derp.example.com:443
-Nginx   -> http://multiderp:3377
+Nginx   -> http://127.0.0.1:3377
 ~~~
 
 The default backend port is TCP `3377` and is internal to the deployment; it
-must not be opened to the public Internet. STUN is UDP `3478` and must be
-published directly or through a proxy that supports UDP. The public DERP
-endpoint can still be TCP `443`; it is independent of the backend port.
+must not be opened to the public Internet. STUN is UDP `3478`; the Compose
+examples publish it explicitly on both IPv4 and IPv6, directly or through a
+proxy that supports UDP. The host and Docker daemon must have IPv6 enabled for
+the IPv6 mapping to work. The public DERP endpoint can still be TCP `443`; it
+is independent of the backend port.
 
 V1 supports exactly these certificate modes:
 
@@ -212,8 +214,10 @@ server:
 ~~~
 
 The DERPMap still contains only `derp.example.com:443`; clients do not know
-that Nginx forwards to the internal `multiderp:3377`. Keep 3377 on the private
-container network or bind it only to a protected local interface. Do not
+that Nginx forwards to the internal backend. The default Compose example binds
+that backend to `127.0.0.1:3377` for a host Nginx. If Nginx runs as a container
+on the same private network, use `multiderp:3377` instead. Keep 3377 on the
+private container network or bind it only to a protected local interface. Do not
 publish it as a second public DERP endpoint.
 
 If a deployment explicitly needs another backend port, `:8443` is a valid

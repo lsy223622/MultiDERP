@@ -6,14 +6,13 @@ services:
     restart: unless-stopped
     read_only: true
 
-    # The external-TLS reverse proxy should share a private container network
-    # and forward its TCP 443 backend to this exposed port.
-    expose:
-      - "3377/tcp"
-
-    # STUN is UDP and cannot be replaced by an ordinary HTTP reverse proxy.
+    # Nginx terminates public TLS on the host and forwards the DERP upgrade
+    # stream to this loopback-only backend. Do not bind 3377 publicly.
+    # STUN is UDP; publish it explicitly on both IPv4 and IPv6.
     ports:
-      - "3478:3478/udp"
+      - "127.0.0.1:3377:3377/tcp"
+      - "0.0.0.0:3478:3478/udp"
+      - "[::]:3478:3478/udp"
 
     volumes:
       - ./data:/data
