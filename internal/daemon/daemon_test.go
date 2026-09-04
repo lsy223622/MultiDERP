@@ -92,21 +92,39 @@ func TestEmptyConfigStartsWithoutDerperAndReportsHealth(t *testing.T) {
 	}
 }
 
-func TestMissingConfigFailsBeforeListeners(t *testing.T) {
+func TestMissingConfigIsCreatedBeforeListeners(t *testing.T) {
 	dir := shortTempDir(t)
-	adminPath := filepath.Join(dir, "run", "admin.sock")
+	cfg := config.Default()
+	cfg.Server.Admin.Socket = filepath.Join(dir, "run", "admin.sock")
+	cfg.Server.Health.Listen = freeLoopbackAddress(t)
+	templatePath := filepath.Join(dir, "template.yaml")
+	if err := config.WriteAtomic(templatePath, cfg); err != nil {
+		t.Fatalf("WriteAtomic() template error = %v", err)
+	}
+	template, err := os.ReadFile(templatePath)
+	if err != nil {
+		t.Fatalf("read template: %v", err)
+	}
+	configPath := filepath.Join(dir, "missing.yaml")
 	d := New(context.Background(), Options{
-		ConfigPath:       filepath.Join(dir, "missing.yaml"),
+		ConfigPath:       configPath,
+		ConfigTemplate:   template,
 		AdmissionAddress: freeLoopbackAddress(t),
+		DerperOutput:     io.Discard,
 	})
-	if err := d.Start(context.Background()); err == nil {
-		t.Fatal("Start() succeeded without the required config file")
+	if err := d.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
 	}
-	if _, err := os.Stat(adminPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("admin socket after missing-config failure: %v", err)
+	defer func() { _ = d.Shutdown() }()
+	if d.derper.Running() {
+		t.Fatal("missing config started derper")
 	}
-	if err := d.Shutdown(); err != nil {
-		t.Fatalf("Shutdown() after failed Start() error = %v", err)
+	created, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read created config: %v", err)
+	}
+	if !bytes.Equal(created, template) {
+		t.Fatalf("created config differs from template:\n%s", created)
 	}
 }
 

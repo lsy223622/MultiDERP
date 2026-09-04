@@ -26,6 +26,6 @@ storage:
 logging:
   level: info
 
-# Add verifier entries with the CLI after copying this file to /data/config.yaml.
+# Add verifier entries with the CLI after the daemon starts.
 # Secret values never belong in this YAML file.
 tailnets: []

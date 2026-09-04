@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	configexample "github.com/lsy223622/MultiDERP"
 	"gopkg.in/yaml.v3"
 	"tailscale.com/tailcfg"
 )
@@ -241,6 +242,45 @@ func LoadFile(path string) (ParseResult, error) {
 		return ParseResult{}, fmt.Errorf("config file %q: %w", path, err)
 	}
 	return result, nil
+}
+
+func ExampleYAML() []byte {
+	return configexample.Content()
+}
+
+func CreateFileIfMissing(path string, data []byte) (bool, error) {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return false, fmt.Errorf("create config parent directory %q: %w", dir, err)
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("create config file %q: %w", path, err)
+	}
+	removeOnError := true
+	defer func() {
+		_ = file.Close()
+		if removeOnError {
+			_ = os.Remove(path)
+		}
+	}()
+
+	if n, err := file.Write(data); err != nil {
+		return false, fmt.Errorf("write config file %q: %w", path, err)
+	} else if n != len(data) {
+		return false, fmt.Errorf("write config file %q: %w", path, io.ErrShortWrite)
+	}
+	if err := file.Sync(); err != nil {
+		return false, fmt.Errorf("sync config file %q: %w", path, err)
+	}
+	if err := file.Close(); err != nil {
+		return false, fmt.Errorf("close config file %q: %w", path, err)
+	}
+	removeOnError = false
+	return true, nil
 }
 
 func (c Config) Validate() error {

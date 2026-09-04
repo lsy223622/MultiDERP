@@ -26,6 +26,7 @@ import (
 
 type Options struct {
 	ConfigPath       string
+	ConfigTemplate   []byte
 	DerperBinary     string
 	DerperOutput     io.Writer
 	AdmissionAddress string
@@ -57,6 +58,7 @@ type Daemon struct {
 	expectedChildStops map[uint64]struct{}
 
 	configPath       string
+	configTemplate   []byte
 	derperBinary     string
 	derperOutput     io.Writer
 	admissionAddress string
@@ -99,10 +101,14 @@ func New(parent context.Context, options Options) *Daemon {
 	if options.Logger == nil {
 		options.Logger = log.New(os.Stderr, "multiderp: ", log.LstdFlags|log.Lmicroseconds)
 	}
+	if len(options.ConfigTemplate) == 0 {
+		options.ConfigTemplate = config.ExampleYAML()
+	}
 	logFilter := logging.New(options.Logger, config.DefaultLoggingLevel)
 	pool := admission.NewPool()
 	d := &Daemon{
 		configPath:         options.ConfigPath,
+		configTemplate:     append([]byte(nil), options.ConfigTemplate...),
 		derperBinary:       options.DerperBinary,
 		derperOutput:       options.DerperOutput,
 		admissionAddress:   options.AdmissionAddress,
@@ -133,8 +139,15 @@ func (d *Daemon) Start(ctx context.Context) error {
 	}
 	d.starting = true
 	d.mu.Unlock()
+	createdConfig, err := config.CreateFileIfMissing(d.configPath, d.configTemplate)
+	if err != nil {
+		return d.abortStart(err)
+	}
+	if createdConfig {
+		d.logf("INFO created missing configuration file %s from the bundled example", d.configPath)
+	}
 	d.pendingOperationMu.Lock()
-	err := d.recoverPendingOperationLocked(ctx)
+	err = d.recoverPendingOperationLocked(ctx)
 	d.pendingOperationMu.Unlock()
 	if err != nil {
 		return d.abortStart(err)

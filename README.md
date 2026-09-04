@@ -47,6 +47,10 @@ Copy-Item config.example.yaml data\config.yaml
 docker compose -f docker-compose.example.yaml up -d
 ~~~
 
+If `data/config.yaml` is not present, the container creates it automatically
+from the bundled `config.example.yaml`. The explicit copy above is useful when
+you want to replace the example hostname before the first start.
+
 The example intentionally starts with tailnets: []. In that state the manager,
 admin socket, and health server can run, but no derper child is started and
 readiness remains false. Add the first verifier through the Unix admin socket:
@@ -83,9 +87,18 @@ the verifier to admission.
 
 ## Configuration and lifecycle
 
-/data/config.yaml is required at daemon startup. A missing file is an error
-and exits before the socket or derper child is created. An existing empty,
-null, comment-only, or {} YAML file is an intentional empty desired config.
+`/data/config.yaml` is created automatically from the bundled
+`config.example.yaml` when it does not exist. The generated file contains the
+example's default server, storage, and logging values with `tailnets: []`; it
+does not recreate any verifier entries that may have existed in a previous
+runtime. The example hostname remains a placeholder and should be replaced
+before adding an enabled verifier.
+
+The generated configuration starts the manager, admin socket, and health
+server without a derper child, so readiness remains false until a verifier is
+added and becomes eligible. An existing empty, null, comment-only, or `{}` YAML
+file has the same empty desired-config behavior. Invalid or unreadable files
+still fail startup.
 
 The daemon is the authoritative writer. Runtime changes go through the admin
 socket, are validated, written with a temporary file plus fsync and atomic

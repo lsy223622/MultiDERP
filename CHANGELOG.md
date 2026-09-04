@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-09-04
+
+- Automatically creates a missing `config.yaml` from the bundled example with
+  default settings and an empty `tailnets` list.
+
 ## [1.0.1] - 2026-09-04
 
 - Added repeatable OAuth advertised tags to the CLI, admin protocol, YAML

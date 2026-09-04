@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -374,6 +375,54 @@ func TestWriteAtomicNormalizesAndCanBeReloaded(t *testing.T) {
 		t.Fatalf("stat config: %v", err)
 	} else if info.IsDir() {
 		t.Fatal("config path is a directory")
+	}
+}
+
+func TestCreateFileIfMissingUsesExampleAndPreservesExistingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	example := ExampleYAML()
+	created, err := CreateFileIfMissing(path, example)
+	if err != nil {
+		t.Fatalf("CreateFileIfMissing() error = %v", err)
+	}
+	if !created {
+		t.Fatal("CreateFileIfMissing() reported that the new file was not created")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read created config: %v", err)
+	}
+	if !bytes.Equal(data, example) {
+		t.Fatalf("created config differs from example:\n%s", data)
+	}
+	parsed, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse() created config error = %v", err)
+	}
+	if len(parsed.Config.Tailnets) != 0 {
+		t.Fatalf("created config contains tailnets: %#v", parsed.Config.Tailnets)
+	}
+	if parsed.Config.Server.DERP.Listen != DefaultDERPListen || parsed.Config.Storage.StateDir != DefaultStateDir || parsed.Config.Logging.Level != DefaultLoggingLevel {
+		t.Fatalf("created config did not contain expected defaults: %#v", parsed.Config)
+	}
+
+	replacement := []byte("version: 1\n")
+	if err := os.WriteFile(path, replacement, 0o600); err != nil {
+		t.Fatalf("write existing config: %v", err)
+	}
+	created, err = CreateFileIfMissing(path, []byte("must not replace"))
+	if err != nil {
+		t.Fatalf("CreateFileIfMissing() existing-file error = %v", err)
+	}
+	if created {
+		t.Fatal("CreateFileIfMissing() reported creation for an existing file")
+	}
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read existing config: %v", err)
+	}
+	if !bytes.Equal(data, replacement) {
+		t.Fatalf("existing config was replaced: %q", data)
 	}
 }
 
