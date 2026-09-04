@@ -7,8 +7,14 @@ COPY . .
 ARG MULTIDERP_VERSION=dev
 ARG MULTIDERP_COMMIT=unknown
 ARG TAILSCALE_VERSION=unknown
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-X main.multiderpVersion=${MULTIDERP_VERSION} -X main.gitCommit=${MULTIDERP_COMMIT} -X main.tailscaleUpstreamVersion=${TAILSCALE_VERSION}" -o /out/multiderp ./cmd/multiderp
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /out/derper tailscale.com/cmd/derper
+RUN upstream_version="$(go list -m -f '{{.Version}}' tailscale.com)" && \
+    upstream_version="${upstream_version#v}" && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+      -ldflags "-X main.multiderpVersion=${MULTIDERP_VERSION} -X main.gitCommit=${MULTIDERP_COMMIT} -X main.tailscaleUpstreamVersion=${TAILSCALE_VERSION} -X tailscale.com/version.longStamp=${upstream_version} -X tailscale.com/version.shortStamp=${upstream_version}" \
+      -o /out/multiderp ./cmd/multiderp && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+      -ldflags "-X tailscale.com/version.longStamp=${upstream_version} -X tailscale.com/version.shortStamp=${upstream_version}" \
+      -o /out/derper tailscale.com/cmd/derper
 
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 

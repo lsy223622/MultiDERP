@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-09-04
+
+- Embeds the pinned Tailscale upstream version in the main and bundled `derper`
+  binaries so version reporting does not fall back to `-ERR-BuildInfo`.
+
 ## [1.0.2] - 2026-09-04
 
 - Automatically creates a missing `config.yaml` from the bundled example with
