@@ -25,7 +25,7 @@ mechanism.
 
 The Compose examples use the public release image
 `ghcr.io/lsy223622/multiderp:latest`. Release tags also publish a version tag
-such as `ghcr.io/lsy223622/multiderp:1.0.0`; use that tag or the image digest
+such as `ghcr.io/lsy223622/multiderp:1.0.1`; use that tag or the image digest
 when a deployment must not follow later releases automatically.
 The `latest` tag is updated only by a stable `vX.Y.Z` release; a running
 container still needs an image updater or a scheduled `docker compose pull`

@@ -12,3 +12,14 @@
   separate public DERP endpoint and STUN port.
 - Added build version metadata, third-party notices, security guidance, and
   release-focused CI pinning.
+
+## [1.0.0] - 2026-09-04
+
+- Initial release of the MultiDERP daemon and its upstream `derper`-based
+  multi-Tailnet admission architecture.
+- Added isolated per-Tailnet verifier lifecycle management, fail-closed
+  admission control, health checks, and persistent state handling.
+- Added web, OAuth, and auth-key enrollment through the admin CLI and YAML
+  configuration.
+- Added Docker/Compose deployment examples, digest-pinned release inputs, and
+  stable release image publishing to GHCR.
