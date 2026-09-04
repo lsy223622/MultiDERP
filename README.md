@@ -31,9 +31,19 @@ The `latest` tag is updated only by a stable `vX.Y.Z` release; a running
 container still needs an image updater or a scheduled `docker compose pull`
 and `docker compose up -d` to apply that update.
 
-~~~text
-mkdir data
-copy config.example.yaml data\config.yaml
+Linux/macOS:
+
+~~~sh
+mkdir -p data
+cp config.example.yaml data/config.yaml
+docker compose -f docker-compose.example.yaml up -d
+~~~
+
+PowerShell:
+
+~~~powershell
+New-Item -ItemType Directory -Force data
+Copy-Item config.example.yaml data\config.yaml
 docker compose -f docker-compose.example.yaml up -d
 ~~~
 
@@ -50,8 +60,20 @@ docker exec multiderp multiderp tailnet status alice
 For non-interactive enrollment, point to a read-only secret file:
 
 ~~~text
-docker exec multiderp multiderp tailnet add company --oauth-secret-file /run/secrets/company-oauth
+docker exec multiderp multiderp tailnet add company --oauth-secret-file /run/secrets/company-oauth --tag tag:multiderp-verifier
 docker exec multiderp multiderp tailnet add lab --auth-key-file /run/secrets/lab-auth-key
+~~~
+
+OAuth enrollment requires at least one advertised tag. Repeat `--tag` for
+multiple tags; the order is preserved in the admin request and in the
+verifier configuration. The equivalent YAML entry is:
+
+~~~yaml
+auth:
+  type: oauth
+  client_secret_file: /run/secrets/company-oauth
+  tags:
+    - tag:multiderp-verifier
 ~~~
 
 Web authentication returns a Tailscale login URL. The URL means that login is
@@ -85,6 +107,7 @@ Removing a verifier by hand from YAML is also rejected during reload; use
 Useful operations:
 
 ~~~text
+multiderp version
 multiderp tailnet enable <name>
 multiderp tailnet disable <name>
 multiderp tailnet login <name>
@@ -125,12 +148,13 @@ For example, the Nginx deployment below has this topology:
 
 ~~~text
 DERPMap -> https://derp.example.com:443
-Nginx   -> http://multiderp:8443
+Nginx   -> http://multiderp:3377
 ~~~
 
-The backend port `8443` is internal to the deployment and must not be opened
-to the public Internet. STUN is UDP 3478 and must be published directly or
-through a proxy that supports UDP.
+The default backend port is TCP `3377` and is internal to the deployment; it
+must not be opened to the public Internet. STUN is UDP `3478` and must be
+published directly or through a proxy that supports UDP. The public DERP
+endpoint can still be TCP `443`; it is independent of the backend port.
 
 V1 supports exactly these certificate modes:
 
@@ -163,7 +187,7 @@ server:
 ~~~
 
 The DERPMap entry is `HostName: derp.example.com`, `DERPPort: 443`, and
-`STUNPort: 3478`. There is no separate public 8443 listener in this model.
+`STUNPort: 3478`. There is no separate public backend listener in this model.
 The upstream HTTP-01 challenge listener is enabled on port 80, so public TCP
 80 must reach the same container during issuance and renewal. The example
 container runs as UID/GID 10001; use the
@@ -181,16 +205,26 @@ internal HTTP/DERP backend:
 server:
   hostname: derp.example.com
   derp:
-    listen: ":8443"
+    listen: ":3377"
     stun_listen: ":3478"
     tls_mode: external
     cert_mode: none
 ~~~
 
 The DERPMap still contains only `derp.example.com:443`; clients do not know
-that Nginx forwards to `multiderp:8443`. Keep 8443 on the private container
-network or bind it only to a protected local interface. Do not publish it as a
-second public DERP endpoint.
+that Nginx forwards to the internal `multiderp:3377`. Keep 3377 on the private
+container network or bind it only to a protected local interface. Do not
+publish it as a second public DERP endpoint.
+
+If a deployment explicitly needs another backend port, `:8443` is a valid
+custom choice, but it is not the default and every proxy upstream and port
+mapping must be changed consistently:
+
+~~~yaml
+server:
+  derp:
+    listen: ":8443" # explicit custom backend port
+~~~
 
 DERP is a long-lived bidirectional upgrade stream. Nginx must support
 HTTP/1.1, preserve Upgrade and Connection, disable buffering for /derp, and
@@ -208,7 +242,7 @@ map $http_upgrade $connection_upgrade {
 }
 
 upstream multiderp_backend {
-    server multiderp:8443;
+    server multiderp:3377;
 }
 
 server {
@@ -277,7 +311,7 @@ Server-side hardening only limits the capabilities of the verifier process and
 requires the DERP operator to protect its state directory. Tailnet owners who
 also need control-plane-enforced isolation should use their own Tailscale
 Grants (or an explicitly reviewed legacy ACL) with a dedicated verifier tag,
-such as `tag:derp-verifier`. Verify both that this tag cannot initiate
+such as `tag:multiderp-verifier`. Verify both that this tag cannot initiate
 application access to other devices and that the control plane still exposes
 the nodes that `WhoIsNodeKey` must recognize. Lack of application access does
 not necessarily mean that a node is invisible to control-plane lookups.
@@ -293,6 +327,7 @@ release integration tests.
 With Go's automatic toolchain selection enabled:
 
 ~~~text
+multiderp version
 go test ./...
 go build ./cmd/multiderp
 go build tailscale.com/cmd/derper

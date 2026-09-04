@@ -1,4 +1,4 @@
-module multiderp
+module github.com/lsy223622/MultiDERP
 
 go 1.26.6
 

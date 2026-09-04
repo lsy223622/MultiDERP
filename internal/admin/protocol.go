@@ -12,14 +12,15 @@ import (
 const MaxFrameSize = 64 << 10
 
 type Request struct {
-	Action           string `json:"action"`
-	Name             string `json:"name,omitempty"`
-	AuthType         string `json:"auth_type,omitempty"`
-	ClientSecretFile string `json:"client_secret_file,omitempty"`
-	AuthKeyFile      string `json:"auth_key_file,omitempty"`
-	Required         *bool  `json:"required,omitempty"`
-	Confirm          bool   `json:"confirm,omitempty"`
-	Verbose          bool   `json:"verbose,omitempty"`
+	Action           string   `json:"action"`
+	Name             string   `json:"name,omitempty"`
+	AuthType         string   `json:"auth_type,omitempty"`
+	ClientSecretFile string   `json:"client_secret_file,omitempty"`
+	AuthKeyFile      string   `json:"auth_key_file,omitempty"`
+	Tags             []string `json:"tags,omitempty"`
+	Required         *bool    `json:"required,omitempty"`
+	Confirm          bool     `json:"confirm,omitempty"`
+	Verbose          bool     `json:"verbose,omitempty"`
 }
 
 type Response struct {

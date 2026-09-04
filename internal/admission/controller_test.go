@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"multiderp/internal/verifier"
+	"github.com/lsy223622/MultiDERP/internal/verifier"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
 )

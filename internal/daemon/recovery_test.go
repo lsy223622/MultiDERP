@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"multiderp/internal/config"
+	"github.com/lsy223622/MultiDERP/internal/config"
 )
 
 func TestRecoverPreparedRemoveWithOldConfigDiscardsOperation(t *testing.T) {

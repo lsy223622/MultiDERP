@@ -7,24 +7,27 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
 
-	"multiderp/internal/admission"
-	"multiderp/internal/config"
-	"multiderp/internal/verifier"
+	"github.com/lsy223622/MultiDERP/internal/admission"
+	"github.com/lsy223622/MultiDERP/internal/config"
+	"github.com/lsy223622/MultiDERP/internal/verifier"
 	"tailscale.com/types/key"
 )
 
 type managerFakeVerifier struct {
-	mu        sync.Mutex
-	name      string
-	state     verifier.State
-	hardened  bool
-	logoutErr error
-	closeErr  error
-	closed    bool
+	mu           sync.Mutex
+	name         string
+	tags         []string
+	state        verifier.State
+	hardened     bool
+	onIneligible func()
+	logoutErr    error
+	closeErr     error
+	closed       bool
 }
 
 func (f *managerFakeVerifier) Name() string { return f.name }
@@ -73,6 +76,23 @@ func (f *managerFakeVerifier) Close() error {
 	return err
 }
 
+func (f *managerFakeVerifier) SetIneligibleCallback(callback func()) {
+	f.mu.Lock()
+	f.onIneligible = callback
+	f.mu.Unlock()
+}
+
+func (f *managerFakeVerifier) markIneligible() {
+	f.mu.Lock()
+	f.state = verifier.StateDegraded
+	f.hardened = false
+	callback := f.onIneligible
+	f.mu.Unlock()
+	if callback != nil {
+		callback()
+	}
+}
+
 type managerFakeFactory struct {
 	mu         sync.Mutex
 	verifiers  []*managerFakeVerifier
@@ -85,6 +105,7 @@ func (f *managerFakeFactory) New(_ context.Context, cfg config.TailnetConfig, _ 
 	defer f.mu.Unlock()
 	v := &managerFakeVerifier{
 		name:      cfg.Name,
+		tags:      append([]string(nil), cfg.Auth.Tags...),
 		state:     verifier.StateConfigured,
 		logoutErr: f.nextLogout,
 		closeErr:  f.nextClose,
@@ -147,6 +168,40 @@ func TestManagerReconcileDisableAndEnableIsDenyFirst(t *testing.T) {
 	}
 	if got := manager.EligibleCount(); got != 1 {
 		t.Fatalf("enabled eligible count = %d, want 1", got)
+	}
+}
+
+func TestManagerRemovesVerifierImmediatelyWhenHardeningIsLost(t *testing.T) {
+	factory := &managerFakeFactory{}
+	manager := newTestManager(t, factory)
+	if err := manager.Reconcile(context.Background(), managerConfig(t, "alice")); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if !manager.Pool().Contains("alice") {
+		t.Fatal("verifier was not admitted after successful start")
+	}
+	factory.mu.Lock()
+	verifier := factory.verifiers[0]
+	factory.mu.Unlock()
+	verifier.markIneligible()
+	if manager.Pool().Contains("alice") {
+		t.Fatal("verifier remained admitted after hardening was lost")
+	}
+}
+
+func TestManagerPassesAdvertiseTagsToFactory(t *testing.T) {
+	factory := &managerFakeFactory{}
+	manager := newTestManager(t, factory)
+	cfg := managerConfig(t, "alice")
+	cfg.Tailnets[0].Auth.Tags = []string{"tag:first", "tag:second"}
+	if err := manager.Reconcile(context.Background(), cfg); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	factory.mu.Lock()
+	got := append([]string(nil), factory.verifiers[0].tags...)
+	factory.mu.Unlock()
+	if want := []string{"tag:first", "tag:second"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("factory advertise tags = %#v, want %#v", got, want)
 	}
 }
 

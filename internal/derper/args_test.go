@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"multiderp/internal/config"
+	"github.com/lsy223622/MultiDERP/internal/config"
 )
 
 func testServer(tlsMode string) config.ServerConfig {

@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"multiderp/internal/config"
+	"github.com/lsy223622/MultiDERP/internal/config"
 )
 
 type Process struct {

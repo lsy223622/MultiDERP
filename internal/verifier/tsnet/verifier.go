@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"multiderp/internal/config"
-	"multiderp/internal/verifier"
+	"github.com/lsy223622/MultiDERP/internal/config"
+	"github.com/lsy223622/MultiDERP/internal/verifier"
 
 	"tailscale.com/client/local"
 	"tailscale.com/ipn"
@@ -25,8 +25,11 @@ import (
 
 var ErrUnavailable = errors.New("verifier is not eligible")
 
+const DefaultHardeningValidationInterval = 5 * time.Minute
+
 type Factory struct {
-	PollInterval time.Duration
+	PollInterval      time.Duration
+	HardeningInterval time.Duration
 }
 
 func (f Factory) New(_ context.Context, cfg config.TailnetConfig, stateDir string, logf func(string, ...any)) (verifier.Verifier, error) {
@@ -67,15 +70,20 @@ func (f Factory) New(_ context.Context, cfg config.TailnetConfig, stateDir strin
 	if interval <= 0 {
 		interval = 2 * time.Second
 	}
+	hardeningInterval := f.HardeningInterval
+	if hardeningInterval <= 0 {
+		hardeningInterval = DefaultHardeningValidationInterval
+	}
 	return &TSNetVerifier{
-		name:         cfg.Name,
-		authType:     cfg.Auth.Type,
-		hostname:     hostname,
-		stateDir:     stateDir,
-		server:       s,
-		logf:         logf,
-		pollInterval: interval,
-		state:        verifier.StateConfigured,
+		name:              cfg.Name,
+		authType:          cfg.Auth.Type,
+		hostname:          hostname,
+		stateDir:          stateDir,
+		server:            s,
+		logf:              logf,
+		pollInterval:      interval,
+		hardeningInterval: hardeningInterval,
+		state:             verifier.StateConfigured,
 	}, nil
 }
 
@@ -135,27 +143,30 @@ func ensureStateFilePrivate(stateDir string) error {
 }
 
 type TSNetVerifier struct {
-	lifecycleMu   sync.Mutex
-	mu            sync.RWMutex
-	name          string
-	authType      string
-	hostname      string
-	stateDir      string
-	server        *tailscaletsnet.Server
-	lc            *local.Client
-	state         verifier.State
-	hardening     bool
-	authURL       string
-	lastError     string
-	status        *ipnstate.Status
-	logf          func(string, ...any)
-	pollInterval  time.Duration
-	ctx           context.Context
-	cancel        context.CancelFunc
-	started       bool
-	serverStarted bool
-	retryDelay    time.Duration
-	retryAt       time.Time
+	lifecycleMu       sync.Mutex
+	mu                sync.RWMutex
+	name              string
+	authType          string
+	hostname          string
+	stateDir          string
+	server            *tailscaletsnet.Server
+	lc                *local.Client
+	state             verifier.State
+	hardening         bool
+	authURL           string
+	lastError         string
+	status            *ipnstate.Status
+	backendReady      bool
+	logf              func(string, ...any)
+	pollInterval      time.Duration
+	hardeningInterval time.Duration
+	ctx               context.Context
+	cancel            context.CancelFunc
+	started           bool
+	serverStarted     bool
+	retryDelay        time.Duration
+	retryAt           time.Time
+	onIneligible      func()
 }
 
 func (v *TSNetVerifier) Name() string { return v.name }
@@ -213,15 +224,21 @@ func (v *TSNetVerifier) Start(ctx context.Context) error {
 }
 
 func (v *TSNetVerifier) watch(ctx context.Context) {
-	ticker := time.NewTicker(v.pollInterval)
-	defer ticker.Stop()
+	statusTicker := time.NewTicker(v.pollInterval)
+	defer statusTicker.Stop()
+	hardeningTicker := time.NewTicker(v.hardeningInterval)
+	defer hardeningTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-statusTicker.C:
 			if err := v.reconcile(ctx); err != nil {
 				v.logf("WARN [%s] verifier recovery: %v", v.name, err)
+			}
+		case <-hardeningTicker.C:
+			if err := v.validateHardening(ctx); err != nil {
+				v.logf("WARN [%s] periodic hardening validation: %v", v.name, err)
 			}
 		}
 	}
@@ -239,6 +256,7 @@ func (v *TSNetVerifier) reconcileLocked(ctx context.Context) error {
 	hardened := v.hardening
 	state := v.state
 	retryAt := v.retryAt
+	previouslyReady := v.backendReady
 	v.mu.RUnlock()
 	if state == verifier.StateStopping {
 		return errors.New("verifier is stopping")
@@ -251,12 +269,15 @@ func (v *TSNetVerifier) reconcileLocked(ctx context.Context) error {
 	}
 	status, err := lc.Status(ctx)
 	if err != nil {
+		v.setBackendReady(false)
 		return v.failureWithRetry(verifier.StateDegraded, err)
 	}
-	v.mu.Lock()
-	v.status = status
-	v.authURL = status.AuthURL
-	v.mu.Unlock()
+	if status == nil {
+		v.setBackendReady(false)
+		return v.failureWithRetry(verifier.StateDegraded, errors.New("verifier status is nil"))
+	}
+	backendRecovered := !previouslyReady && status.BackendState == ipn.Running.String() && status.HaveNodeKey
+	v.recordStatus(status)
 	if status.BackendState == ipn.NeedsLogin.String() || status.BackendState == ipn.NeedsMachineAuth.String() || !status.HaveNodeKey {
 		hardened = false
 		v.setHardening(false)
@@ -268,10 +289,7 @@ func (v *TSNetVerifier) reconcileLocked(ctx context.Context) error {
 			if err != nil {
 				return v.failureWithRetry(verifier.StateDegraded, fmt.Errorf("read login status: %w", err))
 			}
-			v.mu.Lock()
-			v.status = status
-			v.authURL = status.AuthURL
-			v.mu.Unlock()
+			v.recordStatus(status)
 			if status.BackendState != ipn.NeedsLogin.String() && status.HaveNodeKey {
 				// The login completed while the request was being prepared. Continue
 				// through the normal running and hardening checks below.
@@ -291,7 +309,7 @@ func (v *TSNetVerifier) reconcileLocked(ctx context.Context) error {
 		v.setState(verifier.StateConnected)
 		return nil
 	}
-	if state == verifier.StateDegraded && !retryAt.IsZero() && time.Now().Before(retryAt) {
+	if state == verifier.StateDegraded && !retryAt.IsZero() && time.Now().Before(retryAt) && !backendRecovered {
 		return nil
 	}
 	v.setState(verifier.StateHardening)
@@ -301,24 +319,105 @@ func (v *TSNetVerifier) reconcileLocked(ctx context.Context) error {
 	}
 	status, err = lc.Status(ctx)
 	if err != nil {
+		v.setBackendReady(false)
 		v.setHardening(false)
 		return v.failureWithRetry(verifier.StateDegraded, err)
+	}
+	if status == nil {
+		v.setBackendReady(false)
+		v.setHardening(false)
+		return v.failureWithRetry(verifier.StateDegraded, errors.New("verifier status is nil after hardening"))
 	}
 	if status.BackendState != ipn.Running.String() || !status.HaveNodeKey {
 		v.setHardening(false)
 		return v.failureWithRetry(verifier.StateDegraded, errors.New("verifier stopped during hardening"))
 	}
+	v.markConnected(status)
+	v.logf("INFO [%s] hardening verified", v.name)
+	return nil
+}
+
+func (v *TSNetVerifier) validateHardening(ctx context.Context) error {
+	v.lifecycleMu.Lock()
+	defer v.lifecycleMu.Unlock()
+	v.mu.RLock()
+	lc := v.lc
+	active := v.state == verifier.StateConnected && v.hardening
+	v.mu.RUnlock()
+	if !active {
+		return nil
+	}
+	if lc == nil {
+		return v.failClosedAndRepair(ctx, nil, errors.New("local client is not initialized"))
+	}
+	prefs, err := lc.GetPrefs(ctx)
+	if err != nil {
+		return v.failClosedAndRepair(ctx, lc, wrapCompatibilityError("GetPrefs", err, "read verifier prefs"))
+	}
+	if err := ValidateVerifierPrefs(prefs); err != nil {
+		return v.failClosedAndRepair(ctx, lc, fmt.Errorf("verify verifier prefs: %w", err))
+	}
+	serve, err := lc.GetServeConfig(ctx)
+	if err != nil {
+		return v.failClosedAndRepair(ctx, lc, wrapCompatibilityError("GetServeConfig", err, "read serve and funnel config"))
+	}
+	if !serveConfigEmpty(serve) {
+		return v.failClosedAndRepair(ctx, lc, errors.New("serve and funnel config is not empty"))
+	}
+	return nil
+}
+
+func (v *TSNetVerifier) failClosedAndRepair(ctx context.Context, lc *local.Client, reason error) error {
+	v.setFailure(verifier.StateDegraded, reason)
+	v.logf("WARN [%s] hardening drift detected; verifier is temporarily ineligible", v.name)
+	if lc == nil {
+		return v.failureWithRetry(verifier.StateDegraded, reason)
+	}
+	if err := ApplyAndValidate(ctx, lc); err != nil {
+		return v.failureWithRetry(verifier.StateDegraded, fmt.Errorf("repair hardening: %w", err))
+	}
+	status, err := lc.Status(ctx)
+	if err != nil {
+		v.setBackendReady(false)
+		return v.failureWithRetry(verifier.StateDegraded, fmt.Errorf("read verifier status after hardening repair: %w", err))
+	}
+	if status == nil {
+		v.setBackendReady(false)
+		return v.failureWithRetry(verifier.StateDegraded, errors.New("verifier status is nil after hardening repair"))
+	}
+	if status.BackendState != ipn.Running.String() || !status.HaveNodeKey {
+		return v.failureWithRetry(verifier.StateDegraded, errors.New("verifier stopped during hardening repair"))
+	}
+	v.markConnected(status)
+	v.logf("INFO [%s] hardening repaired and verified", v.name)
+	return nil
+}
+
+func (v *TSNetVerifier) markConnected(status *ipnstate.Status) {
 	v.mu.Lock()
 	v.status = status
 	v.authURL = status.AuthURL
+	v.backendReady = status.BackendState == ipn.Running.String() && status.HaveNodeKey
 	v.lastError = ""
 	v.hardening = true
 	v.state = verifier.StateConnected
 	v.retryDelay = time.Second
 	v.retryAt = time.Time{}
 	v.mu.Unlock()
-	v.logf("INFO [%s] hardening verified", v.name)
-	return nil
+}
+
+func (v *TSNetVerifier) recordStatus(status *ipnstate.Status) {
+	v.mu.Lock()
+	v.status = status
+	v.authURL = status.AuthURL
+	v.backendReady = status.BackendState == ipn.Running.String() && status.HaveNodeKey
+	v.mu.Unlock()
+}
+
+func (v *TSNetVerifier) setBackendReady(value bool) {
+	v.mu.Lock()
+	v.backendReady = value
+	v.mu.Unlock()
 }
 
 func (v *TSNetVerifier) Login(ctx context.Context) (string, error) {
@@ -340,9 +439,8 @@ func (v *TSNetVerifier) Login(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read login status: %w", err)
 	}
+	v.recordStatus(status)
 	v.mu.Lock()
-	v.status = status
-	v.authURL = status.AuthURL
 	changed := v.state != verifier.StateWaitingForLogin
 	v.state = verifier.StateWaitingForLogin
 	v.hardening = false
@@ -352,6 +450,11 @@ func (v *TSNetVerifier) Login(ctx context.Context) (string, error) {
 	v.mu.Unlock()
 	if changed {
 		v.logf("INFO [%s] verifier state: %s", v.name, verifier.StateWaitingForLogin.String())
+	}
+	if status.BackendState == ipn.Running.String() && status.HaveNodeKey {
+		if err := v.reconcileLocked(ctx); err != nil {
+			return "", fmt.Errorf("harden verifier after login: %w", err)
+		}
 	}
 	return v.AuthURL(), nil
 }
@@ -399,6 +502,12 @@ func (v *TSNetVerifier) AuthURL() string {
 	return v.authURL
 }
 
+func (v *TSNetVerifier) SetIneligibleCallback(callback func()) {
+	v.mu.Lock()
+	v.onIneligible = callback
+	v.mu.Unlock()
+}
+
 func (v *TSNetVerifier) Logout(ctx context.Context) error {
 	v.lifecycleMu.Lock()
 	defer v.lifecycleMu.Unlock()
@@ -413,6 +522,7 @@ func (v *TSNetVerifier) Logout(ctx context.Context) error {
 	}
 	v.mu.Lock()
 	v.hardening = false
+	v.backendReady = false
 	changed := v.state != verifier.StateConfigured
 	v.state = verifier.StateConfigured
 	v.lastError = ""
@@ -494,6 +604,7 @@ func (v *TSNetVerifier) Close() error {
 	changed := v.state != verifier.StateStopping
 	v.state = verifier.StateStopping
 	v.hardening = false
+	v.backendReady = false
 	server := v.server
 	serverStarted := v.serverStarted
 	v.serverStarted = false
@@ -527,9 +638,17 @@ func (v *TSNetVerifier) setState(state verifier.State) {
 }
 
 func (v *TSNetVerifier) setHardening(value bool) {
+	var callback func()
 	v.mu.Lock()
+	wasEligible := v.state == verifier.StateConnected && v.hardening
 	v.hardening = value
+	if !value && wasEligible {
+		callback = v.onIneligible
+	}
 	v.mu.Unlock()
+	if callback != nil {
+		callback()
+	}
 }
 
 func (v *TSNetVerifier) setWaitingForLogin() {
@@ -581,10 +700,15 @@ func (v *TSNetVerifier) scheduleRetry() {
 }
 
 func (v *TSNetVerifier) setFailure(state verifier.State, err error) error {
+	var callback func()
 	v.mu.Lock()
 	changed := v.state != state
+	wasEligible := v.state == verifier.StateConnected && v.hardening
 	v.state = state
 	v.hardening = false
+	if wasEligible {
+		callback = v.onIneligible
+	}
 	if err != nil {
 		v.lastError = err.Error()
 	}
@@ -593,6 +717,9 @@ func (v *TSNetVerifier) setFailure(state verifier.State, err error) error {
 		v.retryDelay = time.Second
 	}
 	v.mu.Unlock()
+	if callback != nil {
+		callback()
+	}
 	if changed {
 		v.logf("INFO [%s] verifier state: %s", v.name, state.String())
 	}

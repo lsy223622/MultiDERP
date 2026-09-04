@@ -6,12 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 )
 
 func TestFrameRoundTrip(t *testing.T) {
-	want := Request{Action: "tailnet.add", Name: "alice", AuthType: "web", Confirm: true}
+	want := Request{Action: "tailnet.add", Name: "alice", AuthType: "web", Tags: []string{"tag:alice", "tag:relay"}, Confirm: true}
 	var buffer bytes.Buffer
 	if err := WriteFrame(&buffer, want); err != nil {
 		t.Fatalf("WriteFrame() error = %v", err)
@@ -20,7 +21,7 @@ func TestFrameRoundTrip(t *testing.T) {
 	if err := ReadFrame(&buffer, &got); err != nil {
 		t.Fatalf("ReadFrame() error = %v", err)
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ReadFrame() = %#v, want %#v", got, want)
 	}
 }

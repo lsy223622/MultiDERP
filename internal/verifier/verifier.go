@@ -3,7 +3,7 @@ package verifier
 import (
 	"context"
 
-	"multiderp/internal/config"
+	"github.com/lsy223622/MultiDERP/internal/config"
 	"tailscale.com/types/key"
 )
 
@@ -64,6 +64,10 @@ type LoginController interface {
 
 type LogoutController interface {
 	Logout(context.Context) error
+}
+
+type IneligibleCallbackSetter interface {
+	SetIneligibleCallback(func())
 }
 
 type Factory interface {

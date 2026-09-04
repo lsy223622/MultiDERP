@@ -2,16 +2,24 @@ package tsnet
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
-	"multiderp/internal/config"
-	"multiderp/internal/verifier"
+	"github.com/lsy223622/MultiDERP/internal/config"
+	"github.com/lsy223622/MultiDERP/internal/verifier"
+	"tailscale.com/client/local"
 	"tailscale.com/drive"
 	"tailscale.com/ipn"
+	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/types/opt"
 )
 
@@ -102,6 +110,12 @@ func TestFactoryDoesNotReconsumeAuthKeyForExistingState(t *testing.T) {
 	if concrete.server.AuthKey != "" {
 		t.Fatal("Factory.New() loaded an auth key despite existing enrollment state")
 	}
+	if concrete.pollInterval != 2*time.Second {
+		t.Fatalf("default lifecycle poll interval = %v, want %v", concrete.pollInterval, 2*time.Second)
+	}
+	if concrete.hardeningInterval != DefaultHardeningValidationInterval {
+		t.Fatalf("default hardening interval = %v, want %v", concrete.hardeningInterval, DefaultHardeningValidationInterval)
+	}
 }
 
 func TestFactoryRequiresAuthKeyWithoutExistingState(t *testing.T) {
@@ -112,6 +126,194 @@ func TestFactoryRequiresAuthKeyWithoutExistingState(t *testing.T) {
 	}, stateDir, nil)
 	if err == nil || !strings.Contains(err.Error(), "authentication secret metadata") {
 		t.Fatalf("Factory.New() error = %v, want missing-auth-key error", err)
+	}
+}
+
+func TestFactoryPassesAuthKeyTagsToTSNet(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stateDir, "tailscaled.state"), []byte("existing state"), 0o600); err != nil {
+		t.Fatalf("write existing state: %v", err)
+	}
+	v, err := (Factory{}).New(context.Background(), config.TailnetConfig{
+		Name: "lab",
+		Auth: config.AuthConfig{Type: "auth_key", AuthKeyFile: filepath.Join(stateDir, "missing-auth-key"), Tags: []string{"tag:one", "tag:two"}},
+	}, stateDir, nil)
+	if err != nil {
+		t.Fatalf("Factory.New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = v.Close() })
+	concrete := v.(*TSNetVerifier)
+	if want := []string{"tag:one", "tag:two"}; !reflect.DeepEqual(concrete.server.AdvertiseTags, want) {
+		t.Fatalf("AdvertiseTags = %#v, want %#v", concrete.server.AdvertiseTags, want)
+	}
+}
+
+type hardeningRoundTripper struct {
+	mu       sync.Mutex
+	requests []string
+	respond  func(method, path string) (int, string)
+}
+
+func (r *hardeningRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.mu.Lock()
+	r.requests = append(r.requests, req.Method+" "+req.URL.Path)
+	r.mu.Unlock()
+	status, body := r.respond(req.Method, req.URL.Path)
+	return &http.Response{
+		StatusCode: status,
+		Status:     http.StatusText(status),
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Request:    req,
+	}, nil
+}
+
+func TestPeriodicHardeningValidationReadsOnlyOnHealthyPath(t *testing.T) {
+	prefsJSON, err := json.Marshal(BaselinePrefs().Prefs)
+	if err != nil {
+		t.Fatalf("marshal baseline prefs: %v", err)
+	}
+	transport := &hardeningRoundTripper{respond: func(method, path string) (int, string) {
+		if method != http.MethodGet {
+			return http.StatusMethodNotAllowed, "unexpected write"
+		}
+		switch path {
+		case "/localapi/v0/prefs":
+			return http.StatusOK, string(prefsJSON)
+		case "/localapi/v0/serve-config":
+			return http.StatusOK, "{}"
+		default:
+			return http.StatusNotFound, "unexpected path"
+		}
+	}}
+	v := &TSNetVerifier{lc: &local.Client{Transport: transport, OmitAuth: true}, state: verifier.StateConnected, hardening: true, logf: func(string, ...any) {}}
+	if err := v.validateHardening(context.Background()); err != nil {
+		t.Fatalf("validateHardening() error = %v", err)
+	}
+	transport.mu.Lock()
+	got := append([]string(nil), transport.requests...)
+	transport.mu.Unlock()
+	want := []string{"GET /localapi/v0/prefs", "GET /localapi/v0/serve-config"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("healthy validation requests = %#v, want %#v", got, want)
+	}
+}
+
+func TestLoginCompletionAppliesHardeningImmediately(t *testing.T) {
+	prefsJSON, err := json.Marshal(BaselinePrefs().Prefs)
+	if err != nil {
+		t.Fatalf("marshal baseline prefs: %v", err)
+	}
+	statusJSON, err := json.Marshal(ipnstate.Status{BackendState: ipn.Running.String(), HaveNodeKey: true})
+	if err != nil {
+		t.Fatalf("marshal running status: %v", err)
+	}
+	transport := &hardeningRoundTripper{respond: func(method, path string) (int, string) {
+		switch method + " " + path {
+		case "POST /localapi/v0/login-interactive":
+			return http.StatusNoContent, ""
+		case "GET /localapi/v0/status":
+			return http.StatusOK, string(statusJSON)
+		case "PATCH /localapi/v0/prefs":
+			return http.StatusOK, string(prefsJSON)
+		case "GET /localapi/v0/prefs":
+			return http.StatusOK, string(prefsJSON)
+		case "POST /localapi/v0/serve-config":
+			return http.StatusOK, "{}"
+		case "GET /localapi/v0/serve-config":
+			return http.StatusOK, "{}"
+		default:
+			return http.StatusNotFound, "unexpected path"
+		}
+	}}
+	v := &TSNetVerifier{
+		authType: "web",
+		lc:       &local.Client{Transport: transport, OmitAuth: true},
+		logf:     func(string, ...any) {},
+	}
+	if _, err := v.Login(context.Background()); err != nil {
+		t.Fatalf("Login() error = %v", err)
+	}
+	if v.State() != verifier.StateConnected || !v.statusSnapshot(false).HardeningVerified {
+		t.Fatalf("state after completed login = %s, status = %#v, want connected and hardened", v.State(), v.statusSnapshot(false))
+	}
+	transport.mu.Lock()
+	got := append([]string(nil), transport.requests...)
+	transport.mu.Unlock()
+	want := []string{
+		"POST /localapi/v0/login-interactive",
+		"GET /localapi/v0/status",
+		"GET /localapi/v0/status",
+		"PATCH /localapi/v0/prefs",
+		"GET /localapi/v0/prefs",
+		"POST /localapi/v0/serve-config",
+		"GET /localapi/v0/serve-config",
+		"GET /localapi/v0/status",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("completed-login requests = %#v, want immediate hardening requests %#v", got, want)
+	}
+}
+
+func TestPeriodicHardeningDriftFailsClosedBeforeRepair(t *testing.T) {
+	prefsJSON, err := json.Marshal(BaselinePrefs().Prefs)
+	if err != nil {
+		t.Fatalf("marshal baseline prefs: %v", err)
+	}
+	unsafe := BaselinePrefs().Prefs
+	unsafe.RouteAll = true
+	unsafeJSON, err := json.Marshal(unsafe)
+	if err != nil {
+		t.Fatalf("marshal unsafe prefs: %v", err)
+	}
+	transport := &hardeningRoundTripper{}
+	transport.respond = func(method, path string) (int, string) {
+		switch method + " " + path {
+		case "GET /localapi/v0/prefs":
+			transport.mu.Lock()
+			count := len(transport.requests)
+			transport.mu.Unlock()
+			if count == 1 {
+				return http.StatusOK, string(unsafeJSON)
+			}
+			return http.StatusOK, string(prefsJSON)
+		case "PATCH /localapi/v0/prefs":
+			return http.StatusOK, string(prefsJSON)
+		case "POST /localapi/v0/serve-config":
+			return http.StatusOK, "{}"
+		case "GET /localapi/v0/serve-config":
+			return http.StatusOK, "{}"
+		case "GET /localapi/v0/status":
+			status, marshalErr := json.Marshal(ipnstate.Status{BackendState: ipn.Running.String(), HaveNodeKey: true})
+			if marshalErr != nil {
+				return http.StatusInternalServerError, marshalErr.Error()
+			}
+			return http.StatusOK, string(status)
+		default:
+			return http.StatusNotFound, "unexpected path"
+		}
+	}
+	callbackAt := -1
+	v := &TSNetVerifier{lc: &local.Client{Transport: transport, OmitAuth: true}, state: verifier.StateConnected, hardening: true, logf: func(string, ...any) {}}
+	v.onIneligible = func() {
+		transport.mu.Lock()
+		callbackAt = len(transport.requests)
+		transport.mu.Unlock()
+	}
+	if err := v.validateHardening(context.Background()); err != nil {
+		t.Fatalf("validateHardening() error = %v", err)
+	}
+	if v.State() != verifier.StateConnected || !v.statusSnapshot(false).HardeningVerified {
+		t.Fatalf("state after repair = %s, status = %#v, want connected and hardened", v.State(), v.statusSnapshot(false))
+	}
+	transport.mu.Lock()
+	got := append([]string(nil), transport.requests...)
+	transport.mu.Unlock()
+	if callbackAt != 1 {
+		t.Fatalf("ineligible callback request index = %d, want 1", callbackAt)
+	}
+	if len(got) != 6 || got[0] != "GET /localapi/v0/prefs" || got[1] != "PATCH /localapi/v0/prefs" {
+		t.Fatalf("drift repair requests = %#v, want read followed by repair writes", got)
 	}
 }
 

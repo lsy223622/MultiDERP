@@ -11,10 +11,10 @@ import (
 	"strings"
 	"syscall"
 
-	"multiderp/internal/admin"
-	"multiderp/internal/config"
-	"multiderp/internal/daemon"
-	"multiderp/internal/verifier"
+	"github.com/lsy223622/MultiDERP/internal/admin"
+	"github.com/lsy223622/MultiDERP/internal/config"
+	"github.com/lsy223622/MultiDERP/internal/daemon"
+	"github.com/lsy223622/MultiDERP/internal/verifier"
 )
 
 func main() {
@@ -25,6 +25,14 @@ func run(args []string) int {
 	if len(args) == 0 {
 		usage()
 		return 2
+	}
+	if args[0] == "version" {
+		if len(args) != 1 {
+			usage()
+			return 2
+		}
+		printVersion()
+		return 0
 	}
 	if args[0] == "serve" {
 		return runServe(args[1:])
@@ -190,6 +198,8 @@ func addTailnetCLI(call callFunc, args []string) int {
 	flags.SetOutput(os.Stderr)
 	oauthFile := flags.String("oauth-secret-file", "", "Tailscale OAuth client secret file")
 	authKeyFile := flags.String("auth-key-file", "", "Tailscale auth key file")
+	var tags stringListFlag
+	flags.Var(&tags, "tag", "Tailscale tag to advertise (repeatable)")
 	required := flags.Bool("required", false, "mark this verifier as required for readiness")
 	if err := flags.Parse(orderedArgs); err != nil {
 		return 2
@@ -211,6 +221,7 @@ func addTailnetCLI(call callFunc, args []string) int {
 		AuthType:         authType,
 		ClientSecretFile: *oauthFile,
 		AuthKeyFile:      *authKeyFile,
+		Tags:             append([]string(nil), tags...),
 		Required:         required,
 	})
 	if !ok {
@@ -218,6 +229,17 @@ func addTailnetCLI(call callFunc, args []string) int {
 	}
 	printAuthURL(response)
 	return 0
+}
+
+type stringListFlag []string
+
+func (f *stringListFlag) String() string {
+	return strings.Join(*f, ",")
+}
+
+func (f *stringListFlag) Set(value string) error {
+	*f = append(*f, value)
+	return nil
 }
 
 func orderTailnetAddArgs(args []string) ([]string, error) {
@@ -229,15 +251,15 @@ func orderTailnetAddArgs(args []string) ([]string, error) {
 			positionals = append(positionals, args[i+1:]...)
 			break
 		}
-		if arg == "--oauth-secret-file" || arg == "--auth-key-file" {
+		if arg == "--oauth-secret-file" || arg == "--auth-key-file" || arg == "--tag" {
 			if i+1 >= len(args) {
-				return nil, fmt.Errorf("%s requires a path", arg)
+				return nil, fmt.Errorf("%s requires a value", arg)
 			}
 			flags = append(flags, arg, args[i+1])
 			i++
 			continue
 		}
-		if strings.HasPrefix(arg, "--oauth-secret-file=") || strings.HasPrefix(arg, "--auth-key-file=") ||
+		if strings.HasPrefix(arg, "--oauth-secret-file=") || strings.HasPrefix(arg, "--auth-key-file=") || strings.HasPrefix(arg, "--tag=") ||
 			arg == "--required" || strings.HasPrefix(arg, "--required=") || strings.HasPrefix(arg, "-") {
 			flags = append(flags, arg)
 			continue
@@ -380,6 +402,7 @@ func boolExit(ok bool) int {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "Usage:")
+	fmt.Fprintln(os.Stderr, "  multiderp version")
 	fmt.Fprintln(os.Stderr, "  multiderp serve [--config path] [--derper binary]")
 	fmt.Fprintln(os.Stderr, "  multiderp [--socket path] tailnet list|status [--verbose]|add|enable|disable|login|logout|reset|remove")
 	fmt.Fprintln(os.Stderr, "  multiderp [--socket path] orphan list|purge <orphan-id> [--yes]")

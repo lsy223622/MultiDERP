@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -123,6 +124,84 @@ func TestValidateAuthenticationMatrix(t *testing.T) {
 				t.Fatalf("Validate() error = %v, want substring %q", err, tt.match)
 			}
 		})
+	}
+}
+
+func TestValidateOAuthRequiresAdvertiseTags(t *testing.T) {
+	cfg := Default()
+	cfg.Server.Hostname = "derp.example.com"
+	cfg.Tailnets = []TailnetConfig{tailnet("oauth", "client-secret", "")}
+	cfg.Normalize()
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "oauth authkeys require --advertise-tags") {
+		t.Fatalf("Validate() error = %v, want OAuth advertise-tags error", err)
+	}
+}
+
+func TestNormalizeAndValidateAdvertiseTags(t *testing.T) {
+	cfg := Default()
+	cfg.Server.Hostname = "derp.example.com"
+	item := tailnet("oauth", "client-secret", "")
+	item.Auth.Tags = []string{" tag:one ", "tag:two"}
+	cfg.Tailnets = []TailnetConfig{item}
+	cfg.Normalize()
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if want := []string{"tag:one", "tag:two"}; !reflect.DeepEqual(cfg.Tailnets[0].Auth.Tags, want) {
+		t.Fatalf("normalized tags = %#v, want %#v", cfg.Tailnets[0].Auth.Tags, want)
+	}
+}
+
+func TestParseLoadsOAuthAdvertiseTags(t *testing.T) {
+	result, err := Parse([]byte(`version: 1
+server:
+  hostname: derp.example.com
+tailnets:
+  - name: company
+    auth:
+      type: oauth
+      client_secret_file: /run/secrets/company-oauth
+      tags:
+        - tag:one
+        - tag:two
+`))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if want := []string{"tag:one", "tag:two"}; !reflect.DeepEqual(result.Config.Tailnets[0].Auth.Tags, want) {
+		t.Fatalf("parsed OAuth tags = %#v, want %#v", result.Config.Tailnets[0].Auth.Tags, want)
+	}
+}
+
+func TestValidateRejectsInvalidOrDuplicateAdvertiseTags(t *testing.T) {
+	for name, tags := range map[string][]string{
+		"missing prefix":    {"verifier"},
+		"invalid character": {"tag:verifier.example"},
+		"empty":             {"   "},
+		"duplicate":         {"tag:verifier", " tag:verifier "},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Server.Hostname = "derp.example.com"
+			item := tailnet("auth_key", "", "key")
+			item.Auth.Tags = tags
+			cfg.Tailnets = []TailnetConfig{item}
+			cfg.Normalize()
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("Validate() accepted invalid advertise tags")
+			}
+		})
+	}
+}
+
+func TestValidateDoesNotRequireTagsForWeb(t *testing.T) {
+	cfg := Default()
+	cfg.Server.Hostname = "derp.example.com"
+	cfg.Tailnets = []TailnetConfig{tailnet("web", "", "")}
+	cfg.Normalize()
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want web config without tags to be valid", err)
 	}
 }
 

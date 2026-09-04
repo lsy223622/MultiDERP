@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+	"tailscale.com/tailcfg"
 )
 
 const CurrentVersion = 1
@@ -140,6 +141,9 @@ func (c *Config) Normalize() {
 	for i := range c.Tailnets {
 		if c.Tailnets[i].Hostname == "" && c.Tailnets[i].Name != "" {
 			c.Tailnets[i].Hostname = "multiderp-" + c.Tailnets[i].Name
+		}
+		for j := range c.Tailnets[i].Auth.Tags {
+			c.Tailnets[i].Auth.Tags[j] = strings.TrimSpace(c.Tailnets[i].Auth.Tags[j])
 		}
 	}
 }
@@ -350,6 +354,9 @@ func (c Config) Validate() error {
 			if t.Auth.AuthKeyFile != "" {
 				return fmt.Errorf("%s.auth: oauth authentication cannot specify auth_key_file", path)
 			}
+			if len(t.Auth.Tags) == 0 {
+				return fmt.Errorf("%s.auth: oauth authkeys require --advertise-tags", path)
+			}
 		case "auth_key":
 			if strings.TrimSpace(t.Auth.AuthKeyFile) == "" {
 				return fmt.Errorf("%s.auth.auth_key_file is required for auth_key authentication", path)
@@ -360,10 +367,19 @@ func (c Config) Validate() error {
 		default:
 			return fmt.Errorf("%s.auth.type: unsupported value %q; expected web, oauth, or auth_key", path, t.Auth.Type)
 		}
-		for j, tag := range t.Auth.Tags {
-			if strings.TrimSpace(tag) == "" {
+		seenTags := make(map[string]struct{}, len(t.Auth.Tags))
+		for j, rawTag := range t.Auth.Tags {
+			tag := strings.TrimSpace(rawTag)
+			if tag == "" {
 				return fmt.Errorf("%s.auth.tags[%d] must not be empty", path, j)
 			}
+			if err := tailcfg.CheckTag(tag); err != nil {
+				return fmt.Errorf("%s.auth.tags[%d]: %w", path, j, err)
+			}
+			if _, ok := seenTags[tag]; ok {
+				return fmt.Errorf("%s.auth.tags[%d] duplicates tag %q", path, j, tag)
+			}
+			seenTags[tag] = struct{}{}
 		}
 	}
 	return nil

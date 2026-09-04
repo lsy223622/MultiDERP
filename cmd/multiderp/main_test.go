@@ -5,8 +5,8 @@ import (
 	"reflect"
 	"testing"
 
-	"multiderp/internal/admin"
-	"multiderp/internal/verifier"
+	"github.com/lsy223622/MultiDERP/internal/admin"
+	"github.com/lsy223622/MultiDERP/internal/verifier"
 )
 
 func TestOrderTailnetAddArgsAllowsNameBeforeFlags(t *testing.T) {
@@ -17,6 +17,27 @@ func TestOrderTailnetAddArgsAllowsNameBeforeFlags(t *testing.T) {
 	want := []string{"--oauth-secret-file", "/run/secrets/alice", "--required", "alice"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("orderTailnetAddArgs() = %#v, want %#v", got, want)
+	}
+}
+
+func TestTailnetAddForwardsOAuthTagsInOrder(t *testing.T) {
+	var got admin.Request
+	code := runTailnetCLI(func(request admin.Request) (admin.Response, bool) {
+		got = request
+		return admin.Success("", nil), true
+	}, []string{"add", "company", "--oauth-secret-file", "/run/secrets/company", "--tag", "tag:first", "--tag=tag:second"})
+	if code != 0 {
+		t.Fatalf("runTailnetCLI() exit code = %d, want 0", code)
+	}
+	wantTags := []string{"tag:first", "tag:second"}
+	if got.Action != "tailnet.add" || got.Name != "company" || got.AuthType != "oauth" || got.ClientSecretFile != "/run/secrets/company" || !reflect.DeepEqual(got.Tags, wantTags) {
+		t.Fatalf("OAuth tailnet add request = %#v, want tags %#v", got, wantTags)
+	}
+}
+
+func TestOrderTailnetAddArgsRejectsMissingTag(t *testing.T) {
+	if _, err := orderTailnetAddArgs([]string{"company", "--tag"}); err == nil {
+		t.Fatal("orderTailnetAddArgs() accepted a missing tag value")
 	}
 }
 

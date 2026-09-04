@@ -15,13 +15,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"multiderp/internal/admin"
-	"multiderp/internal/admission"
-	"multiderp/internal/config"
-	"multiderp/internal/derper"
-	"multiderp/internal/health"
-	"multiderp/internal/logging"
-	"multiderp/internal/verifier"
+	"github.com/lsy223622/MultiDERP/internal/admin"
+	"github.com/lsy223622/MultiDERP/internal/admission"
+	"github.com/lsy223622/MultiDERP/internal/config"
+	"github.com/lsy223622/MultiDERP/internal/derper"
+	"github.com/lsy223622/MultiDERP/internal/health"
+	"github.com/lsy223622/MultiDERP/internal/logging"
+	"github.com/lsy223622/MultiDERP/internal/verifier"
 )
 
 type Options struct {
@@ -511,7 +511,7 @@ func (d *Daemon) addTailnet(ctx context.Context, request admin.Request) admin.Re
 	if authType == "" {
 		authType = "web"
 	}
-	item := config.TailnetConfig{Name: request.Name, Auth: config.AuthConfig{Type: authType, ClientSecretFile: request.ClientSecretFile, AuthKeyFile: request.AuthKeyFile}}
+	item := config.TailnetConfig{Name: request.Name, Auth: config.AuthConfig{Type: authType, ClientSecretFile: request.ClientSecretFile, AuthKeyFile: request.AuthKeyFile, Tags: append([]string(nil), request.Tags...)}}
 	if request.Required != nil {
 		item.Required = *request.Required
 	}

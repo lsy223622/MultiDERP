@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"multiderp/internal/config"
+	"github.com/lsy223622/MultiDERP/internal/config"
 )
 
 func BuildArgs(server config.ServerConfig, admissionAddress, keyPath string) ([]string, error) {

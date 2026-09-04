@@ -13,11 +13,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lsy223622/MultiDERP/internal/admission"
+	"github.com/lsy223622/MultiDERP/internal/config"
+	"github.com/lsy223622/MultiDERP/internal/verifier"
+	verifiertsnet "github.com/lsy223622/MultiDERP/internal/verifier/tsnet"
 	"gopkg.in/yaml.v3"
-	"multiderp/internal/admission"
-	"multiderp/internal/config"
-	"multiderp/internal/verifier"
-	verifiertsnet "multiderp/internal/verifier/tsnet"
 )
 
 type managedVerifier struct {
@@ -246,16 +246,30 @@ func (m *VerifierManager) startRecord(ctx context.Context, name string, record *
 			if err != nil {
 				_ = v.Close()
 			} else {
+				accepted := false
 				m.mu.Lock()
 				if m.records[name] == record && record.v == nil {
 					record.v = v
 					record.lastError = ""
 					record.retryDelay = time.Second
 					record.nextRetry = time.Time{}
+					accepted = true
 				} else {
 					_ = v.Close()
 				}
 				m.mu.Unlock()
+				if accepted {
+					if callbackSetter, ok := v.(verifier.IneligibleCallbackSetter); ok {
+						callbackSetter.SetIneligibleCallback(func() {
+							m.mu.RLock()
+							current := m.records[name] == record && record.v == v
+							m.mu.RUnlock()
+							if current {
+								m.pool.Remove(name)
+							}
+						})
+					}
+				}
 			}
 		}
 	}
