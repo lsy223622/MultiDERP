@@ -1,0 +1,7 @@
+.git
+.codex
+.agents
+plans
+data
+*.log
+.gocache

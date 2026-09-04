@@ -1,0 +1,24 @@
+services:
+  multiderp:
+    container_name: multiderp
+    image: ghcr.io/example/multiderp:<pinned-release>
+    user: "10001:10001"
+    restart: unless-stopped
+    read_only: true
+
+    # The external-TLS reverse proxy should share a private container network
+    # and forward its TCP 443 backend to this exposed port.
+    expose:
+      - "3377/tcp"
+
+    # STUN is UDP and cannot be replaced by an ordinary HTTP reverse proxy.
+    ports:
+      - "3478:3478/udp"
+
+    volumes:
+      - ./data:/data
+
+    # The image must not depend on a directory created in its read-only layer:
+    # this mount is intentionally owner-controlled at runtime.
+    tmpfs:
+      - /run/multiderp:rw,noexec,nosuid,nodev,mode=0700,uid=10001,gid=10001

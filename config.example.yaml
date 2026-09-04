@@ -1,0 +1,31 @@
+version: 1
+
+server:
+  # Replace this with the public DNS name used by your DERP map.
+  hostname: derp.example.com
+
+  derp:
+    # external keeps the child on an internal plaintext HTTP/upgrade port;
+    # a compatible reverse proxy terminates public TLS.
+    listen: ":3377"
+    stun_listen: ":3478"
+    tls_mode: external
+    cert_mode: none
+
+  admin:
+    socket: /run/multiderp/admin.sock
+
+  health:
+    listen: "127.0.0.1:9090"
+
+storage:
+  state_dir: /data
+  tailnet_state_dir: /data/tailnets
+  orphan_state_dir: /data/orphans
+
+logging:
+  level: info
+
+# Add verifier entries with the CLI after copying this file to /data/config.yaml.
+# Secret values never belong in this YAML file.
+tailnets: []
