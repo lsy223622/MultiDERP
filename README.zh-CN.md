@@ -1,251 +1,659 @@
-[English](README.md) · [简体中文](README.zh-CN.md)
+[English](README.md) | 简体中文
 
 # MultiDERP
 
-MultiDERP 是围绕上游 Tailscale derper 构建的一层小型准入控制层。一个守护进程可以为多个 Tailnet 运行相互独立的 tsnet.Server 验证器，同时 DERP 数据通路仍由上游子进程负责。只有当至少一个符合条件的验证器使用 WhoIsNodeKey 确认客户端的 NodePublic 后，客户端才会获准接入。
+MultiDERP 让一台自建的 Tailscale DERP 服务器同时服务多个彼此独立的 tailnet。每个 tailnet 对应一个独立的 `tsnet` 验证器身份；有客户端连接 DERP 时，这些验证器负责确认节点密钥属于哪个已配置的 tailnet，再决定是否放行。
 
-V1 的边界经过刻意收窄：
+实际转发流量的是上游 Tailscale `derper`。镜像中的 `derper` 与验证器代码来自同一个固定版本的 Tailscale Go module。多个 tailnet 共享的是 DERP 入口和准入流程，各自的身份、访问策略和控制面成员关系仍然独立。
 
-- 仅支持 Tailscale 官方控制平面；拒绝 `control_url`。
-- 每个验证器使用一个相互隔离的状态目录和 tsnet 身份。
-- 启用 ShieldsUp，不提供 routes/services/SSH/Web/Serve/Funnel，禁用 Remote Config，并在准入前执行加固配置回读检查。
-- 不支持 DERP mesh、本地 tailscaled 客户端验证、配额或自定义 DERP 数据通路。
-- 配置面为 YAML 和 secret 文件。secret 值永远不会写入 YAML，也不会通过管理 API 返回。
+## 工作方式
 
-## 快速开始
+```text
+                         Tailscale 控制面
+                         ▲         ▲         ▲
+                         │         │         │
+                  ┌──────┴──┐ ┌────┴────┐ ┌───┴──────┐
+                  │ 验证器 A │ │ 验证器 B │ │ 验证器 C │
+                  │tailnet A│ │tailnet B│ │tailnet C │
+                  └──────┬──┘ └────┬────┘ └───┬──────┘
+                         │          │           │
+                         └──────────┼───────────┘
+                                    │ 节点密钥成员查询
+                             ┌──────▼──────┐
+DERP 客户端 ────────────────►│   准入层    │
+                             └──────┬──────┘
+                                    │ allow / deny
+                             ┌──────▼──────┐
+                             │   derper    │
+                             │ TLS + STUN  │
+                             └─────────────┘
+```
 
-示例配置只包含占位符。请替换公共主机名，并通过部署使用的受保护 secret 机制提供 secret 文件。
+验证器连上 Tailscale 并完成 hardening 配置与回读校验后，才会进入准入池。每次 DERP 准入请求都会针对当前可用的验证器集合检查节点密钥；任意一个有效验证器确认成员关系即可通过。
 
-Compose 示例使用公开发布的镜像 `ghcr.io/lsy223622/multiderp:latest`。发布标签还会发布类似 `ghcr.io/lsy223622/multiderp:1.0.1` 的版本标签；当部署不应自动跟随后续版本时，请使用该标签或镜像 digest。
-`latest` 标签只会由稳定的 `vX.Y.Z` 版本更新；运行中的容器仍需要镜像更新器，或者需要定期执行 `docker compose pull` 和 `docker compose up -d`，才能应用该更新。
+多个 tailnet 因而可以共用一台 relay host，同时保持各自的网络边界。节点身份、ACL/Grants、WireGuard 密钥和端到端加密仍由各自的 Tailscale tailnet 管理。
 
-Linux/macOS：
+## MultiDERP 负责什么
 
-~~~sh
+- 为每个 tailnet 保存独立的 Tailscale 验证器状态；
+- 通过网页登录、OAuth 或 auth key 完成验证器入网；
+- 根据节点密钥成员关系处理 DERP 准入；
+- 管理一个上游 `derper` 子进程；
+- 支持外部 TLS 终止，也支持由 `derper` 直接处理 TLS；
+- 单独提供 UDP STUN 监听；
+- 通过 Unix socket 提供本地管理接口；
+- 持久化验证器状态和移除后的 orphan state；
+- 提供 liveness、readiness 和 startup 健康检查。
+
+V1 面向 Tailscale 官方控制面，配置范围集中在多 tailnet 私有 DERP 准入。DERP mesh 以及上游实验性的速率/连接数控制目前没有对应的 V1 配置入口。
+
+## 部署前准备
+
+常规容器部署需要：
+
+- Docker Engine（仓库提供的部署示例使用 Docker Compose）；
+- 一个给 DERP 使用的公网 DNS 名称；
+- 可持久写入的 `/data`；
+- 公网 DERP HTTPS 入口的 TCP 连通性；
+- 如果使用内置 STUN，则需要 UDP `3478`；
+- 各个验证器到 Tailscale 控制面的出站网络；
+- 每个准备使用该 DERP 的 tailnet 的管理权限。
+
+仓库提供的 Compose 示例会让容器以 UID/GID `10001:10001` 运行，并使用只读根文件系统，因此宿主机挂载到 `/data` 的目录需要允许这个身份写入。
+
+从源码构建时，仓库当前声明的 Go 版本为 `1.26.6`。
+
+## 部署方式一：外部 TLS
+
+这是示例配置的默认方式。公网 HTTPS 由前置 TLS 终止器处理，然后把 DERP 后端流量转给 MultiDERP 的私有监听端口。
+
+```text
+Internet
+   │
+   │ TCP 443
+   ▼
+TLS 终止器 / 兼容的反向代理
+   │
+   │ 明文 DERP 后端流
+   │ 127.0.0.1:3377
+   ▼
+MultiDERP / derper
+
+Internet ───────── UDP 3478 ─────────► STUN
+```
+
+仓库自带的 Compose 示例把 TCP `3377` 绑定在宿主机 loopback，只把 UDP `3478` 单独发布出去。
+
+### 1. 准备数据目录
+
+```bash
+git clone https://github.com/lsy223622/MultiDERP.git
+cd MultiDERP
+
 mkdir -p data
 cp config.example.yaml data/config.yaml
-docker compose -f docker-compose.example.yaml up -d
-~~~
+```
 
-PowerShell：
+Linux 普通 bind mount 可以直接把目录交给容器使用的 UID/GID：
 
-~~~powershell
-New-Item -ItemType Directory -Force data
-Copy-Item config.example.yaml data\config.yaml
-docker compose -f docker-compose.example.yaml up -d
-~~~
+```bash
+sudo chown -R 10001:10001 data
+```
 
-如果不存在 `data/config.yaml`，容器会根据内置的 `config.example.yaml` 自动创建它。上面的显式复制步骤适用于希望在首次启动前替换示例主机名的情况。
+Docker Desktop 等环境的所有权处理可能不同；核心要求是容器内的 `10001:10001` 能在 `/data` 下创建文件并完成原子替换。
 
-示例会有意以 `tailnets: []` 启动。在此状态下，管理器、管理 socket 和健康检查服务器可以运行，但不会启动 derper 子进程，并且 readiness 会保持为 false。请通过 Unix 管理 socket 添加第一个验证器：
+### 2. 设置公网主机名
 
-~~~text
-docker exec multiderp multiderp tailnet add alice
-docker exec multiderp multiderp tailnet list
-docker exec multiderp multiderp tailnet status alice
-~~~
+编辑 `data/config.yaml`：
 
-如需非交互式注册，请指向一个只读 secret 文件：
+```yaml
+version: 1
 
-~~~text
-docker exec multiderp multiderp tailnet add company --oauth-secret-file /run/secrets/company-oauth --tag tag:multiderp-verifier
-docker exec multiderp multiderp tailnet add lab --auth-key-file /run/secrets/lab-auth-key
-~~~
-
-OAuth 注册至少需要一个要发布的标签。使用多个 `--tag` 可重复指定多个标签；其顺序会在管理请求和验证器配置中保留。对应的 YAML 条目如下：
-
-~~~yaml
-auth:
-  type: oauth
-  client_secret_file: /run/secrets/company-oauth
-  tags:
-    - tag:multiderp-verifier
-~~~
-
-Web 身份验证会返回一个 Tailscale 登录 URL。该 URL 只表示需要登录，并不表示验证器已经具备准入资格。登录后，MultiDERP 会再次应用并回读加固基线，然后才把验证器发布到准入池中。
-
-## 配置与生命周期
-
-如果 `/data/config.yaml` 不存在，系统会根据内置的 `config.example.yaml` 自动创建它。生成的文件包含示例中的默认服务器、存储和日志值，并将 `tailnets` 设置为 `[]`；它不会重新创建之前运行时中可能存在的验证器条目。示例主机名仍是占位符，应在添加启用的验证器之前替换它。
-
-生成的配置会启动管理器、管理 socket 和健康检查服务器，但不会启动 derper 子进程，因此在添加验证器且验证器具备准入资格之前，readiness 会保持为 false。现有的空文件、null 文件、仅包含注释的 YAML 文件或 `{}` 文件，都表示相同的空目标配置。无效或无法读取的文件仍会导致启动失败。
-
-守护进程是权威写入者。运行时变更通过管理 socket 进行，会经过验证，使用临时文件加 fsync 和原子重命名写入，然后才进行协调。也可以通过手动编辑配置后执行以下命令重新加载：
-
-~~~text
-docker exec multiderp multiderp config reload
-~~~
-
-无效的 reload 会保持当前运行时不变。监听器、TLS/证书、管理、健康检查、存储根目录和服务器主机名的变更会持久化为待重启变更；在守护进程重启前，当前监听器、子进程和状态根目录会继续使用。
-在复用现有状态时，验证器身份、认证或主机名变更会被拒绝；请改为执行显式 reset 或 remove-and-add 操作。
-手动从 YAML 中删除验证器也会在 reload 时被拒绝；请使用 `tailnet remove <name>`，这样其状态会被移动到自动生成的 orphan 目录中。
-
-常用操作：
-
-~~~text
-multiderp version
-multiderp tailnet enable <name>
-multiderp tailnet disable <name>
-multiderp tailnet login <name>
-multiderp tailnet logout <name>
-multiderp tailnet reset <name>
-multiderp tailnet status <name> --verbose
-multiderp tailnet remove <name>
-multiderp orphan list
-multiderp orphan purge <orphan-id> --yes
-multiderp derp restart
-~~~
-
-`disable`、`logout`、`reset` 和 `remove` 会在关闭验证器前将其移出准入池。`reset` 要求 LocalAPI logout 成功后才会删除本地状态。`remove` 会将状态保留在自动生成的 orphan ID 下；只有显式确认的 orphan purge 才会删除它。同名的 add 操作永远不会自动加载 orphan。
-
-`derp restart` 是全局会话撤销操作。它会暂时拒绝新的准入，停止子进程，然后使用相同的持久化 DERP key 和当前符合条件的验证器池重新启动子进程。意外的子进程退出会使父进程以非零状态退出，以便容器监督器重启完整服务。
-
-`tailnet status --verbose` 会包含完整的验证器 NodeKey，供运维诊断使用；普通状态输出会对其进行脱敏。
-
-## TLS、公共端点与后端监听器
-
-MultiDERP 将公共 DERP 端点与本地 derper 进程使用的监听器分开。每个 Tailnet 的 DERPMap 中的 `HostName` 和 `DERPPort` 是客户端使用的公共端点；`server.derp.listen` 只是本地反向代理到达的监听器，或者在 derper 自行终止 TLS 时客户端到达的监听器。不要误把内部后端端口复制到公共 DERPMap 中。
-
-例如，下面的 Nginx 部署具有这样的拓扑结构：
-
-~~~text
-DERPMap -> https://derp.example.com:443
-Nginx   -> http://127.0.0.1:3377
-~~~
-
-默认后端端口是 TCP `3377`，属于部署内部端口；不得将其开放到公共 Internet。STUN 使用 UDP `3478`；Compose 示例会明确通过 IPv4 和 IPv6 直接发布该端口，或通过支持 UDP 的代理发布。主机和 Docker 守护进程必须启用 IPv6，IPv6 映射才能工作。公共 DERP 端点仍可以使用 TCP `443`；它与后端端口相互独立。
-
-V1 只支持以下证书模式：
-
-- `cert_mode: none` 配合 `tls_mode: external`：derper 提供 HTTP/DERP 后端，兼容的反向代理负责终止公共 TLS。
-- `cert_mode: manual` 配合 `tls_mode: passthrough`：derper 使用提供的证书，并可以监听任意配置的 TCP 端口。
-- `cert_mode: letsencrypt` 配合 `tls_mode: passthrough`：derper 获取并续期自己的证书，并且必须监听 443 端口。
-
-V1 不支持 `cert_mode: gcp`，并会将其作为不支持的配置值拒绝。证书设置不会在外部终止和透传监听器模型之间混用。
-
-### A. MultiDERP 在 443 上终止 Let's Encrypt
-
-当 derper 应直接提供 HTTPS 时使用此模式。持久化证书目录，并在 Tailnet 的 DERPMap 中发布生成的公共端点：
-
-~~~yaml
 server:
   hostname: derp.example.com
-  derp:
-    listen: ":443"
-    stun_listen: ":3478"
-    tls_mode: passthrough
-    cert_mode: letsencrypt
-    cert_dir: /data/derper-certs
-~~~
 
-DERPMap 条目为 `HostName: derp.example.com`、`DERPPort: 443` 和 `STUNPort: 3478`。在此模型中不存在单独的公共后端监听器。上游 HTTP-01 challenge 监听器会在 80 端口启用，因此签发和续期期间，公共 TCP 80 必须能够到达同一个容器。示例容器以 UID/GID 10001 运行；请使用 `docker-compose.letsencrypt.example.yaml` profile，该 profile 只授予 `NET_BIND_SERVICE`，使进程可以绑定 80 和 443。它不使用 `CAP_NET_ADMIN` 或 privileged 模式。请持久化 `/data`，使 ACME 状态和 DERP key 在重启后仍然保留。
-
-### B. Nginx 在 443 上终止公共 TLS
-
-当 Nginx 管理公共证书，而 MultiDERP 作为内部 HTTP/DERP 后端运行时，使用此模式：
-
-~~~yaml
-server:
-  hostname: derp.example.com
   derp:
     listen: ":3377"
     stun_listen: ":3478"
     tls_mode: external
     cert_mode: none
-~~~
 
-DERPMap 仍然只包含 `derp.example.com:443`；客户端不知道 Nginx 会将请求转发到内部后端。默认 Compose 示例将该后端绑定到 `127.0.0.1:3377`，供主机上的 Nginx 使用。如果 Nginx 作为同一私有网络中的容器运行，请改用 `multiderp:3377`。请将 3377 保留在私有容器网络中，或只绑定到受保护的本地接口。不要将其作为第二个公共 DERP 端点发布。
+  admin:
+    socket: /run/multiderp/admin.sock
 
-如果部署明确需要另一个后端端口，`:8443` 是有效的自定义选择，但它不是默认值，所有代理 upstream 和端口映射都必须保持一致地修改：
+  health:
+    listen: "127.0.0.1:9090"
 
-~~~yaml
+storage:
+  state_dir: /data
+  tailnet_state_dir: /data/tailnets
+  orphan_state_dir: /data/orphans
+
+logging:
+  level: info
+
+tailnets: []
+```
+
+### 3. 启动
+
+```bash
+docker compose -f docker-compose.example.yaml up -d
+```
+
+示例会发布：
+
+```text
+127.0.0.1:3377 -> container :3377/tcp
+0.0.0.0:3478   -> container :3478/udp
+[::]:3478      -> container :3478/udp
+```
+
+外部 TLS 模式下，`3377` 承载的是明文 DERP 后端流，所以示例把它限制在宿主机 loopback。公网入口应该落在前面的 TLS 终止器上。
+
+DERP 会保持长连接，并在升级后切换到自己的协议。选用反向代理时需要确认它能完整承载这条连接；普通 HTTP 代理的默认配置并不等价于 DERP 兼容的代理路径。
+
+### 4. 配置公网 TLS
+
+让 TLS 终止器为 `server.hostname` 提供 HTTPS，并把 DERP 后端连接转到：
+
+```text
+http://127.0.0.1:3377
+```
+
+STUN 是独立的 UDP `3478` 流量，直接经过宿主机和网络防火墙，不走 HTTP 反向代理。
+
+## 部署方式二：Let's Encrypt 直连 TLS
+
+`tls_mode: passthrough` 会把公开 TLS 交给 `derper` 自己处理。
+
+对应配置：
+
+```yaml
 server:
+  hostname: derp.example.com
+
   derp:
-    listen: ":8443" # explicit custom backend port
-~~~
+    listen: ":443"
+    stun_listen: ":3478"
+    tls_mode: passthrough
+    cert_mode: letsencrypt
+    cert_dir: /data/certs
+```
 
-DERP 是一个长期存在的双向升级流。Nginx 必须支持 HTTP/1.1，保留 Upgrade 和 Connection，为 /derp 禁用缓冲，并使用较长的读写超时。浏览器响应或普通 HTTP 200 不是 DERP 中继测试。
+使用直连 TLS 的 Compose 示例：
 
-公共 HTTP 表面应采用 allowlist。请根据你的部署调整下面的公共证书配置：
+```bash
+docker compose -f docker-compose.letsencrypt.example.yaml up -d
+```
 
-~~~nginx
-# Put this map in the http {} context.
-map $http_upgrade $connection_upgrade {
-    default upgrade;
-    ''      close;
-}
+这个示例发布 TCP `80`、`443` 和 UDP `3478`。容器继续以非 root 身份运行，Compose 文件只额外增加 `NET_BIND_SERVICE`；绑定低端口不需要 `NET_ADMIN` 或 privileged 模式。
 
-upstream multiderp_backend {
-    server multiderp:3377;
-}
+配置校验器会检查 TLS 组合：
 
-server {
-    listen 443 ssl;
-    server_name derp.example.com;
+| TLS 模式 | 证书模式 | 监听规则 |
+| --- | --- | --- |
+| `external` | `none` | DERP 后端使用非 443 的内部端口，`cert_dir` 为空。 |
+| `passthrough` | `manual` | 需要 `cert_dir`，TLS 监听可使用自定义端口。 |
+| `passthrough` | `letsencrypt` | 需要 `cert_dir`，DERP 监听 TCP `443`。 |
 
-    # Public certificate configuration belongs to this proxy.
+## 添加 tailnet
 
-    location = /derp {
-        proxy_pass http://multiderp_backend;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection $connection_upgrade;
-        proxy_set_header Host $host;
-        proxy_buffering off;
-        proxy_request_buffering off;
-        proxy_read_timeout 24h;
-        proxy_send_timeout 24h;
-    }
+`tailnets` 可以从空列表启动。守护进程起来以后，通过管理 CLI 添加验证器身份。
 
-    location = /derp/probe         { proxy_pass http://multiderp_backend; }
-    location = /derp/latency-check { proxy_pass http://multiderp_backend; }
-    location = /bootstrap-dns      { proxy_pass http://multiderp_backend; }
-    location = /generate_204       { proxy_pass http://multiderp_backend; }
+使用仓库的 Compose 示例时，可以直接在容器里执行：
 
-    location / { return 404; }
-}
-~~~
+```bash
+docker exec multiderp multiderp tailnet list
+```
 
-不要发布 `/debug`、`/metrics`、管理 socket 或任意上游路径。如果所选代理无法承载 DERP 升级流，请使用 `tls_mode: passthrough` 配合 L4 TCP 转发器，并根据上面的证书模型选择 `manual` 或 `letsencrypt`。DERP map 在每个 Tailnet 的控制平面中配置；MultiDERP 不会创建、重写或删除 DERP map 区域。
+### 网页登录
 
-## 健康检查与安全
+```bash
+docker exec multiderp multiderp tailnet add personal
+```
 
-健康检查监听器默认为 loopback，并暴露以下端点：
+网页登录是默认 enrollment 方式。命令会返回一个 Tailscale 登录 URL；用有权限把节点加入目标 tailnet 的账号完成登录，然后查看状态：
 
-~~~text
-GET /health/live
-GET /health/ready
-GET /health/startup
-~~~
+```bash
+docker exec multiderp multiderp tailnet status personal --verbose
+```
 
-成功的检查返回 HTTP 200 和 JSON；失败的检查返回相同结构和 HTTP 503。Readiness 要求存在可用的子进程、至少一个符合条件的验证器，并且每个启用的必需验证器都具备准入资格。已禁用的必需验证器不会被计为失败。健康检查和准入端点与公共 DERP 表面相互分离。
+### OAuth
 
-容器以 UID/GID 10001 运行，使用只读根文件系统，不挂载 TUN 设备，也不使用 CAP_NET_ADMIN。只有 `/data` 和由所有者控制的 `/run/multiderp` tmpfs 需要可写。请保护验证器状态和 secret 文件：状态中包含 Tailnet 节点身份，因此服务器运维者也就被信任可以持有该身份。需要更强隔离的 Tailnet 所有者还应额外应用自己的 Tailscale Grants/ACL 策略。
-在 remove 操作进行期间，守护进程会在配置文件所在目录旁写入 `.multiderp-remove-operation.yaml`。这是一个私有且不包含 secret 的恢复日志。启动时，系统会在启动任何验证器或监听器之前完成或拒绝该日志；不要通过删除它来绕过恢复错误。
+把 OAuth client secret 放进受保护的文件，再传入文件路径和至少一个 tag：
 
-服务器端加固只限制验证器进程的能力，并要求 DERP 运维者保护其状态目录。还需要由控制平面强制隔离的 Tailnet 所有者，应使用自己的 Tailscale Grants（或经过明确审查的旧版 ACL），并配合专用验证器标签，例如 `tag:multiderp-verifier`。请同时确认该标签无法对其他设备发起应用访问，并确认控制平面仍会公开 `WhoIsNodeKey` 必须识别的节点。缺少应用访问权限并不一定意味着节点对控制平面查询不可见。MultiDERP 不会解析、创建、上传或重新加载 Tailnet 策略。
+```bash
+docker exec multiderp multiderp tailnet add work \
+  --oauth-secret-file /data/secrets/work-oauth \
+  --tag tag:multiderp
+```
 
-## 开发
+OAuth enrollment 使用 secret 文件和 tags。敏感值本身留在 YAML 之外。
 
-固定的上游依赖版本是 tailscale.com v1.102.3；Dockerfile 使用相同的模块版本构建 multiderp 和上游 derper。不要脱离加固兼容性矩阵和发布集成测试单独升级它。
+### Auth key
 
-启用 Go 的自动工具链选择后：
+```bash
+docker exec multiderp multiderp tailnet add lab \
+  --auth-key-file /data/secrets/lab-auth-key
+```
 
-~~~text
+这个文件属于部署敏感状态，宿主机权限应按凭据文件处理。
+
+### Required 验证器
+
+当某个验证器的可用性需要参与整个服务的 readiness 时，可以加 `--required`：
+
+```bash
+docker exec multiderp multiderp tailnet add work \
+  --oauth-secret-file /data/secrets/work-oauth \
+  --tag tag:multiderp \
+  --required
+```
+
+验证器处于 disabled 状态时，effective required 会暂时变为 false。`tailnet status --verbose` 会同时显示配置值和实际生效值。
+
+## 在每个 tailnet 中发布 DERP
+
+每个 tailnet 都通过自己的 Tailscale policy 管理 DERP map。需要使用这台服务器的 tailnet，应分别添加 custom DERP region，并填写部署时实际使用的公网主机名和端口。
+
+Tailscale 当前的 custom DERP 文档和 policy 语法：
+
+<https://tailscale.com/docs/reference/derp-servers>
+
+修改 policy 后，可以使用 `tailscale netcheck` 检查客户端收到的 DERP 区域及连通情况：
+
+```bash
+tailscale netcheck
+```
+
+DERP map 负责让客户端发现服务器；MultiDERP 的准入层再根据节点密钥判断这个连接属于哪个已配置的 tailnet。
+
+## 配置文件
+
+配置格式为 YAML，schema 版本是 `1`。容器 entrypoint 默认读取：
+
+```text
+/data/config.yaml
+```
+
+### Server
+
+| 字段 | 默认值 | 作用 |
+| --- | --- | --- |
+| `server.hostname` | 空 | 公网 DERP 主机名；启用验证器后需要有效值。 |
+| `server.derp.listen` | `:3377` | DERP TCP 监听。 |
+| `server.derp.stun_listen` | `:3478` | STUN UDP 监听。 |
+| `server.derp.tls_mode` | `external` | `external` 或 `passthrough`。 |
+| `server.derp.cert_mode` | `none` | `none`、`manual`、`letsencrypt`，受 TLS mode 约束。 |
+| `server.derp.cert_dir` | 空 | passthrough TLS 使用的证书目录。 |
+| `server.admin.socket` | `/run/multiderp/admin.sock` | 本地管理 Unix socket。 |
+| `server.health.listen` | `127.0.0.1:9090` | 健康检查 HTTP 监听。 |
+
+如果 DERP 和 STUN 的监听地址都显式写了 host，配置校验要求二者使用同一个 host。
+
+### Storage
+
+| 字段 | 默认值 | 作用 |
+| --- | --- | --- |
+| `storage.state_dir` | `/data` | 应用顶层状态目录。 |
+| `storage.tailnet_state_dir` | `/data/tailnets` | 各验证器的 Tailscale 状态。 |
+| `storage.orphan_state_dir` | `/data/orphans` | 验证器移除后保留的状态。 |
+
+### Logging
+
+`logging.level` 可选：
+
+```text
+debug
+info
+warn
+error
+```
+
+默认是 `info`。
+
+### Tailnet 条目
+
+规范化后的验证器条目大致如下：
+
+```yaml
+tailnets:
+  - name: personal
+    disabled: false
+    required: false
+    hostname: multiderp-personal
+    auth:
+      type: web
+      client_secret_file: ""
+      auth_key_file: ""
+      tags: []
+```
+
+`name` 是 MultiDERP 内部使用的验证器标识，最大 64 字符，可使用字母、数字、`-`、`_` 和 `.`。省略 `hostname` 时会生成 `multiderp-<name>`。
+
+不同 `auth.type` 对应的材料：
+
+| 类型 | 需要的材料 |
+| --- | --- |
+| `web` | 交互式登录；不得配置 secret 文件。 |
+| `oauth` | `client_secret_file` 和至少一个 tag。 |
+| `auth_key` | `auth_key_file`。 |
+
+验证器配置和状态有生命周期关系，因此日常增删改更适合通过 CLI 完成。
+
+## 管理 CLI
+
+当前命令结构：
+
+```text
 multiderp version
-go test ./...
+multiderp serve [--config path] [--derper binary] [--admission-address address]
+
+multiderp [--socket path] tailnet list
+multiderp [--socket path] tailnet status <name> [--verbose]
+multiderp [--socket path] tailnet add <name> [...]
+multiderp [--socket path] tailnet enable <name>
+multiderp [--socket path] tailnet disable <name>
+multiderp [--socket path] tailnet login <name>
+multiderp [--socket path] tailnet logout <name>
+multiderp [--socket path] tailnet reset <name>
+multiderp [--socket path] tailnet remove <name>
+
+multiderp [--socket path] orphan list
+multiderp [--socket path] orphan purge <orphan-id> [--yes]
+
+multiderp [--socket path] config reload
+multiderp [--socket path] derp restart
+```
+
+`serve` 默认使用 `127.0.0.1:3340` 作为本地 admission callback 地址。只有在部署拓扑确实需要其他地址时，才使用 `--admission-address` 覆盖默认值。
+
+容器里最常用的是：
+
+```bash
+docker exec multiderp multiderp tailnet list
+docker exec multiderp multiderp tailnet status personal --verbose
+docker exec multiderp multiderp config reload
+```
+
+### 启用和停用
+
+```bash
+docker exec multiderp multiderp tailnet disable personal
+docker exec multiderp multiderp tailnet enable personal
+```
+
+disable 会把验证器移出准入池，同时保留配置和状态，后续可以再次 enable。
+
+### 移除、orphan 和永久清理
+
+```bash
+docker exec multiderp multiderp tailnet remove personal
+docker exec multiderp multiderp orphan list
+```
+
+移除验证器时，原状态会完整转移到 orphan state。永久删除是单独的操作：
+
+```bash
+docker exec -it multiderp multiderp orphan purge <orphan-id>
+```
+
+`orphan purge` 会删除保留的验证器状态。自动化脚本只有在已经明确做出这个不可逆决定时才适合加 `--yes`。
+
+### 配置热重载
+
+```bash
+docker exec multiderp multiderp config reload
+```
+
+普通配置可以通过 reload reconcile；已有验证器的认证类型、secret 文件路径、tags 和验证器 hostname 属于身份敏感字段。需要调整这些身份关系时，使用对应的生命周期命令更合适。
+
+同理，移除验证器走 `tailnet remove`，让守护进程有机会把旧状态完整放入 orphan 区域。
+
+## 验证器状态与准入
+
+验证器可能处于：
+
+```text
+configured
+starting
+waiting-login
+hardening
+connected
+degraded
+error
+stopping
+disabled
+```
+
+进入准入池的条件比“进程已经启动”更严格：
+
+```text
+state == connected
+and hardening_verified == true
+```
+
+verbose 状态还可以看到：
+
+- 认证方式；
+- configured/effective required；
+- 当前是否参与 admission；
+- 可用时的登录 URL；
+- tailnet 和节点身份；
+- node key 与 Tailscale IP；
+- state directory；
+- 最近一次错误。
+
+### Hardening 基线
+
+验证器参与准入前，MultiDERP 会应用并回读一套最小能力配置。当前固定版本检查的内容包括：
+
+- Shields Up 开启；
+- remote configuration 关闭；
+- route-all 关闭；
+- exit node 为空；
+- advertised routes/services 为空；
+- Tailscale SSH 和 Web client 关闭；
+- Serve/Funnel/services 为空；
+- App Connector 关闭；
+- posture checking 关闭；
+- auto update 关闭；
+- drive shares 为空；
+- relay-server 设置为空；
+- backend 正在运行并具有 node key。
+
+如果回读发现 drift，验证器会先退出准入池，再进入修复流程。若固定版本的 LocalAPI 行为与预期矩阵不兼容，验证器会进入 error 状态，把依赖/API 不匹配与普通短暂网络抖动明确区分开。
+
+完整矩阵在 [`HARDENING-COMPATIBILITY.md`](HARDENING-COMPATIBILITY.md)。
+
+### Admission 并发和超时
+
+当前控制器使用有限队列和超时：
+
+| 限制 | 当前值 |
+| --- | ---: |
+| 单次 admission 请求超时 | 4 s |
+| 单个验证器查询超时 | 2 s |
+| 同时处理的 admission 请求 | 64 |
+| 同时进行的 verifier 查询 | 32 |
+| verifier job 队列 | 256 |
+
+这些值目前属于 V1 实现限制。准入会基于当前 verifier pool 的快照查询，并在最终放行前确认给出允许结果的验证器仍然是当前实例。
+
+## 健康检查
+
+健康监听提供：
+
+```text
+/health/live
+/health/ready
+/health/startup
+```
+
+对应条件满足时返回 HTTP `200`，否则返回 `503`。
+
+健康快照会反映：
+
+- 进程 liveness；
+- startup 是否完成；
+- `derper` 是否可用；
+- 可参与 admission 的验证器数量；
+- required verifier 失败；
+- 是否存在 pending restart。
+
+默认地址为 `127.0.0.1:9090`。容器里的 loopback 属于容器自己的 network namespace；外部编排器需要直接探测时，再按实际监控拓扑调整监听和端口发布。
+
+## 持久化状态
+
+`/data` 可能包含不同类型的运行状态：
+
+```text
+/data/config.yaml
+/data/tailnets/...
+/data/orphans/...
+/data/certs/...        # 直连 TLS
+/data/secrets/...      # 如果凭据文件采用这个目录布局
+```
+
+验证器目录中包含 Tailscale 节点身份和 enrollment 状态，因此 `/data` 的备份应按生产主机敏感状态保护。
+
+验证器生命周期命令会维护配置与状态之间的对应关系：`tailnet remove` 把旧状态移到 orphan 区，`orphan purge` 才执行最终的不可逆清理。
+
+## 安全模型
+
+MultiDERP 的 operator 掌握宿主机、验证器状态、配置和准入服务，因此 root 或等价的宿主机管理员位于信任边界之内。
+
+DERP 中继时，Tailscale 的 WireGuard 端到端加密仍然覆盖 peer payload。DERP 主机负责转发可用性并持有用于成员查询的验证器身份，而 peer 之间的数据内容继续由 Tailscale 加密。
+
+各 tailnet 的验证器被设置成低能力节点，完成 hardening 回读以后才参与 admission，运行期间也会继续检查 drift。需要更强控制面隔离时，tailnet owner 还可以针对专用 verifier tag 配置自己的 Tailscale Grants/ACL。
+
+本地管理面和持久化状态应该落在同一个 operator 信任边界里：
+
+- `/run/multiderp/admin.sock` 具有管理权限；
+- verifier state 保存 Tailscale 节点身份；
+- OAuth/auth-key 文件属于 enrollment 凭据；
+- external TLS 的后端监听传输明文 DERP backend stream。
+
+这些接口和文件适合放在受控的本地或私有网络路径上。
+
+UDP `3478` 的 STUN 用于 endpoint discovery；真正的 DERP 成员准入仍由 verifier callback 路径决定。
+
+漏洞报告流程见 [`SECURITY.md`](SECURITY.md)。
+
+## 运维说明
+
+### DERP 通常处在回退路径
+
+Tailscale 会优先尝试直连；当前版本也可以在配置 Peer Relay 后使用 Peer Relay，DERP 则承担更通用的回退中继。自建 DERP 的主要价值通常是掌控中继位置，或者给参与的 tailnet 提供更合适的 fallback 网络位置。
+
+Tailscale 当前文档也列出了 custom DERP 与跨 tailnet sharing 等能力之间的边界，部署时建议以最新上游行为为准：
+
+<https://tailscale.com/docs/reference/derp-servers>
+
+### STUN 和 DERP 是两条网络路径
+
+DERP 使用 TCP/TLS，STUN 使用 UDP `3478`。UDP 连通性需要独立检查；STUN 直接经过宿主机和网络防火墙。
+
+### hostname 变更需要联动
+
+`server.hostname` 是各 tailnet DERP map 中看到的公网名称。迁移 hostname 时，通常要一起处理 DNS、证书、MultiDERP 配置和各 tailnet policy。
+
+## 排障
+
+### 服务已经运行，但客户端仍被拒绝
+
+先检查 verifier pool：
+
+```bash
+docker exec multiderp multiderp tailnet list
+docker exec multiderp multiderp tailnet status <name> --verbose
+```
+
+可用于 admission 的验证器应处于 `connected`，并且 hardening verified。`waiting-login`、`degraded`、`error`、`disabled` 等状态通常能直接解释“derper 在运行但成员准入失败”的情况。
+
+### 网页 enrollment 一直停在登录阶段
+
+```bash
+docker exec multiderp multiderp tailnet login <name>
+```
+
+用目标 tailnet 的账号完成返回的 Tailscale 登录 URL，再查看 verbose 状态。
+
+### reload 拒绝身份相关配置
+
+认证方式、secret 路径、tag、hostname 和 verifier removal 适合走生命周期命令。这样现有 state directory 会继续对应创建它的那个验证器身份。
+
+### HTTPS 正常，STUN 不通
+
+单独检查 UDP `3478`：宿主机防火墙、云安全组/防火墙和前置 NAT 都可能影响它。
+
+### 客户端看不到 custom DERP region
+
+DERP region 来自各 tailnet 的 Tailscale policy。先检查 policy，再查看客户端视角：
+
+```bash
+tailscale netcheck
+```
+
+### 容器无法写入 `/data`
+
+镜像以 UID/GID `10001:10001` 运行。检查 Docker host 上 bind mount 的 owner 和权限即可。
+
+### 宿主机访问不到 health port
+
+默认 `127.0.0.1:9090` 在容器内部，并且示例 Compose 没有发布这个端口。只有实际监控拓扑需要外部访问时才需要额外暴露或改监听地址。
+
+## 构建与测试
+
+Go module：
+
+```text
+github.com/lsy223622/MultiDERP
+```
+
+构建 MultiDERP 和固定版本的上游 DERP：
+
+```bash
 go build ./cmd/multiderp
 go build tailscale.com/cmd/derper
-~~~
+```
 
-CI/测试边界使用伪造验证器，不需要真实的 Tailscale 账户。真实的 Web/OAuth/auth-key 注册、公共 DERP 升级行为、反向代理转发和 UDP STUN 可达性，仍然属于目标部署中的受控发布测试。
+常规检查：
 
-GitHub Actions 会在每次 push 和 pull request 上运行相互独立的检查：
+```bash
+go test ./...
+go vet ./...
+```
 
-- 在 Linux 上运行 Go 单元测试和 `go vet`；
-- 使用 `go test -race ./...` 在 Linux 上进行竞态检测；
-- 根据 digest 固定的输入构建 CGO-disabled Linux amd64 版本的 MultiDERP 和上游 derper；
-- 对两个二进制文件执行 CGO-disabled Windows amd64 构建；
-- 根据 [release-manifest.yaml](release-manifest.yaml) 中 digest 固定的输入构建 Docker 镜像。
+涉及并发的修改还可以跑：
 
-该 manifest 记录确切的 `tailscale.com` commit 和 Linux 镜像 digest；模块版本仍固定在 `go.mod` 中，任何升级前都必须结合 [HARDENING-COMPATIBILITY.md](HARDENING-COMPATIBILITY.md) 一起审查。
+```bash
+go test -race ./...
+```
+
+CI 还会覆盖对应的构建目标和容器镜像。
+
+## Tailscale 依赖版本
+
+仓库当前固定：
+
+```text
+tailscale.com v1.102.3
+```
+
+Dockerfile 中的 `derper` 也从同一个 module 版本构建。升级 Tailscale 会同时改变 relay binary 和 hardening/admission 依赖的 verifier API，因此应审阅 [`HARDENING-COMPATIBILITY.md`](HARDENING-COMPATIBILITY.md)，并重新运行仓库中的相关单元测试、竞态测试、构建检查和容器构建。
+
+## 安全问题报告
+
+安全问题使用 GitHub 私有漏洞报告：
+
+<https://github.com/lsy223622/MultiDERP/security/advisories/new>
+
+凭据、private node key、verifier state、证书私钥等敏感内容应只放进私有报告。
+
+## 许可证
+
+MultiDERP 使用 [GNU General Public License v3.0](LICENSE)。
+
+构建产物还包含上游 Tailscale 代码；重新分发 binary 或 image 时，请同时检查仓库中的第三方许可证材料。
