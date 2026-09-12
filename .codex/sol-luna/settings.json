@@ -1,0 +1,9 @@
+{
+  "sol_model": "gpt-5.6-sol",
+  "sol_effort": "high",
+  "expected_primary_model": "gpt-5.6-luna",
+  "expected_primary_effort": "max",
+  "sol_sandbox": "workspace-write",
+  "prefer_native_threads": true,
+  "auto_astra_escalation": false
+}
