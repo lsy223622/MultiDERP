@@ -5,6 +5,8 @@ For repository coding tasks, use the project-local `sol-luna-router` skill in `.
 
 The intended primary thread is GPT-5.6 Luna with `max` reasoning. Luna is the persistent default controller and implementer. Sol is a persistent independent GPT-5.6 Sol `high` project thread used only when stronger discovery, planning, or review is justified.
 
+When this workflow is active and the current user explicitly authorizes a new independent Sol task, use the Codex App lifecycle: `list_projects`, `list_threads`, `create_thread`, `send_message_to_thread`, and `wait_threads`/`read_thread`. `send_message_to_thread` continues an existing thread; it does not create one. Without that explicit authorization, use the project CLI fallback for a new persistent consultant. Never replace the persistent Sol project thread with `multi_agent_v1__spawn_agent`, `spawnAgent`, `spawn_agent`, or `fork_thread`; fail closed on lock/transport errors.
+
 ### Authority
 
 The user's latest explicit instruction has higher workflow authority than Sol plans, Sol complexity labels, Luna routing judgments, and default workflow policy. LOW/MEDIUM/HIGH monotonicity constrains Luna only; the user may explicitly raise or lower complexity, force Luna or Sol, reorder/pause work, replace a design decision, or request replanning.

@@ -37,7 +37,7 @@ Never reinterpret a clear newer user instruction merely to preserve an older Sol
 
 - The primary long-lived thread is Luna Max: controller, router, implementer.
 - Sol is a **persistent independent project thread**, not a normal spawned subagent.
-- Never use `spawn_agent` for the persistent Sol consultant.
+- Never use `multi_agent_v1__spawn_agent`, `spawnAgent`, `spawn_agent`, or `fork_thread` for the persistent Sol consultant.
 - Prefer the existing project Sol thread over creating another one.
 - Sol quota is spent on difficult discovery, consequential decisions/planning, and risk-focused review—not routine implementation.
 - Do not invoke Sol merely because work is large, touches many files, or takes many steps.
@@ -284,7 +284,18 @@ Goals initially HIGH or containing any currently HIGH item normally receive a fi
 
 ## 12. Preferred: Codex App independent thread tools
 
-Use this only when the current tool registry exposes a complete usable independent-thread lifecycle: find/create, send, and read/wait.
+When the current task exposes the complete Codex App lifecycle, use it directly only within the task-creation boundary below. A complete lifecycle means that the current tool registry provides all of `list_projects`, `list_threads`, `create_thread`, `send_message_to_thread`, and either `wait_threads` or `read_thread`; the presence of `list_threads` alone is not enough to declare the App path available for creating a new thread.
+
+`create_thread` creates a user-visible task. The skill being installed or automatically selected is not, by itself, authorization to create one. Use `create_thread` only when the current user explicitly requests a new independent Sol task/session. Reusing an already-existing project Sol thread with `list_threads` and `send_message_to_thread` does not create a new task. If the user has not given that explicit authorization, use the CLI fallback for a new persistent consultant instead.
+
+When App creation is authorized and the pointer is absent, follow this sequence:
+
+1. Call `list_projects` and resolve the current repository's project ID, host ID, and Git status.
+2. Call `list_threads` and reuse the existing top-level project thread titled approximately `Sol Architect — <repository-name>` when one exists.
+3. If it does not exist, call `create_thread` with the resolved project, `gpt-5.6-sol`, `high`, and the repository's normal project environment. Do not use `multi_agent_v1__spawn_agent`, `spawnAgent`, `spawn_agent`, or `fork_thread` as a substitute.
+4. If creation returns a `clientThreadId`, do not pass it to another thread tool. Poll `list_threads` until the corresponding real `threadId` is available, or treat native creation as unavailable after a bounded wait.
+5. Send the handoff with `send_message_to_thread`, then use `wait_threads` or `read_thread` to obtain the result. The receiving thread must be the resolved Sol thread, not the current Luna task.
+6. When possible, record the resolved App pointer in `.codex/sol-luna/.state/sol-thread.json` with `transport: "codex_app"`, `thread_id`, `host_id`, model, effort, and timestamps. Never pass an App pointer to `invoke-sol.ps1`.
 
 - Reuse a project-local top-level thread titled approximately `Sol Architect — <repository-name>`.
 - It must not be a spawned child/subagent thread.
@@ -298,7 +309,7 @@ Do not invent unavailable tool fields. Follow the running Codex tool schema.
 
 ## 13. Fallback: persistent CLI session
 
-If independent thread tools are missing, incomplete, unreliable, or cannot target the project:
+Use this for a new persistent consultant when the user has not authorized a new user-visible App task, or when the native App lifecycle is genuinely unavailable, incomplete after the bounded creation check, or cannot target the project. If the fallback reports a lock or another transport error, fail closed and report the blocker; do not retry blindly and do not start any ordinary subagent.
 
 1. write the handoff to `.codex/sol-luna/.state/handoff.md`;
 2. run:
@@ -309,7 +320,7 @@ powershell -ExecutionPolicy Bypass -File ".codex/skills/sol-luna-router/scripts/
   -InputFile ".codex/sol-luna/.state/handoff.md"
 ```
 
-3. the script creates the Sol session once, stores its thread ID, and uses `codex exec resume` thereafter;
+3. the script creates the Sol session once, stores its thread ID with `transport: "cli"`, and uses `codex exec resume` thereafter;
 4. read returned text or `.codex/sol-luna/last-sol-response.md`.
 
 Never replace this with a fresh `codex exec` for every consultation; persistence is part of the design.

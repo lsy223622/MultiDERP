@@ -36,6 +36,7 @@ function Write-State {
         [string]$ThreadId,
         [string]$Model,
         [string]$Effort,
+        [string]$Transport,
         [string]$CreatedAt
     )
 
@@ -43,11 +44,31 @@ function Write-State {
         thread_id    = $ThreadId
         model        = $Model
         effort       = $Effort
+        transport    = $Transport
         created_at   = $CreatedAt
         last_used_at = (Get-Date).ToString('o')
     }
 
     $state | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Path -Encoding UTF8
+}
+
+function Test-LockToken {
+    param(
+        [string]$Path,
+        [string]$Token
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $false
+    }
+
+    try {
+        $content = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
+        return $content -match ("(?m)^token=" + [regex]::Escape($Token) + "\s*$")
+    }
+    catch {
+        return $false
+    }
 }
 
 $ProjectRoot = Resolve-ProjectRoot $ProjectRoot
@@ -62,6 +83,9 @@ $UserControlPath = Join-Path $WorkflowDir 'USER_CONTROL.md'
 $StatePath = Join-Path $StateDir 'sol-thread.json'
 $LockPath = Join-Path $StateDir 'sol-thread.lock'
 $LastResponsePath = Join-Path $WorkflowDir 'last-sol-response.md'
+$lockToken = [guid]::NewGuid().ToString('N')
+$lockAcquired = $false
+$lockTokenWritten = $false
 
 foreach ($required in @($SettingsPath, $ContractPath, $ContextPath, $DecisionsPath, $UserControlPath, $InputFile)) {
     if (-not (Test-Path -LiteralPath $required)) {
@@ -95,17 +119,34 @@ $lockStream = $null
 try {
     try {
         $lockStream = [System.IO.File]::Open($LockPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-        $lockBytes = [System.Text.Encoding]::UTF8.GetBytes("pid=$PID`ntime=$((Get-Date).ToString('o'))`n")
+        $lockAcquired = $true
+        $lockBytes = [System.Text.Encoding]::UTF8.GetBytes("token=$lockToken`npid=$PID`ntime=$((Get-Date).ToString('o'))`n")
         $lockStream.Write($lockBytes, 0, $lockBytes.Length)
         $lockStream.Flush()
+        $lockTokenWritten = $true
+    }
+    catch [System.IO.IOException] {
+        $ioMessage = $_.Exception.Message
+        if (Test-Path -LiteralPath $LockPath) {
+            $lockOwner = Get-Content -LiteralPath $LockPath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+            throw "Another Sol consultation appears to be active (lock: $LockPath).`n$lockOwner"
+        }
+
+        throw "Could not acquire the Sol consultation lock; the lock operation failed but no lock file is present. No lock was removed. Original error: $ioMessage"
     }
     catch {
-        throw "Another Sol consultation appears to be active (lock: $LockPath). Do not write concurrently to the same persistent Sol thread."
+        throw
     }
 
     $existingState = $null
     if (Test-Path -LiteralPath $StatePath) {
         $existingState = Read-JsonFile $StatePath
+    }
+
+    if ($existingState -and
+        $existingState.PSObject.Properties.Name -contains 'transport' -and
+        [string]$existingState.transport -ne 'cli') {
+        throw "Persistent Sol state belongs to the '$($existingState.transport)' transport. Use that transport's thread tools instead of the CLI fallback."
     }
 
     $threadId = if ($existingState) { [string]$existingState.thread_id } else { '' }
@@ -219,7 +260,7 @@ $handoff
         throw "No final agent_message was found in Codex JSON output. Raw log: $rawLogPath"
     }
 
-    Write-State -Path $StatePath -ThreadId $actualThreadId -Model $model -Effort $effort -CreatedAt $createdAt
+    Write-State -Path $StatePath -ThreadId $actualThreadId -Model $model -Effort $effort -Transport 'cli' -CreatedAt $createdAt
     $lastAgentMessage | Set-Content -LiteralPath $LastResponsePath -Encoding UTF8
 
     Write-Output $lastAgentMessage
@@ -227,6 +268,9 @@ $handoff
 finally {
     if ($lockStream) {
         $lockStream.Dispose()
+        $lockStream = $null
     }
-    Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue
+    if ($lockAcquired -and $lockTokenWritten -and (Test-LockToken -Path $LockPath -Token $lockToken)) {
+        Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue
+    }
 }
