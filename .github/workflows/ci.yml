@@ -50,7 +50,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - run: go build -trimpath -o multiderp ./cmd/multiderp
+      - run: go build -trimpath -o uniderp ./cmd/uniderp
       - run: go build -trimpath -o derper tailscale.com/cmd/derper
 
   build-windows:
@@ -67,7 +67,7 @@ jobs:
           $env:CGO_ENABLED = '0'
           $env:GOOS = 'windows'
           $env:GOARCH = 'amd64'
-          go build -trimpath -o multiderp.exe ./cmd/multiderp
+          go build -trimpath -o uniderp.exe ./cmd/uniderp
           go build -trimpath -o derper.exe tailscale.com/cmd/derper
 
   docker:
@@ -76,7 +76,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build image
-        run: docker build -t multiderp:test .
+        run: docker build -t uniderp:test .
 
   publish-image:
     name: Publish release image to GHCR
@@ -115,7 +115,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ghcr.io/${{ github.repository_owner }}/multiderp
+          images: ghcr.io/${{ github.repository_owner }}/uniderp
           flavor: |
             latest=false
           tags: |
@@ -135,6 +135,6 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            MULTIDERP_VERSION=${{ github.ref_name }}
-            MULTIDERP_COMMIT=${{ github.sha }}
+            UNIDERP_VERSION=${{ github.ref_name }}
+            UNIDERP_COMMIT=${{ github.sha }}
             TAILSCALE_VERSION=v1.102.3

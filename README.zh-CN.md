@@ -1,8 +1,8 @@
 [English](README.md) | 简体中文
 
-# MultiDERP
+# UniDERP
 
-MultiDERP 让一台自建的 Tailscale DERP 服务器同时服务多个彼此独立的 tailnet。每个 tailnet 对应一个独立的 `tsnet` 验证器身份；有客户端连接 DERP 时，这些验证器负责确认节点密钥属于哪个已配置的 tailnet，再决定是否放行。
+UniDERP 让一台自建的 Tailscale DERP 服务器同时服务多个彼此独立的 tailnet。每个 tailnet 对应一个独立的 `tsnet` 验证器身份；有客户端连接 DERP 时，这些验证器负责确认节点密钥属于哪个已配置的 tailnet，再决定是否放行。
 
 实际转发流量的是上游 Tailscale `derper`。镜像中的 `derper` 与验证器代码来自同一个固定版本的 Tailscale Go module。多个 tailnet 共享的是 DERP 入口和准入流程，各自的身份、访问策略和控制面成员关系仍然独立。
 
@@ -33,7 +33,7 @@ DERP 客户端 ────────────────►│   准入�
 
 多个 tailnet 因而可以共用一台 relay host，同时保持各自的网络边界。节点身份、ACL/Grants、WireGuard 密钥和端到端加密仍由各自的 Tailscale tailnet 管理。
 
-## MultiDERP 负责什么
+## UniDERP 负责什么
 
 - 为每个 tailnet 保存独立的 Tailscale 验证器状态；
 - 通过网页登录、OAuth 或 auth key 完成验证器入网；
@@ -65,7 +65,7 @@ V1 面向 Tailscale 官方控制面，配置范围集中在多 tailnet 私有 DE
 
 ## 部署方式一：外部 TLS
 
-这是示例配置的默认方式。公网 HTTPS 由前置 TLS 终止器处理，然后把 DERP 后端流量转给 MultiDERP 的私有监听端口。
+这是示例配置的默认方式。公网 HTTPS 由前置 TLS 终止器处理，然后把 DERP 后端流量转给 UniDERP 的私有监听端口。
 
 ```text
 Internet
@@ -77,7 +77,7 @@ TLS 终止器 / 兼容的反向代理
    │ 明文 DERP 后端流
    │ 127.0.0.1:3377
    ▼
-MultiDERP / derper
+UniDERP / derper
 
 Internet ───────── UDP 3478 ─────────► STUN
 ```
@@ -87,8 +87,8 @@ Internet ───────── UDP 3478 ─────────► STU
 ### 1. 准备数据目录
 
 ```bash
-git clone https://github.com/lsy223622/MultiDERP.git
-cd MultiDERP
+git clone https://github.com/lsy223622/UniDERP.git
+cd UniDERP
 
 mkdir -p data
 cp config.example.yaml data/config.yaml
@@ -119,7 +119,7 @@ server:
     cert_mode: none
 
   admin:
-    socket: /run/multiderp/admin.sock
+    socket: /run/uniderp/admin.sock
 
   health:
     listen: "127.0.0.1:9090"
@@ -204,19 +204,19 @@ docker compose -f docker-compose.letsencrypt.example.yaml up -d
 使用仓库的 Compose 示例时，可以直接在容器里执行：
 
 ```bash
-docker exec multiderp multiderp tailnet list
+docker exec uniderp uniderp tailnet list
 ```
 
 ### 网页登录
 
 ```bash
-docker exec multiderp multiderp tailnet add personal
+docker exec uniderp uniderp tailnet add personal
 ```
 
 网页登录是默认 enrollment 方式。命令会返回一个 Tailscale 登录 URL；用有权限把节点加入目标 tailnet 的账号完成登录，然后查看状态：
 
 ```bash
-docker exec multiderp multiderp tailnet status personal --verbose
+docker exec uniderp uniderp tailnet status personal --verbose
 ```
 
 ### OAuth
@@ -224,9 +224,9 @@ docker exec multiderp multiderp tailnet status personal --verbose
 把 OAuth client secret 放进受保护的文件，再传入文件路径和至少一个 tag：
 
 ```bash
-docker exec multiderp multiderp tailnet add work \
+docker exec uniderp uniderp tailnet add work \
   --oauth-secret-file /data/secrets/work-oauth \
-  --tag tag:multiderp
+  --tag tag:uniderp
 ```
 
 OAuth enrollment 使用 secret 文件和 tags。敏感值本身留在 YAML 之外。
@@ -234,7 +234,7 @@ OAuth enrollment 使用 secret 文件和 tags。敏感值本身留在 YAML 之�
 ### Auth key
 
 ```bash
-docker exec multiderp multiderp tailnet add lab \
+docker exec uniderp uniderp tailnet add lab \
   --auth-key-file /data/secrets/lab-auth-key
 ```
 
@@ -245,9 +245,9 @@ docker exec multiderp multiderp tailnet add lab \
 当某个验证器的可用性需要参与整个服务的 readiness 时，可以加 `--required`：
 
 ```bash
-docker exec multiderp multiderp tailnet add work \
+docker exec uniderp uniderp tailnet add work \
   --oauth-secret-file /data/secrets/work-oauth \
-  --tag tag:multiderp \
+  --tag tag:uniderp \
   --required
 ```
 
@@ -267,7 +267,7 @@ Tailscale 当前的 custom DERP 文档和 policy 语法：
 tailscale netcheck
 ```
 
-DERP map 负责让客户端发现服务器；MultiDERP 的准入层再根据节点密钥判断这个连接属于哪个已配置的 tailnet。
+DERP map 负责让客户端发现服务器；UniDERP 的准入层再根据节点密钥判断这个连接属于哪个已配置的 tailnet。
 
 ## 配置文件
 
@@ -287,7 +287,7 @@ DERP map 负责让客户端发现服务器；MultiDERP 的准入层再根据节�
 | `server.derp.tls_mode` | `external` | `external` 或 `passthrough`。 |
 | `server.derp.cert_mode` | `none` | `none`、`manual`、`letsencrypt`，受 TLS mode 约束。 |
 | `server.derp.cert_dir` | 空 | passthrough TLS 使用的证书目录。 |
-| `server.admin.socket` | `/run/multiderp/admin.sock` | 本地管理 Unix socket。 |
+| `server.admin.socket` | `/run/uniderp/admin.sock` | 本地管理 Unix socket。 |
 | `server.health.listen` | `127.0.0.1:9090` | 健康检查 HTTP 监听。 |
 
 如果 DERP 和 STUN 的监听地址都显式写了 host，配置校验要求二者使用同一个 host。
@@ -322,7 +322,7 @@ tailnets:
   - name: personal
     disabled: false
     required: false
-    hostname: multiderp-personal
+    hostname: uniderp-personal
     auth:
       type: web
       client_secret_file: ""
@@ -330,7 +330,7 @@ tailnets:
       tags: []
 ```
 
-`name` 是 MultiDERP 内部使用的验证器标识，最大 64 字符，可使用字母、数字、`-`、`_` 和 `.`。省略 `hostname` 时会生成 `multiderp-<name>`。
+`name` 是 UniDERP 内部使用的验证器标识，最大 64 字符，可使用字母、数字、`-`、`_` 和 `.`。省略 `hostname` 时会生成 `multiderp-<name>`。
 
 不同 `auth.type` 对应的材料：
 
@@ -347,24 +347,24 @@ tailnets:
 当前命令结构：
 
 ```text
-multiderp version
-multiderp serve [--config path] [--derper binary] [--admission-address address]
+uniderp version
+uniderp serve [--config path] [--derper binary] [--admission-address address]
 
-multiderp [--socket path] tailnet list
-multiderp [--socket path] tailnet status <name> [--verbose]
-multiderp [--socket path] tailnet add <name> [...]
-multiderp [--socket path] tailnet enable <name>
-multiderp [--socket path] tailnet disable <name>
-multiderp [--socket path] tailnet login <name>
-multiderp [--socket path] tailnet logout <name>
-multiderp [--socket path] tailnet reset <name>
-multiderp [--socket path] tailnet remove <name>
+uniderp [--socket path] tailnet list
+uniderp [--socket path] tailnet status <name> [--verbose]
+uniderp [--socket path] tailnet add <name> [...]
+uniderp [--socket path] tailnet enable <name>
+uniderp [--socket path] tailnet disable <name>
+uniderp [--socket path] tailnet login <name>
+uniderp [--socket path] tailnet logout <name>
+uniderp [--socket path] tailnet reset <name>
+uniderp [--socket path] tailnet remove <name>
 
-multiderp [--socket path] orphan list
-multiderp [--socket path] orphan purge <orphan-id> [--yes]
+uniderp [--socket path] orphan list
+uniderp [--socket path] orphan purge <orphan-id> [--yes]
 
-multiderp [--socket path] config reload
-multiderp [--socket path] derp restart
+uniderp [--socket path] config reload
+uniderp [--socket path] derp restart
 ```
 
 `serve` 默认使用 `127.0.0.1:3340` 作为本地 admission callback 地址。只有在部署拓扑确实需要其他地址时，才使用 `--admission-address` 覆盖默认值。
@@ -372,16 +372,16 @@ multiderp [--socket path] derp restart
 容器里最常用的是：
 
 ```bash
-docker exec multiderp multiderp tailnet list
-docker exec multiderp multiderp tailnet status personal --verbose
-docker exec multiderp multiderp config reload
+docker exec uniderp uniderp tailnet list
+docker exec uniderp uniderp tailnet status personal --verbose
+docker exec uniderp uniderp config reload
 ```
 
 ### 启用和停用
 
 ```bash
-docker exec multiderp multiderp tailnet disable personal
-docker exec multiderp multiderp tailnet enable personal
+docker exec uniderp uniderp tailnet disable personal
+docker exec uniderp uniderp tailnet enable personal
 ```
 
 disable 会把验证器移出准入池，同时保留配置和状态，后续可以再次 enable。
@@ -389,14 +389,14 @@ disable 会把验证器移出准入池，同时保留配置和状态，后续可
 ### 移除、orphan 和永久清理
 
 ```bash
-docker exec multiderp multiderp tailnet remove personal
-docker exec multiderp multiderp orphan list
+docker exec uniderp uniderp tailnet remove personal
+docker exec uniderp uniderp orphan list
 ```
 
 移除验证器时，原状态会完整转移到 orphan state。永久删除是单独的操作：
 
 ```bash
-docker exec -it multiderp multiderp orphan purge <orphan-id>
+docker exec -it uniderp uniderp orphan purge <orphan-id>
 ```
 
 `orphan purge` 会删除保留的验证器状态。自动化脚本只有在已经明确做出这个不可逆决定时才适合加 `--yes`。
@@ -404,7 +404,7 @@ docker exec -it multiderp multiderp orphan purge <orphan-id>
 ### 配置热重载
 
 ```bash
-docker exec multiderp multiderp config reload
+docker exec uniderp uniderp config reload
 ```
 
 普通配置可以通过 reload reconcile；已有验证器的认证类型、secret 文件路径、tags 和验证器 hostname 属于身份敏感字段。需要调整这些身份关系时，使用对应的生命周期命令更合适。
@@ -447,7 +447,7 @@ verbose 状态还可以看到：
 
 ### Hardening 基线
 
-验证器参与准入前，MultiDERP 会应用并回读一套最小能力配置。当前固定版本检查的内容包括：
+验证器参与准入前，UniDERP 会应用并回读一套最小能力配置。当前固定版本检查的内容包括：
 
 - Shields Up 开启；
 - remote configuration 关闭；
@@ -522,7 +522,7 @@ verbose 状态还可以看到：
 
 ## 安全模型
 
-MultiDERP 的 operator 掌握宿主机、验证器状态、配置和准入服务，因此 root 或等价的宿主机管理员位于信任边界之内。
+UniDERP 的 operator 掌握宿主机、验证器状态、配置和准入服务，因此 root 或等价的宿主机管理员位于信任边界之内。
 
 DERP 中继时，Tailscale 的 WireGuard 端到端加密仍然覆盖 peer payload。DERP 主机负责转发可用性并持有用于成员查询的验证器身份，而 peer 之间的数据内容继续由 Tailscale 加密。
 
@@ -530,7 +530,7 @@ DERP 中继时，Tailscale 的 WireGuard 端到端加密仍然覆盖 peer payloa
 
 本地管理面和持久化状态应该落在同一个 operator 信任边界里：
 
-- `/run/multiderp/admin.sock` 具有管理权限；
+- `/run/uniderp/admin.sock` 具有管理权限；
 - verifier state 保存 Tailscale 节点身份；
 - OAuth/auth-key 文件属于 enrollment 凭据；
 - external TLS 的后端监听传输明文 DERP backend stream。
@@ -557,7 +557,7 @@ DERP 使用 TCP/TLS，STUN 使用 UDP `3478`。UDP 连通性需要独立检查�
 
 ### hostname 变更需要联动
 
-`server.hostname` 是各 tailnet DERP map 中看到的公网名称。迁移 hostname 时，通常要一起处理 DNS、证书、MultiDERP 配置和各 tailnet policy。
+`server.hostname` 是各 tailnet DERP map 中看到的公网名称。迁移 hostname 时，通常要一起处理 DNS、证书、UniDERP 配置和各 tailnet policy。
 
 ## 排障
 
@@ -566,8 +566,8 @@ DERP 使用 TCP/TLS，STUN 使用 UDP `3478`。UDP 连通性需要独立检查�
 先检查 verifier pool：
 
 ```bash
-docker exec multiderp multiderp tailnet list
-docker exec multiderp multiderp tailnet status <name> --verbose
+docker exec uniderp uniderp tailnet list
+docker exec uniderp uniderp tailnet status <name> --verbose
 ```
 
 可用于 admission 的验证器应处于 `connected`，并且 hardening verified。`waiting-login`、`degraded`、`error`、`disabled` 等状态通常能直接解释“derper 在运行但成员准入失败”的情况。
@@ -575,7 +575,7 @@ docker exec multiderp multiderp tailnet status <name> --verbose
 ### 网页 enrollment 一直停在登录阶段
 
 ```bash
-docker exec multiderp multiderp tailnet login <name>
+docker exec uniderp uniderp tailnet login <name>
 ```
 
 用目标 tailnet 的账号完成返回的 Tailscale 登录 URL，再查看 verbose 状态。
@@ -609,13 +609,13 @@ tailscale netcheck
 Go module：
 
 ```text
-github.com/lsy223622/MultiDERP
+github.com/lsy223622/UniDERP/v2
 ```
 
-构建 MultiDERP 和固定版本的上游 DERP：
+构建 UniDERP 和固定版本的上游 DERP：
 
 ```bash
-go build ./cmd/multiderp
+go build ./cmd/uniderp
 go build tailscale.com/cmd/derper
 ```
 
@@ -648,12 +648,12 @@ Dockerfile 中的 `derper` 也从同一个 module 版本构建。升级 Tailscal
 
 安全问题使用 GitHub 私有漏洞报告：
 
-<https://github.com/lsy223622/MultiDERP/security/advisories/new>
+<https://github.com/lsy223622/UniDERP/security/advisories/new>
 
 凭据、private node key、verifier state、证书私钥等敏感内容应只放进私有报告。
 
 ## 许可证
 
-MultiDERP 使用 [GNU General Public License v3.0](LICENSE)。
+UniDERP 使用 [GNU General Public License v3.0](LICENSE)。
 
 构建产物还包含上游 Tailscale 代码；重新分发 binary 或 image 时，请同时检查仓库中的第三方许可证材料。

@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	configexample "github.com/lsy223622/MultiDERP"
+	configexample "github.com/lsy223622/UniDERP/v2"
 	"gopkg.in/yaml.v3"
 	"tailscale.com/tailcfg"
 )
@@ -27,7 +27,7 @@ const CurrentVersion = 1
 const (
 	DefaultDERPListen       = ":3377"
 	DefaultSTUNListen       = ":3478"
-	DefaultAdminSocket      = "/run/multiderp/admin.sock"
+	DefaultAdminSocket      = "/run/uniderp/admin.sock"
 	DefaultHealthListen     = "127.0.0.1:9090"
 	DefaultStateDir         = "/data"
 	DefaultTailnetStateDir  = "/data/tailnets"
@@ -657,20 +657,20 @@ var (
 )
 
 var unsupportedFields = map[string]string{
-	"control_url":             "MultiDERP V1 only uses the official Tailscale control plane",
-	"controlurl":              "MultiDERP V1 only uses the official Tailscale control plane",
-	"derp_map":                "DERP maps belong to each Tailnet control plane, not MultiDERP",
-	"derpmap":                 "DERP maps belong to each Tailnet control plane, not MultiDERP",
-	"derp_map_file":           "DERP maps belong to each Tailnet control plane, not MultiDERP",
-	"derp_map_url":            "DERP maps belong to each Tailnet control plane, not MultiDERP",
-	"mesh_psk_file":           "DERP mesh is disabled in MultiDERP V1",
-	"mesh_with":               "DERP mesh is disabled in MultiDERP V1",
-	"secrets_url":             "DERP mesh is disabled in MultiDERP V1",
-	"verify_client_url":       "MultiDERP owns the admission callback",
-	"verify_clients":          "MultiDERP owns client admission and does not use local tailscaled verification",
-	"rate_config":             "MultiDERP V1 does not expose upstream experimental rate configuration",
-	"accept_connection_limit": "MultiDERP V1 does not expose upstream connection limits",
-	"accept_connection_burst": "MultiDERP V1 does not expose upstream connection limits",
+	"control_url":             "UniDERP V1 only uses the official Tailscale control plane",
+	"controlurl":              "UniDERP V1 only uses the official Tailscale control plane",
+	"derp_map":                "DERP maps belong to each Tailnet control plane, not UniDERP",
+	"derpmap":                 "DERP maps belong to each Tailnet control plane, not UniDERP",
+	"derp_map_file":           "DERP maps belong to each Tailnet control plane, not UniDERP",
+	"derp_map_url":            "DERP maps belong to each Tailnet control plane, not UniDERP",
+	"mesh_psk_file":           "DERP mesh is disabled in UniDERP V1",
+	"mesh_with":               "DERP mesh is disabled in UniDERP V1",
+	"secrets_url":             "DERP mesh is disabled in UniDERP V1",
+	"verify_client_url":       "UniDERP owns the admission callback",
+	"verify_clients":          "UniDERP owns client admission and does not use local tailscaled verification",
+	"rate_config":             "UniDERP V1 does not expose upstream experimental rate configuration",
+	"accept_connection_limit": "UniDERP V1 does not expose upstream connection limits",
+	"accept_connection_burst": "UniDERP V1 does not expose upstream connection limits",
 }
 
 func collectUnknownFields(node *yaml.Node, path string, schema *schemaNode, warnings *[]string) error {

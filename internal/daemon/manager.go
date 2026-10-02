@@ -13,10 +13,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lsy223622/MultiDERP/internal/admission"
-	"github.com/lsy223622/MultiDERP/internal/config"
-	"github.com/lsy223622/MultiDERP/internal/verifier"
-	verifiertsnet "github.com/lsy223622/MultiDERP/internal/verifier/tsnet"
+	"github.com/lsy223622/UniDERP/v2/internal/admission"
+	"github.com/lsy223622/UniDERP/v2/internal/config"
+	"github.com/lsy223622/UniDERP/v2/internal/verifier"
+	verifiertsnet "github.com/lsy223622/UniDERP/v2/internal/verifier/tsnet"
 	"gopkg.in/yaml.v3"
 )
 
@@ -341,7 +341,7 @@ func ensureStateIdentity(dir string, cfg config.TailnetConfig) error {
 	if err != nil {
 		return fmt.Errorf("encode state identity: %w", err)
 	}
-	tmp, err := os.CreateTemp(dir, ".multiderp-identity.*.tmp")
+	tmp, err := os.CreateTemp(dir, ".uniderp-identity.*.tmp")
 	if err != nil {
 		return fmt.Errorf("create state identity: %w", err)
 	}

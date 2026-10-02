@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lsy223622/MultiDERP/internal/config"
-	"github.com/lsy223622/MultiDERP/internal/verifier"
+	"github.com/lsy223622/UniDERP/v2/internal/config"
+	"github.com/lsy223622/UniDERP/v2/internal/verifier"
 
 	"tailscale.com/client/local"
 	"tailscale.com/ipn"

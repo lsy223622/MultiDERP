@@ -1,4 +1,4 @@
-module github.com/lsy223622/MultiDERP
+module github.com/lsy223622/UniDERP/v2
 
 go 1.26.6
 

@@ -9,7 +9,7 @@ import (
 )
 
 func TestProcessHelper(t *testing.T) {
-	if os.Getenv("MULTIDERP_PROCESS_HELPER") != "1" {
+	if os.Getenv("UNIDERP_PROCESS_HELPER") != "1" {
 		return
 	}
 	for {
@@ -19,7 +19,7 @@ func TestProcessHelper(t *testing.T) {
 
 func TestStopCommandReturnsNilAfterForcedKill(t *testing.T) {
 	command := exec.Command(os.Args[0], "-test.run=TestProcessHelper")
-	command.Env = append(os.Environ(), "MULTIDERP_PROCESS_HELPER=1")
+	command.Env = append(os.Environ(), "UNIDERP_PROCESS_HELPER=1")
 	if err := command.Start(); err != nil {
 		t.Fatalf("start helper process: %v", err)
 	}

@@ -13,7 +13,7 @@ server:
     cert_mode: none
 
   admin:
-    socket: /run/multiderp/admin.sock
+    socket: /run/uniderp/admin.sock
 
   health:
     listen: "127.0.0.1:9090"

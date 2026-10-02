@@ -1,6 +1,6 @@
 # Third-party notices
 
-MultiDERP includes and distributes code from the upstream Tailscale project
+UniDERP includes and distributes code from the upstream Tailscale project
 under the BSD 3-Clause License and the accompanying patent grant.
 
 - Dependency: `tailscale.com v1.102.3`
@@ -13,6 +13,6 @@ under the BSD 3-Clause License and the accompanying patent grant.
 The `derper` binary in the container is built from the same pinned Tailscale
 module. The license and patent files above are preserved verbatim from that
 upstream module and are included in the runtime image under
-`/usr/share/licenses/multiderp/`.
+`/usr/share/licenses/uniderp/`.
 
 The rest of this repository is covered by the project license in `LICENSE`.

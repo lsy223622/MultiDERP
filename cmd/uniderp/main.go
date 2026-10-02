@@ -11,10 +11,10 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/lsy223622/MultiDERP/internal/admin"
-	"github.com/lsy223622/MultiDERP/internal/config"
-	"github.com/lsy223622/MultiDERP/internal/daemon"
-	"github.com/lsy223622/MultiDERP/internal/verifier"
+	"github.com/lsy223622/UniDERP/v2/internal/admin"
+	"github.com/lsy223622/UniDERP/v2/internal/config"
+	"github.com/lsy223622/UniDERP/v2/internal/daemon"
+	"github.com/lsy223622/UniDERP/v2/internal/verifier"
 )
 
 func main() {
@@ -402,10 +402,10 @@ func boolExit(ok bool) int {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "Usage:")
-	fmt.Fprintln(os.Stderr, "  multiderp version")
-	fmt.Fprintln(os.Stderr, "  multiderp serve [--config path] [--derper binary]")
-	fmt.Fprintln(os.Stderr, "  multiderp [--socket path] tailnet list|status [--verbose]|add|enable|disable|login|logout|reset|remove")
-	fmt.Fprintln(os.Stderr, "  multiderp [--socket path] orphan list|purge <orphan-id> [--yes]")
-	fmt.Fprintln(os.Stderr, "  multiderp [--socket path] config reload")
-	fmt.Fprintln(os.Stderr, "  multiderp [--socket path] derp restart")
+	fmt.Fprintln(os.Stderr, "  uniderp version")
+	fmt.Fprintln(os.Stderr, "  uniderp serve [--config path] [--derper binary]")
+	fmt.Fprintln(os.Stderr, "  uniderp [--socket path] tailnet list|status [--verbose]|add|enable|disable|login|logout|reset|remove")
+	fmt.Fprintln(os.Stderr, "  uniderp [--socket path] orphan list|purge <orphan-id> [--yes]")
+	fmt.Fprintln(os.Stderr, "  uniderp [--socket path] config reload")
+	fmt.Fprintln(os.Stderr, "  uniderp [--socket path] derp restart")
 }

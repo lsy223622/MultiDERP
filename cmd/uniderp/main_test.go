@@ -5,8 +5,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/lsy223622/MultiDERP/internal/admin"
-	"github.com/lsy223622/MultiDERP/internal/verifier"
+	"github.com/lsy223622/UniDERP/v2/internal/admin"
+	"github.com/lsy223622/UniDERP/v2/internal/verifier"
 )
 
 func TestOrderTailnetAddArgsAllowsNameBeforeFlags(t *testing.T) {

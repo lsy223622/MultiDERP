@@ -1,10 +1,10 @@
 English | [简体中文](README.zh-CN.md)
 
-# MultiDERP
+# UniDERP
 
-MultiDERP lets one self-hosted Tailscale DERP endpoint serve several independent tailnets. It runs a dedicated `tsnet` verifier identity for each configured tailnet and uses those verifiers to decide whether a connecting node key may use the relay.
+UniDERP lets one self-hosted Tailscale DERP endpoint serve several independent tailnets. It runs a dedicated `tsnet` verifier identity for each configured tailnet and uses those verifiers to decide whether a connecting node key may use the relay.
 
-The relay itself is the upstream Tailscale `derper`, built from the same pinned Tailscale module as the verifier code. Each tailnet keeps its own identity, policy, and control-plane membership; MultiDERP shares the relay endpoint and admission path across them.
+The relay itself is the upstream Tailscale `derper`, built from the same pinned Tailscale module as the verifier code. Each tailnet keeps its own identity, policy, and control-plane membership; UniDERP shares the relay endpoint and admission path across them.
 
 ## How it fits together
 
@@ -29,11 +29,11 @@ DERP client ────────────────►│  admission  �
                              └─────────────┘
 ```
 
-A verifier enters the admission pool after its Tailscale node is connected and its hardening state has been applied and read back successfully. For each DERP admission request, MultiDERP checks the connecting node key against the current eligible verifier set. A match from any eligible verifier admits the client.
+A verifier enters the admission pool after its Tailscale node is connected and its hardening state has been applied and read back successfully. For each DERP admission request, UniDERP checks the connecting node key against the current eligible verifier set. A match from any eligible verifier admits the client.
 
 Several tailnets can therefore use one relay host while their network boundaries stay independent. Tailscale still handles peer identity, ACL/Grants, WireGuard keys, and end-to-end encryption inside each tailnet.
 
-## What MultiDERP manages
+## What UniDERP manages
 
 - one isolated Tailscale verifier state directory per tailnet;
 - web-login, OAuth, and auth-key enrollment for verifiers;
@@ -45,7 +45,7 @@ Several tailnets can therefore use one relay host while their network boundaries
 - persistent verifier and orphan state;
 - liveness, readiness, and startup health endpoints.
 
-MultiDERP V1 targets the official Tailscale control plane. The current configuration surface focuses on private multi-tailnet admission; DERP mesh and upstream experimental rate/connection-limit controls are outside that V1 surface.
+UniDERP V1 targets the official Tailscale control plane. The current configuration surface focuses on private multi-tailnet admission; DERP mesh and upstream experimental rate/connection-limit controls are outside that V1 surface.
 
 ## Before you deploy
 
@@ -65,7 +65,7 @@ For source builds, the repository currently declares Go `1.26.6`.
 
 ## Deployment model 1: external TLS
 
-This is the default configuration. A TLS terminator accepts the public HTTPS connection and forwards the DERP backend stream to MultiDERP on a private listener.
+This is the default configuration. A TLS terminator accepts the public HTTPS connection and forwards the DERP backend stream to UniDERP on a private listener.
 
 ```text
 Internet
@@ -77,7 +77,7 @@ TLS terminator / compatible reverse proxy
    │ plaintext DERP backend stream
    │ 127.0.0.1:3377
    ▼
-MultiDERP / derper
+UniDERP / derper
 
 Internet ───────── UDP 3478 ─────────► STUN
 ```
@@ -87,8 +87,8 @@ The repository's example Compose file binds TCP `3377` to host loopback and publ
 ### 1. Prepare the data directory
 
 ```bash
-git clone https://github.com/lsy223622/MultiDERP.git
-cd MultiDERP
+git clone https://github.com/lsy223622/UniDERP.git
+cd UniDERP
 
 mkdir -p data
 cp config.example.yaml data/config.yaml
@@ -119,7 +119,7 @@ server:
     cert_mode: none
 
   admin:
-    socket: /run/multiderp/admin.sock
+    socket: /run/uniderp/admin.sock
 
   health:
     listen: "127.0.0.1:9090"
@@ -204,19 +204,19 @@ The daemon starts cleanly with an empty `tailnets` list. Add verifier identities
 With the supplied Compose files, run the CLI inside the container:
 
 ```bash
-docker exec multiderp multiderp tailnet list
+docker exec uniderp uniderp tailnet list
 ```
 
 ### Web login
 
 ```bash
-docker exec multiderp multiderp tailnet add personal
+docker exec uniderp uniderp tailnet add personal
 ```
 
 Web login is the default enrollment mode. The command returns a Tailscale authentication URL. Complete that login with an account that can add the verifier to the intended tailnet, then inspect its state:
 
 ```bash
-docker exec multiderp multiderp tailnet status personal --verbose
+docker exec uniderp uniderp tailnet status personal --verbose
 ```
 
 ### OAuth
@@ -224,9 +224,9 @@ docker exec multiderp multiderp tailnet status personal --verbose
 Store the OAuth client secret in a file under protected persistent storage, then pass its path and at least one tag:
 
 ```bash
-docker exec multiderp multiderp tailnet add work \
+docker exec uniderp uniderp tailnet add work \
   --oauth-secret-file /data/secrets/work-oauth \
-  --tag tag:multiderp
+  --tag tag:uniderp
 ```
 
 OAuth enrollment uses the secret file plus the configured tags. The secret value stays outside the YAML configuration.
@@ -234,7 +234,7 @@ OAuth enrollment uses the secret file plus the configured tags. The secret value
 ### Auth key
 
 ```bash
-docker exec multiderp multiderp tailnet add lab \
+docker exec uniderp uniderp tailnet add lab \
   --auth-key-file /data/secrets/lab-auth-key
 ```
 
@@ -245,9 +245,9 @@ The referenced file is part of the deployment's sensitive state and should have 
 Add `--required` when the availability of a verifier should participate in service readiness:
 
 ```bash
-docker exec multiderp multiderp tailnet add work \
+docker exec uniderp uniderp tailnet add work \
   --oauth-secret-file /data/secrets/work-oauth \
-  --tag tag:multiderp \
+  --tag tag:uniderp \
   --required
 ```
 
@@ -267,7 +267,7 @@ After updating policy, `tailscale netcheck` is useful for checking which DERP re
 tailscale netcheck
 ```
 
-The DERP map handles discovery. MultiDERP's admission layer independently decides whether the connecting node key belongs to one of the configured tailnets.
+The DERP map handles discovery. UniDERP's admission layer independently decides whether the connecting node key belongs to one of the configured tailnets.
 
 ## Configuration
 
@@ -287,7 +287,7 @@ The configuration file is YAML schema version `1`. The container entrypoint uses
 | `server.derp.tls_mode` | `external` | `external` or `passthrough`. |
 | `server.derp.cert_mode` | `none` | `none`, `manual`, or `letsencrypt`, constrained by TLS mode. |
 | `server.derp.cert_dir` | empty | Certificate directory for passthrough TLS. |
-| `server.admin.socket` | `/run/multiderp/admin.sock` | Local admin Unix socket. |
+| `server.admin.socket` | `/run/uniderp/admin.sock` | Local admin Unix socket. |
 | `server.health.listen` | `127.0.0.1:9090` | Health HTTP listener. |
 
 When explicit hosts are used in both DERP and STUN listen addresses, the configuration validator expects the same host.
@@ -322,7 +322,7 @@ tailnets:
   - name: personal
     disabled: false
     required: false
-    hostname: multiderp-personal
+    hostname: uniderp-personal
     auth:
       type: web
       client_secret_file: ""
@@ -330,7 +330,7 @@ tailnets:
       tags: []
 ```
 
-`name` is MultiDERP's local verifier identifier. It is path-safe, at most 64 characters, and uses letters, digits, `-`, `_`, and `.`. When `hostname` is omitted, MultiDERP derives `multiderp-<name>`.
+`name` is UniDERP's local verifier identifier. It is path-safe, at most 64 characters, and uses letters, digits, `-`, `_`, and `.`. When `hostname` is omitted, UniDERP derives `multiderp-<name>`.
 
 Authentication fields depend on `auth.type`:
 
@@ -347,24 +347,24 @@ The CLI is the normal way to add and mutate verifier entries because it can coor
 The command surface is:
 
 ```text
-multiderp version
-multiderp serve [--config path] [--derper binary] [--admission-address address]
+uniderp version
+uniderp serve [--config path] [--derper binary] [--admission-address address]
 
-multiderp [--socket path] tailnet list
-multiderp [--socket path] tailnet status <name> [--verbose]
-multiderp [--socket path] tailnet add <name> [...]
-multiderp [--socket path] tailnet enable <name>
-multiderp [--socket path] tailnet disable <name>
-multiderp [--socket path] tailnet login <name>
-multiderp [--socket path] tailnet logout <name>
-multiderp [--socket path] tailnet reset <name>
-multiderp [--socket path] tailnet remove <name>
+uniderp [--socket path] tailnet list
+uniderp [--socket path] tailnet status <name> [--verbose]
+uniderp [--socket path] tailnet add <name> [...]
+uniderp [--socket path] tailnet enable <name>
+uniderp [--socket path] tailnet disable <name>
+uniderp [--socket path] tailnet login <name>
+uniderp [--socket path] tailnet logout <name>
+uniderp [--socket path] tailnet reset <name>
+uniderp [--socket path] tailnet remove <name>
 
-multiderp [--socket path] orphan list
-multiderp [--socket path] orphan purge <orphan-id> [--yes]
+uniderp [--socket path] orphan list
+uniderp [--socket path] orphan purge <orphan-id> [--yes]
 
-multiderp [--socket path] config reload
-multiderp [--socket path] derp restart
+uniderp [--socket path] config reload
+uniderp [--socket path] derp restart
 ```
 
 `serve` uses `127.0.0.1:3340` for the local admission callback by default. Use `--admission-address` only when the deployment topology requires a different address.
@@ -372,16 +372,16 @@ multiderp [--socket path] derp restart
 Typical container invocations:
 
 ```bash
-docker exec multiderp multiderp tailnet list
-docker exec multiderp multiderp tailnet status personal --verbose
-docker exec multiderp multiderp config reload
+docker exec uniderp uniderp tailnet list
+docker exec uniderp uniderp tailnet status personal --verbose
+docker exec uniderp uniderp config reload
 ```
 
 ### Enable and disable
 
 ```bash
-docker exec multiderp multiderp tailnet disable personal
-docker exec multiderp multiderp tailnet enable personal
+docker exec uniderp uniderp tailnet disable personal
+docker exec uniderp uniderp tailnet enable personal
 ```
 
 Disabling removes the verifier from active admission while keeping its configuration and state available for later re-enable.
@@ -389,14 +389,14 @@ Disabling removes the verifier from active admission while keeping its configura
 ### Remove, inspect orphan state, and purge
 
 ```bash
-docker exec multiderp multiderp tailnet remove personal
-docker exec multiderp multiderp orphan list
+docker exec uniderp uniderp tailnet remove personal
+docker exec uniderp uniderp orphan list
 ```
 
 Removal preserves the verifier state in the orphan-state area. Permanent deletion is a separate operation:
 
 ```bash
-docker exec -it multiderp multiderp orphan purge <orphan-id>
+docker exec -it uniderp uniderp orphan purge <orphan-id>
 ```
 
 `orphan purge` deletes retained verifier state. Use `--yes` only when automation has already made that destructive decision explicitly.
@@ -404,7 +404,7 @@ docker exec -it multiderp multiderp orphan purge <orphan-id>
 ### Reload behavior
 
 ```bash
-docker exec multiderp multiderp config reload
+docker exec uniderp uniderp config reload
 ```
 
 Reload supports ordinary reconciliations while protecting verifier identity. Authentication type, secret-file paths, tags, and verifier hostname are identity-sensitive fields for an existing verifier. Use the lifecycle commands when those fields need to move to a new identity/state relationship.
@@ -447,7 +447,7 @@ Verbose status can include:
 
 ### Hardening baseline
 
-Before a verifier participates in admission, MultiDERP applies and reads back a minimum-capability Tailscale configuration. The current locked baseline includes:
+Before a verifier participates in admission, UniDERP applies and reads back a minimum-capability Tailscale configuration. The current locked baseline includes:
 
 - Shields Up enabled;
 - remote configuration disabled;
@@ -522,7 +522,7 @@ Verifier lifecycle commands preserve the relationship between configuration and 
 
 ## Security model
 
-MultiDERP's operator controls the host, verifier state, configuration, and admission service. Host root or an equivalent administrator therefore sits inside the trust boundary.
+UniDERP's operator controls the host, verifier state, configuration, and admission service. Host root or an equivalent administrator therefore sits inside the trust boundary.
 
 DERP payload traffic remains protected by Tailscale's WireGuard encryption while it crosses the relay. The DERP host controls relay availability and holds verifier identities, but the relayed peer payload is still end-to-end encrypted by Tailscale.
 
@@ -530,7 +530,7 @@ The verifier identities are intentionally low-capability nodes. Their hardening 
 
 The local administrative surfaces deserve the same boundary as the service state:
 
-- `/run/multiderp/admin.sock` carries administrative authority;
+- `/run/uniderp/admin.sock` carries administrative authority;
 - verifier state contains Tailscale node identity;
 - OAuth/auth-key files contain enrollment credentials;
 - the external-TLS backend listener carries plaintext DERP backend traffic.
@@ -557,7 +557,7 @@ The DERP endpoint is TCP/TLS; STUN is UDP `3478`. Test UDP reachability independ
 
 ### Hostname changes are coordinated changes
 
-`server.hostname` is the public name advertised in the tailnets' DERP maps. A hostname migration usually touches DNS, certificates, MultiDERP configuration, and each tailnet policy together.
+`server.hostname` is the public name advertised in the tailnets' DERP maps. A hostname migration usually touches DNS, certificates, UniDERP configuration, and each tailnet policy together.
 
 ## Troubleshooting
 
@@ -566,8 +566,8 @@ The DERP endpoint is TCP/TLS; STUN is UDP `3478`. Test UDP reachability independ
 Start with the verifier pool:
 
 ```bash
-docker exec multiderp multiderp tailnet list
-docker exec multiderp multiderp tailnet status <name> --verbose
+docker exec uniderp uniderp tailnet list
+docker exec uniderp uniderp tailnet status <name> --verbose
 ```
 
 A useful admission verifier is in `connected` state with hardening verified. `waiting-login`, `degraded`, `error`, and `disabled` states explain most “DERP process is up, admission still fails” cases.
@@ -575,7 +575,7 @@ A useful admission verifier is in `connected` state with hardening verified. `wa
 ### Web enrollment is waiting for login
 
 ```bash
-docker exec multiderp multiderp tailnet login <name>
+docker exec uniderp uniderp tailnet login <name>
 ```
 
 Complete the returned Tailscale login URL for the intended tailnet, then inspect verbose status again.
@@ -609,13 +609,13 @@ The default `127.0.0.1:9090` listener is inside the container namespace and is n
 The Go module is:
 
 ```text
-github.com/lsy223622/MultiDERP
+github.com/lsy223622/UniDERP/v2
 ```
 
-Build MultiDERP and the pinned upstream DERP binary:
+Build UniDERP and the pinned upstream DERP binary:
 
 ```bash
-go build ./cmd/multiderp
+go build ./cmd/uniderp
 go build tailscale.com/cmd/derper
 ```
 
@@ -650,12 +650,12 @@ Review [`HARDENING-COMPATIBILITY.md`](HARDENING-COMPATIBILITY.md) and rerun the 
 
 Use GitHub's private vulnerability-reporting path for security issues:
 
-<https://github.com/lsy223622/MultiDERP/security/advisories/new>
+<https://github.com/lsy223622/UniDERP/security/advisories/new>
 
 Credential values, private node keys, verifier state, and certificate private keys belong in the private report rather than a public issue.
 
 ## License
 
-MultiDERP is licensed under the [GNU General Public License v3.0](LICENSE).
+UniDERP is licensed under the [GNU General Public License v3.0](LICENSE).
 
 The built image also contains upstream Tailscale code. Review the repository's third-party license material when redistributing binaries or images.

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lsy223622/MultiDERP/internal/config"
+	"github.com/lsy223622/UniDERP/v2/internal/config"
 )
 
 func TestRecoverPreparedRemoveWithOldConfigDiscardsOperation(t *testing.T) {

@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/lsy223622/MultiDERP/internal/config"
+	"github.com/lsy223622/UniDERP/v2/internal/config"
 )
 
 const removeOperationFile = ".multiderp-remove-operation.yaml"

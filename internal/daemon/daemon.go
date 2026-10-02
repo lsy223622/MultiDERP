@@ -15,13 +15,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/lsy223622/MultiDERP/internal/admin"
-	"github.com/lsy223622/MultiDERP/internal/admission"
-	"github.com/lsy223622/MultiDERP/internal/config"
-	"github.com/lsy223622/MultiDERP/internal/derper"
-	"github.com/lsy223622/MultiDERP/internal/health"
-	"github.com/lsy223622/MultiDERP/internal/logging"
-	"github.com/lsy223622/MultiDERP/internal/verifier"
+	"github.com/lsy223622/UniDERP/v2/internal/admin"
+	"github.com/lsy223622/UniDERP/v2/internal/admission"
+	"github.com/lsy223622/UniDERP/v2/internal/config"
+	"github.com/lsy223622/UniDERP/v2/internal/derper"
+	"github.com/lsy223622/UniDERP/v2/internal/health"
+	"github.com/lsy223622/UniDERP/v2/internal/logging"
+	"github.com/lsy223622/UniDERP/v2/internal/verifier"
 )
 
 type Options struct {
@@ -99,7 +99,7 @@ func New(parent context.Context, options Options) *Daemon {
 		options.DerperOutput = io.Discard
 	}
 	if options.Logger == nil {
-		options.Logger = log.New(os.Stderr, "multiderp: ", log.LstdFlags|log.Lmicroseconds)
+		options.Logger = log.New(os.Stderr, "uniderp: ", log.LstdFlags|log.Lmicroseconds)
 	}
 	if len(options.ConfigTemplate) == 0 {
 		options.ConfigTemplate = config.ExampleYAML()

@@ -5,7 +5,7 @@
 Please report suspected vulnerabilities privately through a GitHub Security
 Advisory for this repository:
 
-<https://github.com/lsy223622/MultiDERP/security/advisories/new>
+<https://github.com/lsy223622/UniDERP/security/advisories/new>
 
 Do not include credentials, private node keys, Tailnet state, or other secrets
 in a public issue. If private advisories are unavailable, open a minimal public
@@ -14,7 +14,7 @@ details.
 
 ## Trust model and security boundaries
 
-MultiDERP is an operator-controlled DERP relay and admission service. The
+UniDERP is an operator-controlled DERP relay and admission service. The
 operator is trusted with the verifier state directories, which contain
 Tailscale node identities and other local enrollment state. The threat model
 does not treat a malicious root or equivalent host administrator as an
@@ -35,4 +35,4 @@ plaintext backend listener on protected local or private networks.
 
 Tailnet owners who need stronger control-plane isolation should apply their own
 Tailscale Grants or reviewed ACL policy to the dedicated verifier tag and must
-verify that the policy still permits the control-plane lookups MultiDERP uses.
+verify that the policy still permits the control-plane lookups UniDERP uses.
