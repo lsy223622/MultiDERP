@@ -97,7 +97,10 @@ func (s *Store) publishIdentity(ctx context.Context, tx *sql.Tx, id string, keys
 	if _, err := tx.ExecContext(ctx, "UPDATE events SET resolved_at=? WHERE resource_id=? AND kind='identity_unavailable' AND resolved_at=0", s.now().Unix(), id); err != nil {
 		return err
 	}
-	return s.updateIdentityConflicts(ctx, tx)
+	if err := s.updateIdentityConflicts(ctx, tx); err != nil {
+		return err
+	}
+	return s.rebuildPolicies(ctx, tx, s.now())
 }
 
 func (s *Store) updateIdentityConflicts(ctx context.Context, tx *sql.Tx) error {
@@ -189,5 +192,6 @@ func (s *Store) RefreshIdentity(ctx context.Context, id string) error {
 	if fetchErr != nil {
 		return ErrIdentityUnavailable
 	}
+	s.notifyPolicies()
 	return nil
 }

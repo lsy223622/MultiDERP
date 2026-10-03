@@ -229,7 +229,14 @@ func (s *Store) SetUserEnabled(ctx context.Context, actor Actor, userID string, 
 	if err := writeAudit(ctx, tx, actor.ID, userID, "user", userID, "user.enabled"); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := s.rebuildPolicies(ctx, tx, s.now()); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.notifyPolicies()
+	return nil
 }
 
 func (s *Store) RecoverAdmin(ctx context.Context, userID, password string) error {

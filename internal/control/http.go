@@ -33,6 +33,7 @@ func NewHTTPHandler(s *Store) http.Handler {
 	h.mountTailnets()
 	h.mountNodes()
 	h.mountNodeControl()
+	h.mountGrants()
 	h.mux.HandleFunc("POST /api/v1/login", h.login)
 	h.mux.HandleFunc("POST /api/v1/logout", func(w http.ResponseWriter, r *http.Request) {
 		cookie, _ := r.Cookie(sessionCookie)

@@ -225,6 +225,7 @@ func (s *Store) AddTailnet(ctx context.Context, actor Actor, name, apiID string,
 	if err := tx.Commit(); err != nil {
 		return Tailnet{}, err
 	}
+	s.notifyPolicies()
 	return s.Tailnet(ctx, actor, tn.ID)
 }
 
@@ -321,7 +322,11 @@ func (s *Store) ReplaceCredential(ctx context.Context, actor Actor, id string, c
 	if err := writeAudit(ctx, tx, actor.ID, owner, "tailnet", id, "credential.replace"); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.notifyPolicies()
+	return nil
 }
 
 func (s *Store) TransferTailnet(ctx context.Context, actor Actor, id, newOwner string) error {
@@ -343,10 +348,20 @@ func (s *Store) TransferTailnet(ctx context.Context, actor Actor, id, newOwner s
 	if _, err := tx.ExecContext(ctx, "UPDATE tailnets SET owner_id=? WHERE id=?", newOwner, id); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, "UPDATE tailnet_rules SET group_name='shared' WHERE tailnet_id=? AND group_name='owner' AND node_id IN (SELECT id FROM nodes WHERE owner_id<>?)", id, newOwner); err != nil {
+		return err
+	}
+	if err := s.rebuildPolicies(ctx, tx, s.now()); err != nil {
+		return err
+	}
 	if err := writeAudit(ctx, tx, actor.ID, newOwner, "tailnet", id, "tailnet.transfer"); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.notifyPolicies()
+	return nil
 }
 
 func (s *Store) DeleteCredential(ctx context.Context, actor Actor, id string) error {
@@ -368,8 +383,15 @@ func (s *Store) DeleteCredential(ctx context.Context, actor Actor, id string) er
 	if err := s.updateIdentityConflicts(ctx, tx); err != nil {
 		return err
 	}
+	if err := s.rebuildPolicies(ctx, tx, s.now()); err != nil {
+		return err
+	}
 	if err := writeAudit(ctx, tx, actor.ID, owner, "tailnet", id, "credential.delete"); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.notifyPolicies()
+	return nil
 }

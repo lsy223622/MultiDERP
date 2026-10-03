@@ -87,14 +87,12 @@ func DecodePolicy(r io.Reader, clusterID, nodeID string) (Policy, error) {
 
 func ValidatePolicy(p Policy, clusterID, nodeID string) error {
 	validID := func(id string) bool { return id != "" && len(id) <= 128 && strings.TrimSpace(id) == id }
-	validWeight := func(w uint32) bool { return w > 0 && w <= 1024 }
-	validCeiling := func(bps uint64) bool { return bps == 0 || (bps >= 8 && bps <= math.MaxInt64) }
 	if !validID(p.ClusterID) || !validID(p.NodeID) || p.ClusterID != clusterID || p.NodeID != nodeID || p.Revision == 0 || p.GeneratedAt.IsZero() {
 		return errors.New("invalid policy identity or revision")
 	}
 	q := p.QoS
-	if q.BudgetBPS < 8 || q.BudgetBPS > math.MaxInt64 || !validCeiling(q.SharedMaxBPS) || !validWeight(q.OwnerWeight) || !validWeight(q.SharedWeight) {
-		return errors.New("invalid policy budget or group weight")
+	if err := ValidateQoS(q); err != nil {
+		return err
 	}
 	if len(p.Grants) > 4096 || len(q.Tailnets) > 4096 {
 		return errors.New("too many policy tailnets")
@@ -124,13 +122,32 @@ func ValidatePolicy(p Policy, clusterID, nodeID string) error {
 	}
 	seen := make(map[string]bool, len(q.Tailnets))
 	for _, t := range q.Tailnets {
-		if !tailnets[t.TailnetID] || seen[t.TailnetID] || (t.Group != "owner" && t.Group != "shared") || !validWeight(t.Weight) || !validCeiling(t.MaxBPS) {
+		if !tailnets[t.TailnetID] || seen[t.TailnetID] {
 			return errors.New("invalid tailnet bandwidth rule")
 		}
 		seen[t.TailnetID] = true
 	}
 	if len(seen) != len(tailnets) {
 		return errors.New("missing tailnet bandwidth rule")
+	}
+	return nil
+}
+
+func ValidateQoS(q QoSPolicy) error {
+	validWeight := func(w uint32) bool { return w > 0 && w <= 1024 }
+	validCeiling := func(bps uint64) bool { return bps == 0 || (bps >= 8 && bps <= math.MaxInt64) }
+	if q.BudgetBPS < 8 || q.BudgetBPS > math.MaxInt64 || !validCeiling(q.SharedMaxBPS) || !validWeight(q.OwnerWeight) || !validWeight(q.SharedWeight) {
+		return errors.New("invalid policy budget or group weight")
+	}
+	if len(q.Tailnets) > 4096 {
+		return errors.New("too many bandwidth rules")
+	}
+	seen := make(map[string]bool, len(q.Tailnets))
+	for _, t := range q.Tailnets {
+		if t.TailnetID == "" || len(t.TailnetID) > 128 || strings.TrimSpace(t.TailnetID) != t.TailnetID || seen[t.TailnetID] || (t.Group != "owner" && t.Group != "shared") || !validWeight(t.Weight) || !validCeiling(t.MaxBPS) {
+			return errors.New("invalid tailnet bandwidth rule")
+		}
+		seen[t.TailnetID] = true
 	}
 	return nil
 }
