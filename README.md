@@ -61,7 +61,7 @@ A normal container deployment needs:
 
 The supplied Compose examples run the container as UID/GID `10001:10001` with a read-only root filesystem. The host directory mounted at `/data` therefore needs to be writable by that identity.
 
-For source builds, the repository currently declares Go `1.26.6`.
+For source builds, the repository requires Go `1.27.1` or later.
 
 ## Deployment model 1: external TLS
 
