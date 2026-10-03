@@ -16,7 +16,11 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+      - name: Build and test patched derper
+        run: go run ./scripts/build-derper -out "$RUNNER_TEMP/derper"
       - run: go test ./...
+        env:
+          UNIDERP_TEST_DERPER: ${{ runner.temp }}/derper
 
   go-vet:
     name: Go vet
@@ -36,7 +40,14 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+      - name: Check patched data path with race detector
+        run: |
+          go run ./scripts/build-derper -prepare "$RUNNER_TEMP/tailscale"
+          go -C "$RUNNER_TEMP/tailscale" test -race ./derp/derpserver ./cmd/derper
+          CGO_ENABLED=0 go -C "$RUNNER_TEMP/tailscale" build -o "$RUNNER_TEMP/derper" ./cmd/derper
       - run: go test -race ./...
+        env:
+          UNIDERP_TEST_DERPER: ${{ runner.temp }}/derper
 
   build-linux:
     name: Linux build
