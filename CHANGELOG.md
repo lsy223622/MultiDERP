@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+- Introduces the v2 single-controller platform with accounts, encrypted
+  read-only OAuth credentials, device identity synchronization and member relay
+  enrollment using private-key and HTTPS domain proof.
+- Adds provider approval and applicant confirmation for shared tailnets,
+  manual DERP map export, scoped management pages, events and audit.
+- Enforces absolute identity/control/key deadlines and online connection
+  revocation through a patched derper policy interface and persistent cache.
+- Schedules RX/TX payload bytes by owner/shared groups and tailnet weights,
+  with idle borrowing, optional ceilings and bounded queues.
+- Requires a separate version 2 configuration/data migration; preserve old
+  data for rollback and re-enter OAuth credentials and resource grants.
+- Adds controller/member deployment examples and prerelease image tags that
+  leave stable `latest` unchanged. Real OAuth, stock-client and public-network
+  acceptance remain open; no v2 release has been published.
+
 ## [1.0.3] - 2026-09-04
 
 - Embeds the pinned Tailscale upstream version in the main and bundled `derper`

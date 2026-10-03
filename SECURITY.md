@@ -1,38 +1,37 @@
-# Security policy
+# Security
 
-## Reporting a vulnerability
+## Reporting
 
-Please report suspected vulnerabilities privately through a GitHub Security
-Advisory for this repository:
+Report suspected vulnerabilities privately through this repository's GitHub Security Advisory facility. If private reporting is unavailable, open a minimal issue requesting a private channel without exploit details. Do not disclose OAuth secrets, passwords, node private keys, enrollment codes, device-key inventories or database backups in public issues.
 
-<https://github.com/lsy223622/UniDERP/security/advisories/new>
+## Trust boundaries
 
-Do not include credentials, private node keys, Tailnet state, or other secrets
-in a public issue. If private advisories are unavailable, open a minimal public
-issue asking for a private reporting channel without disclosing exploit
-details.
+The platform administrator, controller host administrator and relay provider are trusted. The controller stores OAuth credentials encrypted with its local key, manages accounts and grants, and supplies effective device-key policies. A provider operates the process that enforces its relay policy and can observe relay metadata and traffic volumes. A host administrator can inspect or replace code, keys, databases and clocks. Local audit records do not provide tamper resistance against that administrator.
 
-## Trust model and security boundaries
+Tailscale's WireGuard encryption protects relayed peer payloads. Sharing a DERP endpoint does not merge tailnets or override their ACLs/grants. UniDERP requires no additional Tailscale node membership for the relay hosts. Standard clients prove possession of the admitted node private key through the DERP protocol; knowing a permitted public key alone is insufficient.
 
-UniDERP is an operator-controlled DERP relay and admission service. The
-operator is trusted with the verifier state directories, which contain
-Tailscale node identities and other local enrollment state. The threat model
-does not treat a malicious root or equivalent host administrator as an
-attacker; such an administrator can inspect or modify the service and its
-state.
+## Credentials and authentication
 
-The verifier process is hardened before it can admit clients: it enables
-ShieldsUp, keeps routes, services, SSH, Web, Serve/Funnel, remote configuration,
-and related capabilities disabled, and periodically reads back the relevant
-LocalAPI state. A detected drift removes the verifier from admission before a
-repair is attempted.
+Configure a dedicated OAuth client with `devices:core:read` only. UniDERP requests that scope and uses device reads; this does not prove the original client has no broader permissions. OAuth ID/secret remain on the controller, encrypted at rest. Protect its database and `controller.key` together; encryption does not protect against a host administrator with both files.
 
-DERP relay traffic remains protected by Tailscale's WireGuard encryption. The
-STUN listener is public network infrastructure for endpoint discovery; STUN
-reachability does not grant Tailnet admission and does not replace the
-admission callback. Keep the admin socket, verifier state, secret files, and
-plaintext backend listener on protected local or private networks.
+Platform passwords are independent of OAuth and stored as password hashes. Sessions use protected cookies, and account mutations require CSRF validation and server-side authorization. Member nodes use their persistent Ed25519 identity and scoped node sessions; a node session cannot call platform account APIs. Enrollment codes are single-use, time-limited and bound to a resource, private-key proof and verified HTTPS domain.
 
-Tailnet owners who need stronger control-plane isolation should apply their own
-Tailscale Grants or reviewed ACL policy to the dedicated verifier tag and must
-verify that the policy still permits the control-plane lookups UniDERP uses.
+Keep admin sockets, management backends, health listeners and data directories private. The external HTTP backend must only be reachable by the TLS proxy. Public TLS certificates must validate normally. Domain probes reject redirects and unsafe destinations unless explicitly allowed by controller deployment configuration. STUN is public discovery infrastructure and is separate from DERP admission.
+
+## Authorization and time
+
+Third-party sharing requires a request, provider approval and applicant confirmation. A provider's own tailnet can become active directly. Exported maps advertise resources; they do not authorize device keys. The controller's local relay follows the same resource rules as member relays.
+
+Effective permission ends at the earliest identity-retention, controller-contact, explicit-grant or device-key deadline. Only complete successful identity refreshes extend identity validity. Failed calls, partial results and process restarts do not reset existing deadlines. The controller exposes configurable identity/control retention; the initial values are 24 hours each.
+
+Online revocation takes effect when derper applies the new policy, including closure of existing connections. Receipt alone is not application. Offline nodes retain their last effective policy only until its original absolute deadline. Cache revision/digest watermarks reject inconsistent or rolled-back snapshots; they are not protection against root rewriting the entire persistent state.
+
+## Deployment and recovery
+
+Run the container as UID/GID 10001 with a read-only root filesystem, writable protected data volume and private runtime tmpfs. Direct TLS may require `NET_BIND_SERVICE`; the service does not need privileged mode or network-administration capability. Use protected files for bootstrap passwords and enrollment codes, and delete the temporary files after use.
+
+Back up the controller SQLite database consistently, including WAL when appropriate, and preserve its matching encryption key and the full node/derper identity state. Stop duplicate instances before identity recovery. Missing keys or corrupted caches require diagnosis and a consistent restore; deleting state is not an authorization repair.
+
+## Validation limits
+
+The project includes direct API authorization/CSRF/SSRF/replay tests, scoped management workflows, DERP library proof and revocation tests, bounded byte-queue tests, local TLS/STUN checks and Linux race execution. These are distinct from real OAuth, stock-client and public-network acceptance. Those external checks remain required before release. Local success does not establish availability, WAN throughput or protection from a malicious trusted host operator.

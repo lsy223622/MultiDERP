@@ -1,178 +1,77 @@
 [English](README.md) | 简体中文
 
-# UniDERP
+# UniDERP v2
 
-UniDERP 让一台自建的 Tailscale DERP 服务器同时服务多个彼此独立的 tailnet。每个 tailnet 对应一个独立的 `tsnet` 验证器身份；有客户端连接 DERP 时，这些验证器负责确认节点密钥属于哪个已配置的 tailnet，再决定是否放行。
+UniDERP 让自建 Tailscale DERP 中继服务多个独立 tailnet。单个主控管理平台账号、只读设备身份、服务器资源和共享授权；每个中继运行 patched `derper`，根据有期限的本地策略缓存核验设备公钥，并按 tailnet 调度流量。客户端使用标准 DERP 协议，尾网管理员手动配置 DERP map。
 
-实际转发流量的是上游 Tailscale `derper`。镜像中的 `derper` 与验证器代码来自同一个固定版本的 Tailscale Go module。多个 tailnet 共享的是 DERP 入口和准入流程，各自的身份、访问策略和控制面成员关系仍然独立。
+主控本机也可提供中继，注册和授权规则与成员节点相同。成员只保存节点身份及有效策略；OAuth 凭据和账号数据库留在主控。Tailscale 继续负责对端身份、网络策略和 WireGuard 加密。
 
-## 工作方式
+当前分支处于 v2 发布准备阶段，示例使用本地构建镜像。正式发布前仍需用隔离账号验证真实 OAuth、原版 Tailscale 应用和公网部署。
 
-```text
-                         Tailscale 控制面
-                         ▲         ▲         ▲
-                         │         │         │
-                  ┌──────┴──┐ ┌────┴────┐ ┌───┴──────┐
-                  │ 验证器 A │ │ 验证器 B │ │ 验证器 C │
-                  │tailnet A│ │tailnet B│ │tailnet C │
-                  └──────┬──┘ └────┬────┘ └───┬──────┘
-                         │          │           │
-                         └──────────┼───────────┘
-                                    │ 节点密钥成员查询
-                             ┌──────▼──────┐
-DERP 客户端 ────────────────►│   准入层    │
-                             └──────┬──────┘
-                                    │ allow / deny
-                             ┌──────▼──────┐
-                             │   derper    │
-                             │ TLS + STUN  │
-                             └─────────────┘
+## 构建
+
+使用 Go 1.27.1 和固定的 `tailscale.com v1.102.3`。需要同时构建两个程序，原版 `derper` 不提供本项目的策略接口：
+
+```sh
+CGO_ENABLED=0 go build -trimpath -o uniderp ./cmd/uniderp
+go run ./scripts/build-derper -out derper
+UNIDERP_TEST_DERPER="$PWD/derper" go test ./...
+go vet ./...
+docker build --build-arg UNIDERP_VERSION=v2-local \
+  --build-arg UNIDERP_COMMIT="$(git rev-parse HEAD)" -t uniderp:v2-local .
 ```
 
-验证器连上 Tailscale 并完成 hardening 配置与回读校验后，才会进入准入池。每次 DERP 准入请求都会针对当前可用的验证器集合检查节点密钥；任意一个有效验证器确认成员关系即可通过。
+构建器核对上游版本、commit 和 module checksum，验证并应用[补丁](patches/tailscale/uniderp.patch)，再运行 patched 包测试。[release-manifest.yaml](release-manifest.yaml) 记录上游 commit、补丁摘要和基础镜像摘要。`uniderp version` 显示产品版本、commit、上游版本和 patch ID；未传入发布元数据的本地构建显示开发值。
 
-多个 tailnet 因而可以共用一台 relay host，同时保持各自的网络边界。节点身份、ACL/Grants、WireGuard 密钥和端到端加密仍由各自的 Tailscale tailnet 管理。
+## 部署主控
 
-## UniDERP 负责什么
+以下命令用于 Linux Docker 主机。准备公网域名和 TCP 443 上的可信 TLS，开放 UDP 3478 STUN。出站 HTTPS 需要访问 Tailscale OAuth/设备 API 和成员域名。节点域名通过 HTTPS 443 核验；使用私有地址需由部署者明确设置主控 `allowed_node_cidrs`。
 
-- 为每个 tailnet 保存独立的 Tailscale 验证器状态；
-- 通过网页登录、OAuth 或 auth key 完成验证器入网；
-- 根据节点密钥成员关系处理 DERP 准入；
-- 管理一个上游 `derper` 子进程；
-- 支持外部 TLS 终止，也支持由 `derper` 直接处理 TLS；
-- 单独提供 UDP STUN 监听；
-- 通过 Unix socket 提供本地管理接口；
-- 持久化验证器状态和移除后的 orphan state；
-- 提供 liveness、readiness 和 startup 健康检查。
-
-V1 面向 Tailscale 官方控制面，配置范围集中在多 tailnet 私有 DERP 准入。DERP mesh 以及上游实验性的速率/连接数控制目前没有对应的 V1 配置入口。
-
-## 部署前准备
-
-常规容器部署需要：
-
-- Docker Engine（仓库提供的部署示例使用 Docker Compose）；
-- 一个给 DERP 使用的公网 DNS 名称；
-- 可持久写入的 `/data`；
-- 公网 DERP HTTPS 入口的 TCP 连通性；
-- 如果使用内置 STUN，则需要 UDP `3478`；
-- 各个验证器到 Tailscale 控制面的出站网络；
-- 每个准备使用该 DERP 的 tailnet 的管理权限。
-
-仓库提供的 Compose 示例会让容器以 UID/GID `10001:10001` 运行，并使用只读根文件系统，因此宿主机挂载到 `/data` 的目录需要允许这个身份写入。
-
-从源码构建时，仓库要求 Go `1.27.1` 或更新版本。
-
-## 部署方式一：外部 TLS
-
-这是示例配置的默认方式。公网 HTTPS 由前置 TLS 终止器处理，然后把 DERP 后端流量转给 UniDERP 的私有监听端口。
-
-```text
-Internet
-   │
-   │ TCP 443
-   ▼
-TLS 终止器 / 兼容的反向代理
-   │
-   │ 明文 DERP 后端流
-   │ 127.0.0.1:3377
-   ▼
-UniDERP / derper
-
-Internet ───────── UDP 3478 ─────────► STUN
-```
-
-仓库自带的 Compose 示例把 TCP `3377` 绑定在宿主机 loopback，只把 UDP `3478` 单独发布出去。
-
-### 1. 准备数据目录
-
-```bash
-git clone https://github.com/lsy223622/UniDERP.git
-cd UniDERP
-
+```sh
 mkdir -p data
 cp config.example.yaml data/config.yaml
-```
-
-Linux 普通 bind mount 可以直接把目录交给容器使用的 UID/GID：
-
-```bash
+# 启动前修改 server.hostname 和部署配置。
 sudo chown -R 10001:10001 data
-```
-
-Docker Desktop 等环境的所有权处理可能不同；核心要求是容器内的 `10001:10001` 能在 `/data` 下创建文件并完成原子替换。
-
-### 2. 设置公网主机名
-
-编辑 `data/config.yaml`：
-
-```yaml
-version: 1
-
-server:
-  hostname: derp.example.com
-
-  derp:
-    listen: ":3377"
-    stun_listen: ":3478"
-    tls_mode: external
-    cert_mode: none
-
-  admin:
-    socket: /run/uniderp/admin.sock
-
-  health:
-    listen: "127.0.0.1:9090"
-
-storage:
-  state_dir: /data
-  tailnet_state_dir: /data/tailnets
-  orphan_state_dir: /data/orphans
-
-logging:
-  level: info
-
-tailnets: []
-```
-
-### 3. 启动
-
-```bash
+sudo chmod 700 data
+sudo chmod 600 data/config.yaml
 docker compose -f docker-compose.example.yaml up -d
 ```
 
-示例会发布：
+[config.example.yaml](config.example.yaml) 启用主控，使用 `/data/controller.sqlite`、`/data/controller.key` 和 `/data/node`。镜像以 UID/GID 10001 运行，根文件系统只读，`/run/uniderp` 为私有 tmpfs。将整个 `/data` 持久化并允许该 UID 写入，保证密钥、SQLite WAL 和节点状态一起保留。admin socket 和 health 监听保持本地访问。
 
-```text
-127.0.0.1:3377 -> container :3377/tcp
-0.0.0.0:3478   -> container :3478/udp
-[::]:3478      -> container :3478/udp
+用受保护的编辑器或 secret 工具创建 `/data/admin-password`，写入 12–72 字节密码，仅允许 UID 10001 读取。不要把内容写进命令参数或日志。初始化后删除临时文件：
+
+```sh
+docker exec uniderp uniderp controller init \
+  --username admin --password-file /data/admin-password
 ```
 
-外部 TLS 模式下，`3377` 承载的是明文 DERP 后端流，所以示例把它限制在宿主机 loopback。公网入口应该落在前面的 TLS 终止器上。
+打开 `https://你的主控域名/manage/`。管理员创建成员账号，并在设置页调整身份保留期和控制保留期。平台密码与尾网凭据独立；尾网 API 故障不会阻止平台登录。
 
-DERP 会保持长连接，并在升级后切换到自己的协议。选用反向代理时需要确认它能完整承载这条连接；普通 HTTP 代理的默认配置并不等价于 DERP 兼容的代理路径。
+### TLS 与代理
 
-### 4. 配置公网 TLS
+external 示例只把明文后端暴露在 `127.0.0.1:3377`。主机反向代理负责 TLS、HTTP/1.1 upgrade 和主控长连接响应。所有路径转发到后端，patched derper 将 `/manage/`、`/api/v1/`、`/cluster/v1/` 路由到内部管理服务。已有 Nginx TLS server 可采用以下 location 设置：
 
-让 TLS 终止器为 `server.hostname` 提供 HTTPS，并把 DERP 后端连接转到：
-
-```text
-http://127.0.0.1:3377
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:3377;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_buffering off;
+    proxy_request_buffering off;
+    proxy_read_timeout 3600s;
+}
 ```
 
-STUN 是独立的 UDP `3478` 流量，直接经过宿主机和网络防火墙，不走 HTTP 反向代理。
+代理仍需有效证书与 DNS。代理若运行在另一容器，应建立私有后端网络；另一容器的 loopback 不等于主机地址。STUN 直接使用 UDP 3478，不走 HTTP 代理。
 
-## 部署方式二：Let's Encrypt 直连 TLS
-
-`tls_mode: passthrough` 会把公开 TLS 交给 `derper` 自己处理。
-
-对应配置：
+直接使用 Let's Encrypt TLS 时，采用 [docker-compose.letsencrypt.example.yaml](docker-compose.letsencrypt.example.yaml)，并设置：
 
 ```yaml
 server:
-  hostname: derp.example.com
-
+  hostname: relay.example.com
   derp:
     listen: ":443"
     stun_listen: ":3478"
@@ -181,479 +80,63 @@ server:
     cert_dir: /data/certs
 ```
 
-使用直连 TLS 的 Compose 示例：
+该示例公开 TCP 80/443，授予 `NET_BIND_SERVICE`。手动证书使用 `cert_mode: manual`，在 `cert_dir` 中提供 `relay.example.com.crt` 和 `relay.example.com.key`，允许 UID 10001 读取。实际签发和生产代理仍需在部署环境验证。
 
-```bash
-docker compose -f docker-compose.letsencrypt.example.yaml up -d
+## 加入成员中继
+
+在成员主机将 [config.node.example.yaml](config.node.example.yaml) 复制到 `node-data/config.yaml`，设置 `node.controller_url` 为主控 HTTPS origin，`server.hostname` 为成员自己的公网域名。按主控相同方式设置 `node-data` 的 UID 10001 和严格权限，启动 [docker-compose.node.example.yaml](docker-compose.node.example.yaml)。配置成员 TLS/代理和 STUN。各 Compose 示例用于各自的主机；同机部署时自行调整端口。
+
+提供者在“我的服务器”中为准确域名创建资源，取得有效 30 分钟的一次性注册码。在成员主机写入受保护的 `/data/enrollment-code`：
+
+```sh
+docker exec uniderp-node uniderp node enroll \
+  --controller https://control.example.com --code-file /data/enrollment-code
 ```
 
-这个示例发布 TCP `80`、`443` 和 UDP `3478`。容器继续以非 root 身份运行，Compose 文件只额外增加 `NET_BIND_SERVICE`；绑定低端口不需要 `NET_ADMIN` 或 privileged 模式。
+成功后删除临时文件。注册同时验证节点私钥持有和 HTTPS 域名控制权。持久保留 `/data/node/node.key`、注册记录与策略状态。注册主控本机中继时，同样先创建资源，再在 `uniderp` 容器执行该命令，使用其自身主控 HTTPS origin。管理员身份不会自动取得中继权限。
 
-配置校验器会检查 TLS 组合：
+## 绑定尾网与共享授权
 
-| TLS 模式 | 证书模式 | 监听规则 |
-| --- | --- | --- |
-| `external` | `none` | DERP 后端使用非 443 的内部端口，`cert_dir` 为空。 |
-| `passthrough` | `manual` | 需要 `cert_dir`，TLS 监听可使用自定义端口。 |
-| `passthrough` | `letsencrypt` | 需要 `cert_dir`，DERP 监听 TCP `443`。 |
+1. 在“我的 tailnet”输入 Tailscale General 设置中的规范 `T...` Tailnet ID，以及只配置 `devices:core:read` 的 OAuth client ID/secret。UniDERP 请求该只读 scope 并同步设备公钥。成功读取不能证明原始 OAuth client 没有其他权限，所有者需检查原始配置。参见 [Tailscale OAuth clients](https://tailscale.com/docs/features/oauth-clients) 和 [trust credential scopes](https://tailscale.com/docs/reference/trust-credentials)。
+2. 在服务器目录为自己的 tailnet 申请使用中继。提供者批准后，申请人还需确认生效；未确认不能放行设备。提供者自己的尾网直接生效。
+3. 导出该尾网 DERP map，将 `Regions` 合并到现有 Tailscale policy 的 `derpMap.Regions`。保留原有 ACL/grants、其他区域和默认 DERP 设置，并检查 900–999 的区域 ID 是否冲突。UniDERP 不自动修改 policy 或分发客户端配置。参见 [自定义 DERP 服务器](https://tailscale.com/docs/reference/derp-servers)。
 
-## 添加 tailnet
+map 公布仍有效的授权资源，使用 DERP TCP 443、STUN UDP 3478。发现与授权分开：旧 map 条目不会赋予设备公钥权限。标准协议面向原版客户端，但本地 DERP library 测试不能替代真实尾网中的原版应用验证。
 
-`tailnets` 可以从空列表启动。守护进程起来以后，通过管理 CLI 添加验证器身份。
+## 带宽与失效期限
 
-使用仓库的 Compose 示例时，可以直接在容器里执行：
+提供者设置载荷预算和 owner/shared 权重，初始为 100 Mbps、8:2。持续争用时 owner 组约占 80%，shared 组约占 20%；空闲容量可借用。shared 内按各 tailnet 权重分配，不因设备或连接数量增加份额。可选的组/尾网上限限制借用。修改规则无需重新确认共享授权。
 
-```bash
-docker exec uniderp uniderp tailnet list
-```
+RX、TX 分别调度字节、分别使用预算。统计为中继载荷，不含传输开销；不能把 RX+TX 合计视为一个预算。包长、burst 和采样窗口会影响短期读数。这不是宿主机总带宽预留或公网吞吐保证。
 
-### 网页登录
+设备的有效期限取身份保留期、主控联系保留期、显式 grant 到期和真实设备 key 到期中的最早值。身份期限从最后一次完整成功 API 刷新计算，失败或部分刷新不续期；控制期限从最后一次成功主控 heartbeat 计算。两项初始设置均为 24 小时，管理员可调整。已经缓存的绝对期限不会因失联或重启而重新计时。
 
-```bash
-docker exec uniderp uniderp tailnet add personal
-```
+在线撤销在节点应用新策略后关闭既有连接。界面分别显示主控 desired、节点 received、derper applied；收到版本不等于 applied ACK。离线中继只能使用到原缓存期限，主控删除资源无法立即通知离线进程。
 
-网页登录是默认 enrollment 方式。命令会返回一个 Tailscale 登录 URL；用有权限把节点加入目标 tailnet 的账号完成登录，然后查看状态：
+## 运维与恢复
 
-```bash
-docker exec uniderp uniderp tailnet status personal --verbose
-```
+管理页区分 heartbeat/应用状态、设备与授权期限、区间流量速率以及独立 DERP/STUN 探测。探测有自己的观察时间，不能证明所有客户端路径。共享者仅查看自己尾网用量，提供者和平台管理员有更广的资源视图。事件与审计按相关资源过滤，管理员代操作记录真实 actor。
 
-### OAuth
+删除服务器或改域名前先暂停。在线节点必须先 ACK 空策略。改域名保留节点身份，需重新证明 HTTPS 域名控制权，并保持暂停直到显式启用。同时更新该中继的 hostname 配置、DNS 和 TLS/代理；listener/TLS/hostname 修改在 config reload 后还需重启 daemon。保持已注册节点使用的主控 origin 可访问，修改中继域名不会迁移主控 origin。节点身份被复制时，先停止重复进程，再在管理页恢复实例。普通重启可等待前一个 90 秒实例租约到期；不要靠删除密钥绕过冲突。
 
-把 OAuth client secret 放进受保护的文件，再传入文件路径和至少一个 tag：
-
-```bash
-docker exec uniderp uniderp tailnet add work \
-  --oauth-secret-file /data/secrets/work-oauth \
-  --tag tag:uniderp
-```
-
-OAuth enrollment 使用 secret 文件和 tags。敏感值本身留在 YAML 之外。
-
-### Auth key
-
-```bash
-docker exec uniderp uniderp tailnet add lab \
-  --auth-key-file /data/secrets/lab-auth-key
-```
-
-这个文件属于部署敏感状态，宿主机权限应按凭据文件处理。
-
-### Required 验证器
-
-当某个验证器的可用性需要参与整个服务的 readiness 时，可以加 `--required`：
-
-```bash
-docker exec uniderp uniderp tailnet add work \
-  --oauth-secret-file /data/secrets/work-oauth \
-  --tag tag:uniderp \
-  --required
-```
-
-验证器处于 disabled 状态时，effective required 会暂时变为 false。`tailnet status --verbose` 会同时显示配置值和实际生效值。
-
-## 在每个 tailnet 中发布 DERP
-
-每个 tailnet 都通过自己的 Tailscale policy 管理 DERP map。需要使用这台服务器的 tailnet，应分别添加 custom DERP region，并填写部署时实际使用的公网主机名和端口。
-
-Tailscale 当前的 custom DERP 文档和 policy 语法：
-
-<https://tailscale.com/docs/reference/derp-servers>
-
-修改 policy 后，可以使用 `tailscale netcheck` 检查客户端收到的 DERP 区域及连通情况：
-
-```bash
-tailscale netcheck
-```
-
-DERP map 负责让客户端发现服务器；UniDERP 的准入层再根据节点密钥判断这个连接属于哪个已配置的 tailnet。
-
-## 配置文件
-
-配置格式为 YAML，schema 版本是 `1`。容器 entrypoint 默认读取：
-
-```text
-/data/config.yaml
-```
-
-### Server
-
-| 字段 | 默认值 | 作用 |
-| --- | --- | --- |
-| `server.hostname` | 空 | 公网 DERP 主机名；启用验证器后需要有效值。 |
-| `server.derp.listen` | `:3377` | DERP TCP 监听。 |
-| `server.derp.stun_listen` | `:3478` | STUN UDP 监听。 |
-| `server.derp.tls_mode` | `external` | `external` 或 `passthrough`。 |
-| `server.derp.cert_mode` | `none` | `none`、`manual`、`letsencrypt`，受 TLS mode 约束。 |
-| `server.derp.cert_dir` | 空 | passthrough TLS 使用的证书目录。 |
-| `server.admin.socket` | `/run/uniderp/admin.sock` | 本地管理 Unix socket。 |
-| `server.health.listen` | `127.0.0.1:9090` | 健康检查 HTTP 监听。 |
-
-如果 DERP 和 STUN 的监听地址都显式写了 host，配置校验要求二者使用同一个 host。
-
-### Storage
-
-| 字段 | 默认值 | 作用 |
-| --- | --- | --- |
-| `storage.state_dir` | `/data` | 应用顶层状态目录。 |
-| `storage.tailnet_state_dir` | `/data/tailnets` | 各验证器的 Tailscale 状态。 |
-| `storage.orphan_state_dir` | `/data/orphans` | 验证器移除后保留的状态。 |
-
-### Logging
-
-`logging.level` 可选：
-
-```text
-debug
-info
-warn
-error
-```
-
-默认是 `info`。
-
-### Tailnet 条目
-
-规范化后的验证器条目大致如下：
-
-```yaml
-tailnets:
-  - name: personal
-    disabled: false
-    required: false
-    hostname: uniderp-personal
-    auth:
-      type: web
-      client_secret_file: ""
-      auth_key_file: ""
-      tags: []
-```
-
-`name` 是 UniDERP 内部使用的验证器标识，最大 64 字符，可使用字母、数字、`-`、`_` 和 `.`。省略 `hostname` 时会生成 `multiderp-<name>`。
-
-不同 `auth.type` 对应的材料：
-
-| 类型 | 需要的材料 |
-| --- | --- |
-| `web` | 交互式登录；不得配置 secret 文件。 |
-| `oauth` | `client_secret_file` 和至少一个 tag。 |
-| `auth_key` | `auth_key_file`。 |
-
-验证器配置和状态有生命周期关系，因此日常增删改更适合通过 CLI 完成。
-
-## 管理 CLI
-
-当前命令结构：
-
-```text
-uniderp version
-uniderp serve [--config path] [--derper binary] [--admission-address address]
-
-uniderp [--socket path] tailnet list
-uniderp [--socket path] tailnet status <name> [--verbose]
-uniderp [--socket path] tailnet add <name> [...]
-uniderp [--socket path] tailnet enable <name>
-uniderp [--socket path] tailnet disable <name>
-uniderp [--socket path] tailnet login <name>
-uniderp [--socket path] tailnet logout <name>
-uniderp [--socket path] tailnet reset <name>
-uniderp [--socket path] tailnet remove <name>
-
-uniderp [--socket path] orphan list
-uniderp [--socket path] orphan purge <orphan-id> [--yes]
-
-uniderp [--socket path] config reload
-uniderp [--socket path] derp restart
-```
-
-`serve` 默认使用 `127.0.0.1:3340` 作为本地 admission callback 地址。只有在部署拓扑确实需要其他地址时，才使用 `--admission-address` 覆盖默认值。
-
-容器里最常用的是：
-
-```bash
-docker exec uniderp uniderp tailnet list
-docker exec uniderp uniderp tailnet status personal --verbose
+```sh
 docker exec uniderp uniderp config reload
+docker exec uniderp uniderp derp restart
+docker stop --time 30 uniderp
 ```
 
-### 启用和停用
+停服务后备份配置及整个持久目录，或使用包含 WAL 一致性的 SQLite 备份。主控数据库必须与 `controller.key` 配套，同时保留节点私钥/注册、策略及 `.watermark`、derper 持久身份和证书。缺少对应加密密钥无法恢复 OAuth 密文。排障前先保留这些文件，不要换空库或删除节点状态。本地管理员恢复通过受保护的 admin socket 执行 `controller recover --user-id ID --password-file PATH`。
 
-```bash
-docker exec uniderp uniderp tailnet disable personal
-docker exec uniderp uniderp tailnet enable personal
-```
+## 从 v1 迁移
 
-disable 会把验证器移出准入池，同时保留配置和状态，后续可以再次 enable。
+停止旧 MultiDERP/UniDERP，备份完整配置、数据目录和准确镜像/版本。创建独立 v2 数据目录及 `version: 2` 配置，初始化账号，重新提交只读 OAuth 凭据，注册中继域名，重建申请/批准/确认。导出并检查新 DERP map 后再更新各尾网 policy。
 
-### 移除、orphan 和永久清理
+version 1 配置会以明确迁移错误停止。旧 verifier state 不能转换为 OAuth secret 或共享授权，也不会自动删除。回退时停止 v2，恢复旧镜像及原配置/数据，并审核恢复 policy。不要让旧程序打开 v2 SQLite 数据库。
 
-```bash
-docker exec uniderp uniderp tailnet remove personal
-docker exec uniderp uniderp orphan list
-```
+## 发布与验证边界
 
-移除验证器时，原状态会完整转移到 orphan state。永久删除是单独的操作：
+CI 构建 patched derper 后运行集成测试，分别对 patched 上游转发和主控/集群运行 Linux race 检查。本地已有权限 API/浏览器流程、可信本地 TLS/STUN、DERP library 转发/撤销、确定性和受控字节调度、真实 Linux race 证据。公网 DNS、真实 OAuth、原版应用和 WAN 行为仍是独立验收项。
 
-```bash
-docker exec -it uniderp uniderp orphan purge <orphan-id>
-```
+镜像 workflow 接受稳定 `vX.Y.Z` 和 `v2.0.0-alpha.1` 等预发布 tag。预发布只生成明确的版本镜像 tag，不更新 `latest`；稳定 tag 保留既有 `latest` 行为。建 tag、push、发布 release、远端仓库改名及 GHCR 迁移需分别授权。本地分支尚未发布 v2 镜像。
 
-`orphan purge` 会删除保留的验证器状态。自动化脚本只有在已经明确做出这个不可逆决定时才适合加 `--yes`。
-
-### 配置热重载
-
-```bash
-docker exec uniderp uniderp config reload
-```
-
-普通配置可以通过 reload reconcile；已有验证器的认证类型、secret 文件路径、tags 和验证器 hostname 属于身份敏感字段。需要调整这些身份关系时，使用对应的生命周期命令更合适。
-
-同理，移除验证器走 `tailnet remove`，让守护进程有机会把旧状态完整放入 orphan 区域。
-
-## 验证器状态与准入
-
-验证器可能处于：
-
-```text
-configured
-starting
-waiting-login
-hardening
-connected
-degraded
-error
-stopping
-disabled
-```
-
-进入准入池的条件比“进程已经启动”更严格：
-
-```text
-state == connected
-and hardening_verified == true
-```
-
-verbose 状态还可以看到：
-
-- 认证方式；
-- configured/effective required；
-- 当前是否参与 admission；
-- 可用时的登录 URL；
-- tailnet 和节点身份；
-- node key 与 Tailscale IP；
-- state directory；
-- 最近一次错误。
-
-### Hardening 基线
-
-验证器参与准入前，UniDERP 会应用并回读一套最小能力配置。当前固定版本检查的内容包括：
-
-- Shields Up 开启；
-- remote configuration 关闭；
-- route-all 关闭；
-- exit node 为空；
-- advertised routes/services 为空；
-- Tailscale SSH 和 Web client 关闭；
-- Serve/Funnel/services 为空；
-- App Connector 关闭；
-- posture checking 关闭；
-- auto update 关闭；
-- drive shares 为空；
-- relay-server 设置为空；
-- backend 正在运行并具有 node key。
-
-如果回读发现 drift，验证器会先退出准入池，再进入修复流程。若固定版本的 LocalAPI 行为与预期矩阵不兼容，验证器会进入 error 状态，把依赖/API 不匹配与普通短暂网络抖动明确区分开。
-
-完整矩阵在 [`HARDENING-COMPATIBILITY.md`](HARDENING-COMPATIBILITY.md)。
-
-### Admission 并发和超时
-
-当前控制器使用有限队列和超时：
-
-| 限制 | 当前值 |
-| --- | ---: |
-| 单次 admission 请求超时 | 4 s |
-| 单个验证器查询超时 | 2 s |
-| 同时处理的 admission 请求 | 64 |
-| 同时进行的 verifier 查询 | 32 |
-| verifier job 队列 | 256 |
-
-这些值目前属于 V1 实现限制。准入会基于当前 verifier pool 的快照查询，并在最终放行前确认给出允许结果的验证器仍然是当前实例。
-
-## 健康检查
-
-健康监听提供：
-
-```text
-/health/live
-/health/ready
-/health/startup
-```
-
-对应条件满足时返回 HTTP `200`，否则返回 `503`。
-
-健康快照会反映：
-
-- 进程 liveness；
-- startup 是否完成；
-- `derper` 是否可用；
-- 可参与 admission 的验证器数量；
-- required verifier 失败；
-- 是否存在 pending restart。
-
-默认地址为 `127.0.0.1:9090`。容器里的 loopback 属于容器自己的 network namespace；外部编排器需要直接探测时，再按实际监控拓扑调整监听和端口发布。
-
-## 持久化状态
-
-`/data` 可能包含不同类型的运行状态：
-
-```text
-/data/config.yaml
-/data/tailnets/...
-/data/orphans/...
-/data/certs/...        # 直连 TLS
-/data/secrets/...      # 如果凭据文件采用这个目录布局
-```
-
-验证器目录中包含 Tailscale 节点身份和 enrollment 状态，因此 `/data` 的备份应按生产主机敏感状态保护。
-
-验证器生命周期命令会维护配置与状态之间的对应关系：`tailnet remove` 把旧状态移到 orphan 区，`orphan purge` 才执行最终的不可逆清理。
-
-## 安全模型
-
-UniDERP 的 operator 掌握宿主机、验证器状态、配置和准入服务，因此 root 或等价的宿主机管理员位于信任边界之内。
-
-DERP 中继时，Tailscale 的 WireGuard 端到端加密仍然覆盖 peer payload。DERP 主机负责转发可用性并持有用于成员查询的验证器身份，而 peer 之间的数据内容继续由 Tailscale 加密。
-
-各 tailnet 的验证器被设置成低能力节点，完成 hardening 回读以后才参与 admission，运行期间也会继续检查 drift。需要更强控制面隔离时，tailnet owner 还可以针对专用 verifier tag 配置自己的 Tailscale Grants/ACL。
-
-本地管理面和持久化状态应该落在同一个 operator 信任边界里：
-
-- `/run/uniderp/admin.sock` 具有管理权限；
-- verifier state 保存 Tailscale 节点身份；
-- OAuth/auth-key 文件属于 enrollment 凭据；
-- external TLS 的后端监听传输明文 DERP backend stream。
-
-这些接口和文件适合放在受控的本地或私有网络路径上。
-
-UDP `3478` 的 STUN 用于 endpoint discovery；真正的 DERP 成员准入仍由 verifier callback 路径决定。
-
-漏洞报告流程见 [`SECURITY.md`](SECURITY.md)。
-
-## 运维说明
-
-### DERP 通常处在回退路径
-
-Tailscale 会优先尝试直连；当前版本也可以在配置 Peer Relay 后使用 Peer Relay，DERP 则承担更通用的回退中继。自建 DERP 的主要价值通常是掌控中继位置，或者给参与的 tailnet 提供更合适的 fallback 网络位置。
-
-Tailscale 当前文档也列出了 custom DERP 与跨 tailnet sharing 等能力之间的边界，部署时建议以最新上游行为为准：
-
-<https://tailscale.com/docs/reference/derp-servers>
-
-### STUN 和 DERP 是两条网络路径
-
-DERP 使用 TCP/TLS，STUN 使用 UDP `3478`。UDP 连通性需要独立检查；STUN 直接经过宿主机和网络防火墙。
-
-### hostname 变更需要联动
-
-`server.hostname` 是各 tailnet DERP map 中看到的公网名称。迁移 hostname 时，通常要一起处理 DNS、证书、UniDERP 配置和各 tailnet policy。
-
-## 排障
-
-### 服务已经运行，但客户端仍被拒绝
-
-先检查 verifier pool：
-
-```bash
-docker exec uniderp uniderp tailnet list
-docker exec uniderp uniderp tailnet status <name> --verbose
-```
-
-可用于 admission 的验证器应处于 `connected`，并且 hardening verified。`waiting-login`、`degraded`、`error`、`disabled` 等状态通常能直接解释“derper 在运行但成员准入失败”的情况。
-
-### 网页 enrollment 一直停在登录阶段
-
-```bash
-docker exec uniderp uniderp tailnet login <name>
-```
-
-用目标 tailnet 的账号完成返回的 Tailscale 登录 URL，再查看 verbose 状态。
-
-### reload 拒绝身份相关配置
-
-认证方式、secret 路径、tag、hostname 和 verifier removal 适合走生命周期命令。这样现有 state directory 会继续对应创建它的那个验证器身份。
-
-### HTTPS 正常，STUN 不通
-
-单独检查 UDP `3478`：宿主机防火墙、云安全组/防火墙和前置 NAT 都可能影响它。
-
-### 客户端看不到 custom DERP region
-
-DERP region 来自各 tailnet 的 Tailscale policy。先检查 policy，再查看客户端视角：
-
-```bash
-tailscale netcheck
-```
-
-### 容器无法写入 `/data`
-
-镜像以 UID/GID `10001:10001` 运行。检查 Docker host 上 bind mount 的 owner 和权限即可。
-
-### 宿主机访问不到 health port
-
-默认 `127.0.0.1:9090` 在容器内部，并且示例 Compose 没有发布这个端口。只有实际监控拓扑需要外部访问时才需要额外暴露或改监听地址。
-
-## 构建与测试
-
-Go module：
-
-```text
-github.com/lsy223622/UniDERP/v2
-```
-
-构建 UniDERP 和固定版本的上游 DERP：
-
-```bash
-go build ./cmd/uniderp
-go build tailscale.com/cmd/derper
-```
-
-常规检查：
-
-```bash
-go test ./...
-go vet ./...
-```
-
-涉及并发的修改还可以跑：
-
-```bash
-go test -race ./...
-```
-
-CI 还会覆盖对应的构建目标和容器镜像。
-
-## Tailscale 依赖版本
-
-仓库当前固定：
-
-```text
-tailscale.com v1.102.3
-```
-
-Dockerfile 中的 `derper` 也从同一个 module 版本构建。升级 Tailscale 会同时改变 relay binary 和 hardening/admission 依赖的 verifier API，因此应审阅 [`HARDENING-COMPATIBILITY.md`](HARDENING-COMPATIBILITY.md)，并重新运行仓库中的相关单元测试、竞态测试、构建检查和容器构建。
-
-## 安全问题报告
-
-安全问题使用 GitHub 私有漏洞报告：
-
-<https://github.com/lsy223622/UniDERP/security/advisories/new>
-
-凭据、private node key、verifier state、证书私钥等敏感内容应只放进私有报告。
-
-## 许可证
-
-UniDERP 使用 [GNU General Public License v3.0](LICENSE)。
-
-构建产物还包含上游 Tailscale 代码；重新分发 binary 或 image 时，请同时检查仓库中的第三方许可证材料。
+UniDERP 使用 [GNU GPL v3](LICENSE)。信任边界与漏洞报告见 [SECURITY.md](SECURITY.md)，patched 上游许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，发布历史见 [CHANGELOG.md](CHANGELOG.md)。

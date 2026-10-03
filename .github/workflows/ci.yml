@@ -91,7 +91,7 @@ jobs:
 
   publish-image:
     name: Publish release image to GHCR
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs:
       - go-test
       - go-vet
@@ -107,11 +107,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Validate stable release tag
+      - name: Validate release tag
         shell: bash
         run: |
-          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Only stable vX.Y.Z tags publish the release image: $GITHUB_REF_NAME"
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
+            echo "Expected vX.Y.Z or vX.Y.Z-prerelease: $GITHUB_REF_NAME"
             exit 1
           fi
 
@@ -131,7 +131,7 @@ jobs:
             latest=false
           tags: |
             type=semver,pattern={{version}}
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
@@ -148,4 +148,3 @@ jobs:
           build-args: |
             UNIDERP_VERSION=${{ github.ref_name }}
             UNIDERP_COMMIT=${{ github.sha }}
-            TAILSCALE_VERSION=v1.102.3

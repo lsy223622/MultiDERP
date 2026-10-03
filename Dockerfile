@@ -6,12 +6,11 @@ RUN go mod download
 COPY . .
 ARG UNIDERP_VERSION=dev
 ARG UNIDERP_COMMIT=unknown
-ARG TAILSCALE_VERSION=unknown
-RUN upstream_version="$(go list -m -f '{{.Version}}' tailscale.com)" && \
-    upstream_version="${upstream_version#v}" && \
+RUN upstream_module_version="$(go list -m -f '{{.Version}}' tailscale.com)" && \
+    upstream_version="${upstream_module_version#v}" && \
     patch_id="$(cat patches/tailscale/uniderp.sha256)" && \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
-      -ldflags "-X main.uniderpVersion=${UNIDERP_VERSION} -X main.gitCommit=${UNIDERP_COMMIT} -X main.tailscaleUpstreamVersion=${TAILSCALE_VERSION} -X main.tailscalePatchID=${patch_id} -X tailscale.com/version.longStamp=${upstream_version} -X tailscale.com/version.shortStamp=${upstream_version}" \
+      -ldflags "-X main.uniderpVersion=${UNIDERP_VERSION} -X main.gitCommit=${UNIDERP_COMMIT} -X main.tailscaleUpstreamVersion=${upstream_module_version} -X main.tailscalePatchID=${patch_id} -X tailscale.com/version.longStamp=${upstream_version} -X tailscale.com/version.shortStamp=${upstream_version}" \
       -o /out/uniderp ./cmd/uniderp && \
     go run ./scripts/build-derper -goos linux -goarch amd64 -out /out/derper
 

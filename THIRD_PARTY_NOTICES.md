@@ -10,8 +10,13 @@ under the BSD 3-Clause License and the accompanying patent grant.
 - License text: [licenses/tailscale/LICENSE](licenses/tailscale/LICENSE)
 - Patent text: [licenses/tailscale/PATENTS](licenses/tailscale/PATENTS)
 
-The `derper` binary in the container is built from the same pinned Tailscale
-module. The license and patent files above are preserved verbatim from that
+The `derper` binary in the container is built from this pinned Tailscale
+module with the UniDERP patch in `patches/tailscale/uniderp.patch`. The patch
+adds cached device-key authorization, control-policy application, management
+routes and per-tailnet byte scheduling. Its digest is recorded in
+`patches/tailscale/uniderp.sha256` and `release-manifest.yaml`.
+
+The license and patent files above are preserved verbatim from that
 upstream module and are included in the runtime image under
 `/usr/share/licenses/uniderp/`.
 
