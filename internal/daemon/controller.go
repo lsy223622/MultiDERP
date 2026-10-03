@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/lsy223622/UniDERP/v2/internal/admin"
+	"github.com/lsy223622/UniDERP/v2/internal/cluster"
 	"github.com/lsy223622/UniDERP/v2/internal/config"
 	"github.com/lsy223622/UniDERP/v2/internal/control"
 )
@@ -30,7 +32,25 @@ func (d *Daemon) startController(ctx context.Context, cfg config.ControllerConfi
 		return fmt.Errorf("listen controller: %w", err)
 	}
 	d.controllerListener = listener
-	d.controllerServer = &http.Server{Handler: control.NewHTTPHandler(store), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: time.Minute, MaxHeaderBytes: 64 << 10}
+	handler := control.NewHTTPHandler(store)
+	active := d.activeConfig()
+	if active.Server.Hostname != "" {
+		c, err := cluster.NewEnrollmentClient(nodeControllerURL(active), active.Node.StateDir)
+		if err != nil {
+			listener.Close()
+			return fmt.Errorf("load controller relay identity: %w", err)
+		}
+		d.nodeClient = c
+		controller := handler
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasPrefix(r.URL.Path, "/cluster/v1/domain-challenge/") {
+				c.DomainHandler().ServeHTTP(w, r)
+				return
+			}
+			controller.ServeHTTP(w, r)
+		})
+	}
+	d.controllerServer = &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: time.Minute, MaxHeaderBytes: 64 << 10}
 	syncCtx, cancel := context.WithCancel(ctx)
 	d.controllerCancel = cancel
 	d.controllerDone = make(chan struct{})

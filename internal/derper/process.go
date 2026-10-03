@@ -19,6 +19,7 @@ import (
 type Process struct {
 	Binary string
 	Output io.Writer
+	Policy PolicyClient
 
 	mu       sync.Mutex
 	command  *exec.Cmd
@@ -46,7 +47,7 @@ func (p *Process) Start(ctx context.Context, server config.ServerConfig, admissi
 		p.mu.Unlock()
 		return err
 	}
-	args, err := BuildArgs(server, admissionAddress, keyPath)
+	args, err := BuildArgs(server, admissionAddress, keyPath, p.Policy)
 	if err != nil {
 		p.mu.Unlock()
 		return err

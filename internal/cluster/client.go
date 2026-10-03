@@ -81,6 +81,10 @@ func (c *EnrollmentClient) RunControl(ctx context.Context, path string, apply fu
 			session, err = c.RenewSession(ctx)
 			if err != nil {
 				if errors.Is(err, ErrIdentityConflict) {
+					c.mu.Lock()
+					c.controlStatus.Error = "identity_conflict"
+					c.controlStatus.Usable = false
+					c.mu.Unlock()
 					os.Remove(path)
 					return ErrIdentityConflict
 				}
@@ -100,6 +104,10 @@ func (c *EnrollmentClient) RunControl(ctx context.Context, path string, apply fu
 			return ctx.Err()
 		}
 		if errors.Is(err, ErrIdentityConflict) {
+			c.mu.Lock()
+			c.controlStatus.Error = "identity_conflict"
+			c.controlStatus.Usable = false
+			c.mu.Unlock()
 			os.Remove(path)
 			return ErrIdentityConflict
 		}
@@ -204,6 +212,12 @@ func (c *EnrollmentClient) controlConnection(ctx context.Context, path string, s
 		result, err := apply(applicationContext, p)
 		if err != nil || result.Revision != p.Revision {
 			ack.Error = "apply_failed"
+			if errors.Is(err, ErrHostBudget) {
+				ack.Error = "host_budget"
+			}
+			c.mu.Lock()
+			c.controlStatus.Error = ack.Error
+			c.mu.Unlock()
 		} else {
 			ack = PolicyACK{Revision: result.Revision, State: "applied", Usable: result.Usable}
 			c.mu.Lock()

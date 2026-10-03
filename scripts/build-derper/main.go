@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -154,6 +155,17 @@ func build() error {
 	}
 	if err := verifyApplied(work); err != nil {
 		return err
+	}
+	fixture, err := os.ReadFile(filepath.Join(root, "internal", "cluster", "testdata", "policy.json"))
+	if err != nil {
+		return err
+	}
+	upstreamFixture, err := os.ReadFile(filepath.Join(work, "derp", "derpserver", "testdata", "uniderp-policy.json"))
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(fixture, upstreamFixture) {
+		return errors.New("UniDERP wire fixture mismatch")
 	}
 	if *prepare != "" {
 		fmt.Println(work)

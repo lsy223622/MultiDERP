@@ -6,6 +6,7 @@ import (
 )
 
 var ErrIdentityConflict = errors.New("node identity conflict")
+var ErrHostBudget = errors.New("node host budget exceeded")
 
 type ControlMessage struct {
 	Type   string  `json:"type"`

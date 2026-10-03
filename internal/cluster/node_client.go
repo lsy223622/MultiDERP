@@ -74,6 +74,12 @@ type EnrollmentClient struct {
 	controlStatus ControlStatus
 }
 
+func (c *EnrollmentClient) PolicyBinding() (clusterID, nodeID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.state.Session.ClusterID, c.state.Session.NodeID
+}
+
 func NewEnrollmentClient(controllerURL, stateDir string) (*EnrollmentClient, error) {
 	u, err := url.Parse(controllerURL)
 	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" || stateDir == "" {

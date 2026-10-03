@@ -8,7 +8,7 @@ upstream:
   source: https://github.com/tailscale/tailscale
   patch:
     file: patches/tailscale/uniderp.patch
-    sha256: df59eb94ded432b1207ca58dcee033acbb3a458311599951aa9bb772e5a8f628
+    sha256: 048a7fa64d7b460072a9586dec83123c9ca3db87c494b999987c4970a2ddf8c5
 
 images:
   - name: build

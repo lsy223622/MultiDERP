@@ -86,6 +86,10 @@ type Daemon struct {
 	controllerCancel     context.CancelFunc
 	controllerDone       chan struct{}
 	nodeClient           *cluster.EnrollmentClient
+	policyClient         derper.PolicyClient
+	nodeCancel           context.CancelFunc
+	nodeDone             chan struct{}
+	nodeConflict         bool
 
 	fatal            chan error
 	fatalOnce        sync.Once
@@ -182,6 +186,11 @@ func (d *Daemon) Start(ctx context.Context) error {
 	} else if err := d.startNode(ctx, parsed.Config.Node, "127.0.0.1:3341"); err != nil {
 		return d.abortStart(err)
 	}
+	if d.nodeClient != nil {
+		if err := d.prepareNodePolicy(parsed.Config.Node); err != nil {
+			return d.abortStart(err)
+		}
+	}
 	if err := d.startAdmissionServer(); err != nil {
 		return d.abortStart(err)
 	}
@@ -202,10 +211,8 @@ func (d *Daemon) Start(ctx context.Context) error {
 	d.starting = false
 	d.startup = true
 	d.mu.Unlock()
-	if d.manager.EligibleCount() > 0 && !d.derper.Running() {
-		if err := d.syncDerper(ctx); err != nil {
-			return d.abortStart(err)
-		}
+	if d.nodeClient != nil && d.derper.Running() {
+		d.startNodeControl(ctx)
 	}
 	return nil
 }
@@ -257,8 +264,9 @@ func (d *Daemon) syncDerper(ctx context.Context) error {
 	cfg := d.current.Clone()
 	barrierEpoch := d.barrierEpoch
 	childGeneration := d.childGeneration
+	nodeConflict := d.nodeConflict
 	d.mu.RUnlock()
-	if d.manager.EligibleCount() == 0 {
+	if cfg.Server.Hostname == "" || nodeConflict {
 		d.denyAdmission()
 		return nil
 	}
@@ -282,7 +290,10 @@ func (d *Daemon) syncDerper(ctx context.Context) error {
 	d.mu.Unlock()
 	keyPath := filepath.Join(cfg.Storage.StateDir, "derper", "derper.key")
 	d.logf("INFO starting derper child")
-	if err := d.derper.Start(ctx, cfg.Server, d.admissionAddress, keyPath); err != nil {
+	if d.controllerListener == nil {
+		return errors.New("node management listener is not running")
+	}
+	if err := d.derper.Start(ctx, cfg.Server, d.controllerListener.Addr().String(), keyPath); err != nil {
 		return err
 	}
 	readyCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
@@ -410,27 +421,34 @@ func (d *Daemon) healthSnapshot() health.Snapshot {
 	live := (d.started || d.starting) && !d.stopping
 	startup := d.startup
 	childOK := d.childOK
+	started := d.started
 	pendingRestart := d.pendingRestart
 	d.mu.RUnlock()
-	if live && d.started {
-		live = d.manager.Running() && d.admission.Running() && d.admissionServing.Load() && d.adminServer != nil && d.adminServer.Running()
+	if live && started {
+		live = d.adminServer != nil && d.adminServer.Running() && d.controllerListener != nil
 	}
-	statuses := d.manager.List(context.Background())
-	requiredFailures := 0
-	for _, status := range statuses {
-		if status.EffectiveRequired && !verifier.Eligible(status) {
-			requiredFailures++
+	var nodeStatus cluster.ControlStatus
+	if d.nodeClient != nil {
+		nodeStatus = d.nodeClient.ControlStatus()
+	}
+	usable := false
+	if childOK && d.derper.Running() {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		applied, err := d.policyClient.Status(ctx)
+		cancel()
+		usable = applied.Usable
+		if applied.Revision != 0 || err == nil {
+			nodeStatus.AppliedRevision = applied.Revision
 		}
 	}
-	eligible := d.manager.EligibleCount()
+	nodeStatus.Usable = usable
 	return health.Snapshot{
-		Live:              live,
-		Startup:           startup,
-		DerperUsable:      childOK,
-		EligibleVerifiers: eligible,
-		RequiredFailures:  requiredFailures,
-		PendingRestart:    pendingRestart,
-		Ready:             childOK && eligible > 0 && requiredFailures == 0,
+		Live:           live,
+		Startup:        startup,
+		DerperUsable:   usable,
+		Node:           nodeStatus,
+		PendingRestart: pendingRestart,
+		Ready:          usable,
 	}
 }
 
@@ -800,6 +818,10 @@ func (d *Daemon) shutdownInternal() error {
 	d.childOK = false
 	d.mu.Unlock()
 	d.denyAdmission()
+	if d.nodeCancel != nil {
+		d.nodeCancel()
+		<-d.nodeDone
+	}
 	if d.adminServer != nil {
 		if adminErr := d.adminServer.StopAccepting(); adminErr != nil {
 			err = errors.Join(err, adminErr)

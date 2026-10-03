@@ -4,21 +4,36 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/lsy223622/UniDERP/v2/internal/config"
 )
 
-func BuildArgs(server config.ServerConfig, admissionAddress, keyPath string) ([]string, error) {
+func BuildArgs(server config.ServerConfig, managementAddress, keyPath string, policy PolicyClient) ([]string, error) {
 	if strings.TrimSpace(server.Hostname) == "" {
 		return nil, errors.New("server.hostname is required before starting derper")
 	}
 	if strings.TrimSpace(keyPath) == "" {
 		return nil, errors.New("derper key path is required")
 	}
-	if err := ValidateAdmissionAddress(admissionAddress); err != nil {
+	if err := ValidateAdmissionAddress(managementAddress); err != nil {
 		return nil, err
+	}
+	if policy.Path == "" || policy.SocketPath == "" {
+		return nil, errors.New("derper policy file and socket are required")
+	}
+	policyFile, err := filepath.Abs(policy.Path)
+	if err != nil {
+		return nil, err
+	}
+	policySocket, err := filepath.Abs(policy.SocketPath)
+	if err != nil {
+		return nil, err
+	}
+	if filepath.Dir(policyFile) != filepath.Dir(policySocket) {
+		return nil, errors.New("derper policy file and socket must share their protected directory")
 	}
 	if err := configAddress(server.DERP.Listen, "server.derp.listen"); err != nil {
 		return nil, err
@@ -46,8 +61,11 @@ func BuildArgs(server config.ServerConfig, admissionAddress, keyPath string) ([]
 		"-c=" + keyPath,
 		"-http-port=" + acmeHTTPPort(server),
 		"-verify-clients=false",
-		"-verify-client-url=http://" + net.JoinHostPort(admissionHost(admissionAddress), admissionPort(admissionAddress)) + "/admit",
-		"-verify-client-url-fail-open=false",
+		"-verify-client-url=",
+		"-uniderp-management-url=http://" + managementAddress,
+		"-uniderp-policy-file=" + policyFile,
+		"-uniderp-policy-socket=" + policySocket,
+		"-uniderp-max-budget-bps=" + strconv.FormatUint(policy.MaxBudgetBPS, 10),
 		"-mesh-psk-file=",
 	}
 	if server.DERP.TLSMode == "passthrough" {
@@ -119,16 +137,6 @@ func ValidateAdmissionAddress(address string) error {
 		return fmt.Errorf("admission address: port must be a non-zero numeric value, got %q", port)
 	}
 	return nil
-}
-
-func admissionHost(address string) string {
-	host, _, _ := net.SplitHostPort(address)
-	return host
-}
-
-func admissionPort(address string) string {
-	_, port, _ := net.SplitHostPort(address)
-	return port
 }
 
 func configAddress(address, field string) error {

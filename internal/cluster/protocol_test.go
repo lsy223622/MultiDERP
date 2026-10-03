@@ -4,11 +4,32 @@ import (
 	"bytes"
 	"encoding/json"
 	"math"
+	"os"
 	"testing"
 	"time"
 
 	"tailscale.com/types/key"
 )
+
+func TestPolicySharedWireFixture(t *testing.T) {
+	b, err := os.ReadFile("testdata/policy.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := DecodePolicy(bytes.NewReader(b), "cluster", "node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(p)
+	if err != nil || !bytes.Equal(encoded, b) || p.Revision != 7 || p.Grants[0].GrantRevision != 3 || p.QoS.SharedMaxBPS != 40000000 {
+		t.Fatal("wire semantics changed", err)
+	}
+	for i, hour := range []int{2, 3} {
+		if !EffectiveUntil(p.Grants[0], p.Grants[0].Keys[i]).Equal(p.GeneratedAt.Add(time.Duration(hour) * time.Hour)) {
+			t.Fatal("wire deadline changed", i)
+		}
+	}
+}
 
 func testPolicy() Policy {
 	t0 := time.Date(2026, 10, 3, 0, 0, 0, 0, time.UTC)
