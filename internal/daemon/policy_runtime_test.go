@@ -50,7 +50,7 @@ func TestUnregisteredControllerStartsFailClosedPublicRelay(t *testing.T) {
 	if err := cluster.SaveCache(cachePath, foreign); err != nil {
 		t.Fatal(err)
 	}
-	d := New(t.Context(), Options{ConfigPath: path, DerperBinary: binary, AdmissionAddress: freeLoopbackAddress(t), Logger: log.New(io.Discard, "", 0)})
+	d := New(t.Context(), Options{ConfigPath: path, DerperBinary: binary, Logger: log.New(io.Discard, "", 0)})
 	if err := d.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +205,7 @@ func TestDaemonControlAppliesAndExpiresCachedPolicy(t *testing.T) {
 	if err := config.WriteAtomic(path, cfg); err != nil {
 		t.Fatal(err)
 	}
-	d := New(t.Context(), Options{ConfigPath: path, DerperBinary: binary, AdmissionAddress: freeLoopbackAddress(t), Logger: log.New(io.Discard, "", 0)})
+	d := New(t.Context(), Options{ConfigPath: path, DerperBinary: binary, Logger: log.New(io.Discard, "", 0)})
 	if err := d.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}

@@ -29,7 +29,7 @@ func TestControllerLocalAdminAndLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	var logs bytes.Buffer
-	d := New(t.Context(), Options{ConfigPath: path, AdmissionAddress: freeLoopbackAddress(t), Logger: log.New(&logs, "", 0)})
+	d := New(t.Context(), Options{ConfigPath: path, Logger: log.New(&logs, "", 0)})
 	if err := d.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}

@@ -18,7 +18,7 @@ func BuildArgs(server config.ServerConfig, managementAddress, keyPath string, po
 	if strings.TrimSpace(keyPath) == "" {
 		return nil, errors.New("derper key path is required")
 	}
-	if err := ValidateAdmissionAddress(managementAddress); err != nil {
+	if err := ValidateManagementAddress(managementAddress); err != nil {
 		return nil, err
 	}
 	if policy.Path == "" || policy.SocketPath == "" {
@@ -87,7 +87,7 @@ func validateTLSConfig(server config.ServerConfig) error {
 		}
 		if server.DERP.CertMode != "" && server.DERP.CertMode != "none" {
 			if server.DERP.CertMode == "gcp" {
-				return errors.New("server.derp.cert_mode: unsupported value \"gcp\" in V1; supported values are none, letsencrypt, or manual")
+				return errors.New("server.derp.cert_mode: unsupported value \"gcp\"; supported values are none, letsencrypt, or manual")
 			}
 			return fmt.Errorf("server.derp.cert_mode %q requires tls_mode: passthrough; tls_mode: external uses cert_mode: none", server.DERP.CertMode)
 		}
@@ -103,7 +103,7 @@ func validateTLSConfig(server config.ServerConfig) error {
 				return fmt.Errorf("server.derp.listen: passthrough cert_mode %q must use port 443; use cert_mode: manual for a non-443 TLS backend", server.DERP.CertMode)
 			}
 		case "gcp":
-			return errors.New("server.derp.cert_mode: unsupported value \"gcp\" in V1; supported values are none, letsencrypt, or manual")
+			return errors.New("server.derp.cert_mode: unsupported value \"gcp\"; supported values are none, letsencrypt, or manual")
 		default:
 			return errors.New("server.derp.cert_mode must be manual or letsencrypt with tls_mode: passthrough")
 		}
@@ -123,18 +123,18 @@ func acmeHTTPPort(server config.ServerConfig) string {
 	return "-1"
 }
 
-func ValidateAdmissionAddress(address string) error {
+func ValidateManagementAddress(address string) error {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
-		return fmt.Errorf("admission address: invalid listen address %q: %w", address, err)
+		return fmt.Errorf("management address: invalid listen address %q: %w", address, err)
 	}
 	ip := net.ParseIP(host)
 	if ip == nil || !ip.IsLoopback() {
-		return fmt.Errorf("admission address: host must be a loopback IP address, got %q", host)
+		return fmt.Errorf("management address: host must be a loopback IP address, got %q", host)
 	}
 	portNumber, err := strconv.ParseUint(port, 10, 16)
 	if err != nil || portNumber == 0 {
-		return fmt.Errorf("admission address: port must be a non-zero numeric value, got %q", port)
+		return fmt.Errorf("management address: port must be a non-zero numeric value, got %q", port)
 	}
 	return nil
 }

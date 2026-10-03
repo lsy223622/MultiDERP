@@ -141,4 +141,3 @@ $('login-form').addEventListener('submit',async e=>{e.preventDefault();const f=e
 $('logout').addEventListener('click',async()=>{try{await api('/logout','POST',{});actor=csrf=undefined;$('content').replaceChildren();await session();}catch(e){notice(e.message,true);}});
 window.addEventListener('hashchange',render);
 session();
-

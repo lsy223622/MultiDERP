@@ -3,12 +3,10 @@ package daemon
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net"
 	"net/http"
-	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,9 +16,6 @@ import (
 
 	"github.com/lsy223622/UniDERP/v2/internal/admin"
 	"github.com/lsy223622/UniDERP/v2/internal/config"
-	"github.com/lsy223622/UniDERP/v2/internal/verifier"
-	"tailscale.com/tailcfg"
-	"tailscale.com/types/key"
 )
 
 func TestEmptyConfigStartsWithoutDerperAndReportsHealth(t *testing.T) {
@@ -29,14 +24,16 @@ func TestEmptyConfigStartsWithoutDerperAndReportsHealth(t *testing.T) {
 	cfg := config.Default()
 	cfg.Server.Admin.Socket = filepath.Join(dir, "run", "admin.sock")
 	cfg.Server.Health.Listen = freeLoopbackAddress(t)
+	cfg.Controller.Listen = freeLoopbackAddress(t)
+	cfg.Controller.Database = filepath.Join(dir, "controller.sqlite")
+	cfg.Controller.KeyFile = filepath.Join(dir, "controller.key")
 	if err := config.WriteAtomic(configPath, cfg); err != nil {
 		t.Fatalf("WriteAtomic() error = %v", err)
 	}
 
 	d := New(context.Background(), Options{
-		ConfigPath:       configPath,
-		AdmissionAddress: freeLoopbackAddress(t),
-		DerperOutput:     io.Discard,
+		ConfigPath:   configPath,
+		DerperOutput: io.Discard,
 	})
 	if err := d.Start(context.Background()); err != nil {
 		t.Fatalf("Start() error = %v", err)
@@ -63,33 +60,6 @@ func TestEmptyConfigStartsWithoutDerperAndReportsHealth(t *testing.T) {
 		}
 	}
 
-	response, err := (admin.Client{SocketPath: cfg.Server.Admin.Socket, Timeout: time.Second}).Call(context.Background(), admin.Request{Action: "tailnet.list"})
-	if err != nil {
-		t.Fatalf("admin tailnet.list error = %v", err)
-	}
-	var statuses []struct{}
-	if err := json.Unmarshal(response.Data, &statuses); err != nil || len(statuses) != 0 {
-		t.Fatalf("empty tailnet list = %#v, error = %v", statuses, err)
-	}
-
-	requestBody, err := json.Marshal(tailcfg.DERPAdmitClientRequest{NodePublic: key.NewNode().Public()})
-	if err != nil {
-		t.Fatalf("marshal admission request: %v", err)
-	}
-	request, err := http.NewRequest(http.MethodPost, "http://"+d.admissionAddress+"/admit", bytes.NewReader(requestBody))
-	if err != nil {
-		t.Fatalf("create admission request: %v", err)
-	}
-	request.Header.Set("Content-Type", "application/json")
-	admissionResponse, err := httpClient.Do(request)
-	if err != nil {
-		t.Fatalf("admission request error = %v", err)
-	}
-	_, _ = io.Copy(io.Discard, admissionResponse.Body)
-	_ = admissionResponse.Body.Close()
-	if admissionResponse.StatusCode != http.StatusOK {
-		t.Fatalf("empty-pool admission status = %d, want 200", admissionResponse.StatusCode)
-	}
 }
 
 func TestMissingConfigIsCreatedBeforeListeners(t *testing.T) {
@@ -97,6 +67,9 @@ func TestMissingConfigIsCreatedBeforeListeners(t *testing.T) {
 	cfg := config.Default()
 	cfg.Server.Admin.Socket = filepath.Join(dir, "run", "admin.sock")
 	cfg.Server.Health.Listen = freeLoopbackAddress(t)
+	cfg.Controller.Listen = freeLoopbackAddress(t)
+	cfg.Controller.Database = filepath.Join(dir, "controller.sqlite")
+	cfg.Controller.KeyFile = filepath.Join(dir, "controller.key")
 	templatePath := filepath.Join(dir, "template.yaml")
 	if err := config.WriteAtomic(templatePath, cfg); err != nil {
 		t.Fatalf("WriteAtomic() template error = %v", err)
@@ -107,10 +80,9 @@ func TestMissingConfigIsCreatedBeforeListeners(t *testing.T) {
 	}
 	configPath := filepath.Join(dir, "missing.yaml")
 	d := New(context.Background(), Options{
-		ConfigPath:       configPath,
-		ConfigTemplate:   template,
-		AdmissionAddress: freeLoopbackAddress(t),
-		DerperOutput:     io.Discard,
+		ConfigPath:     configPath,
+		ConfigTemplate: template,
+		DerperOutput:   io.Discard,
 	})
 	if err := d.Start(context.Background()); err != nil {
 		t.Fatalf("Start() error = %v", err)
@@ -134,17 +106,17 @@ func TestRestartOnlyReloadIsPendingWithoutChangingRuntimeBoundary(t *testing.T) 
 	cfg := config.Default()
 	cfg.Server.Admin.Socket = filepath.Join(dir, "run", "admin.sock")
 	cfg.Server.Health.Listen = freeLoopbackAddress(t)
+	cfg.Controller.Listen = freeLoopbackAddress(t)
+	cfg.Controller.Database = filepath.Join(dir, "controller.sqlite")
+	cfg.Controller.KeyFile = filepath.Join(dir, "controller.key")
 	cfg.Storage.StateDir = filepath.Join(dir, "data")
-	cfg.Storage.TailnetStateDir = filepath.Join(dir, "tailnets")
-	cfg.Storage.OrphanStateDir = filepath.Join(dir, "orphans")
 	if err := config.WriteAtomic(configPath, cfg); err != nil {
 		t.Fatalf("WriteAtomic() error = %v", err)
 	}
 
 	d := New(context.Background(), Options{
-		ConfigPath:       configPath,
-		AdmissionAddress: freeLoopbackAddress(t),
-		DerperOutput:     io.Discard,
+		ConfigPath:   configPath,
+		DerperOutput: io.Discard,
 	})
 	if err := d.Start(context.Background()); err != nil {
 		t.Fatalf("Start() error = %v", err)
@@ -171,300 +143,43 @@ func TestRestartOnlyReloadIsPendingWithoutChangingRuntimeBoundary(t *testing.T) 
 	}
 }
 
-func TestAdmissionAndConfigReloadConcurrent(t *testing.T) {
-	dir := shortTempDir(t)
-	configPath := filepath.Join(dir, "config.yaml")
-	cfg := config.Default()
-	cfg.Server.Hostname = "derp.example.com"
-	cfg.Server.Admin.Socket = filepath.Join(dir, "run", "admin.sock")
-	cfg.Server.Health.Listen = freeLoopbackAddress(t)
-	cfg.Storage.StateDir = filepath.Join(dir, "data")
-	cfg.Storage.TailnetStateDir = filepath.Join(dir, "tailnets")
-	cfg.Storage.OrphanStateDir = filepath.Join(dir, "orphans")
-	cfg.Tailnets = []config.TailnetConfig{{Name: "alice", Disabled: true, Auth: config.AuthConfig{Type: "web"}}}
-	cfg.Normalize()
-	if err := config.WriteAtomic(configPath, cfg); err != nil {
-		t.Fatalf("WriteAtomic() error = %v", err)
-	}
-
-	d := New(context.Background(), Options{
-		ConfigPath:       configPath,
-		AdmissionAddress: freeLoopbackAddress(t),
-		DerperOutput:     io.Discard,
-	})
-	if err := d.Start(context.Background()); err != nil {
-		t.Fatalf("Start() error = %v", err)
-	}
-	defer func() { _ = d.Shutdown() }()
-
-	v := &daemonBlockingVerifier{
-		entered: make(chan struct{}),
-		release: make(chan struct{}),
-	}
-	d.manager.Pool().Upsert("alice", v)
-	d.admission.SetBarrier(true)
-	firstAdmission := make(chan daemonAdmissionResult, 1)
-	go func() {
-		allow, err := d.admission.Admit(context.Background(), key.NewNode().Public(), keyAddrForDaemonTest())
-		firstAdmission <- daemonAdmissionResult{allow: allow, err: err}
-	}()
-	select {
-	case <-v.entered:
-	case <-time.After(time.Second):
-		t.Fatal("admission did not reach verifier before reload")
-	}
-
-	updated := cfg.Clone()
-	updated.Logging.Level = "debug"
-	if err := config.WriteAtomic(configPath, updated); err != nil {
-		t.Fatalf("write reload config: %v", err)
-	}
-	reloadDone := make(chan admin.Response, 1)
-	go func() {
-		reloadDone <- d.handleRequest(context.Background(), admin.Request{Action: "config.reload"})
-	}()
-	select {
-	case response := <-reloadDone:
-		t.Fatalf("config reload completed before in-flight admission released: %#v", response)
-	case <-time.After(20 * time.Millisecond):
-	}
-	close(v.release)
-	if result := <-firstAdmission; result.allow {
-		t.Fatalf("released non-matching admission was allowed: %#v", result)
-	}
-	if response := <-reloadDone; !response.OK {
-		t.Fatalf("config reload response = %#v", response)
-	}
-
-	start := make(chan struct{})
-	errs := make(chan error, 128)
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		<-start
-		for i := 0; i < 48; i++ {
-			allow, err := d.admission.Admit(context.Background(), key.NewNode().Public(), keyAddrForDaemonTest())
-			if err != nil {
-				errs <- err
-			}
-			if allow {
-				errs <- errors.New("non-matching reloaded admission was allowed")
-			}
-			_ = d.healthSnapshot()
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		<-start
-		for i := 0; i < 24; i++ {
-			desired := cfg.Clone()
-			if i%2 == 0 {
-				desired.Logging.Level = "info"
-			} else {
-				desired.Logging.Level = "debug"
-			}
-			if err := config.WriteAtomic(configPath, desired); err != nil {
-				errs <- err
-				continue
-			}
-			if response := d.handleRequest(context.Background(), admin.Request{Action: "config.reload"}); !response.OK {
-				errs <- errors.New(response.Message)
-			}
-		}
-	}()
-	close(start)
-	wg.Wait()
-	close(errs)
-	for err := range errs {
-		t.Errorf("concurrent admission/reload operation: %v", err)
-	}
-}
-
-func TestDaemonShutdownCancelsInFlightAdmission(t *testing.T) {
-	dir := shortTempDir(t)
-	configPath := filepath.Join(dir, "config.yaml")
-	cfg := config.Default()
-	cfg.Server.Hostname = "derp.example.com"
-	cfg.Server.Admin.Socket = filepath.Join(dir, "run", "admin.sock")
-	cfg.Server.Health.Listen = freeLoopbackAddress(t)
-	cfg.Storage.StateDir = filepath.Join(dir, "data")
-	cfg.Storage.TailnetStateDir = filepath.Join(dir, "tailnets")
-	cfg.Storage.OrphanStateDir = filepath.Join(dir, "orphans")
-	if err := config.WriteAtomic(configPath, cfg); err != nil {
-		t.Fatalf("WriteAtomic() error = %v", err)
-	}
-
-	d := New(context.Background(), Options{
-		ConfigPath:       configPath,
-		AdmissionAddress: freeLoopbackAddress(t),
-		DerperOutput:     io.Discard,
-	})
-	if err := d.Start(context.Background()); err != nil {
-		t.Fatalf("Start() error = %v", err)
-	}
-
-	v := &daemonBlockingVerifier{
-		entered: make(chan struct{}),
-		release: make(chan struct{}),
-	}
-	d.manager.Pool().Upsert("alice", v)
-	d.admission.SetBarrier(true)
-	resultCh := make(chan daemonAdmissionResult, 1)
-	go func() {
-		allow, err := d.admission.Admit(context.Background(), key.NewNode().Public(), keyAddrForDaemonTest())
-		resultCh <- daemonAdmissionResult{allow: allow, err: err}
-	}()
-	select {
-	case <-v.entered:
-	case <-time.After(time.Second):
-		_ = d.Shutdown()
-		t.Fatal("admission did not reach verifier before shutdown")
-	}
-
-	shutdownDone := make(chan error, 1)
-	go func() { shutdownDone <- d.Shutdown() }()
-	select {
-	case result := <-resultCh:
-		if result.allow {
-			t.Fatalf("shutdown allowed in-flight admission: %#v", result)
-		}
-	case <-time.After(2 * time.Second):
-		_ = d.Shutdown()
-		t.Fatal("shutdown did not cancel in-flight admission")
-	}
-	select {
-	case err := <-shutdownDone:
-		if err != nil {
-			t.Fatalf("Shutdown() error = %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Shutdown() did not finish after canceling admission")
-	}
-}
-
-func TestDaemonShutdownCancelsAdmissionBeforeWaitingForAdminMutation(t *testing.T) {
-	dir := shortTempDir(t)
-	configPath := filepath.Join(dir, "config.yaml")
-	cfg := config.Default()
-	cfg.Server.Hostname = "derp.example.com"
-	cfg.Server.Admin.Socket = filepath.Join(dir, "run", "admin.sock")
-	cfg.Server.Health.Listen = freeLoopbackAddress(t)
-	cfg.Storage.StateDir = filepath.Join(dir, "data")
-	cfg.Storage.TailnetStateDir = filepath.Join(dir, "tailnets")
-	cfg.Storage.OrphanStateDir = filepath.Join(dir, "orphans")
-	cfg.Tailnets = []config.TailnetConfig{{Name: "alice", Auth: config.AuthConfig{Type: "web"}}}
-	if err := config.WriteAtomic(configPath, cfg); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-
-	blocking := &daemonBlockingVerifier{entered: make(chan struct{}), release: make(chan struct{})}
-	d := New(context.Background(), Options{
-		ConfigPath:       configPath,
-		AdmissionAddress: freeLoopbackAddress(t),
-		DerperOutput:     io.Discard,
-		Factory:          &daemonBlockingFactory{verifier: blocking},
-	})
-	d.derper = &daemonFakeProcess{}
-	if err := d.Start(context.Background()); err != nil {
-		t.Fatalf("Start() error = %v", err)
-	}
-	t.Cleanup(func() { _ = d.Shutdown() })
-
-	resultCh := make(chan daemonAdmissionResult, 1)
-	go func() {
-		allow, err := d.admission.Admit(context.Background(), key.NewNode().Public(), keyAddrForDaemonTest())
-		resultCh <- daemonAdmissionResult{allow: allow, err: err}
-	}()
-	select {
-	case <-blocking.entered:
-	case <-time.After(time.Second):
-		_ = d.Shutdown()
-		t.Fatal("admission did not reach verifier before admin mutation")
-	}
-
-	adminResult := make(chan error, 1)
-	go func() {
-		_, err := (admin.Client{SocketPath: cfg.Server.Admin.Socket, Timeout: 5 * time.Second}).Call(context.Background(), admin.Request{
-			Action: "tailnet.disable",
-			Name:   "alice",
-		})
-		adminResult <- err
-	}()
-	removeDeadline := time.NewTimer(time.Second)
-	defer removeDeadline.Stop()
-	for d.manager.Pool().Contains("alice") {
-		select {
-		case <-removeDeadline.C:
-			_ = d.Shutdown()
-			t.Fatal("admin mutation did not remove verifier from admission")
-		default:
-			time.Sleep(time.Millisecond)
-		}
-	}
-
-	shutdownDone := make(chan error, 1)
-	go func() { shutdownDone <- d.Shutdown() }()
-	select {
-	case err := <-shutdownDone:
-		if err != nil {
-			t.Fatalf("Shutdown() error = %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Shutdown() waited for an admin mutation before canceling admission")
-	}
-	select {
-	case result := <-resultCh:
-		if result.allow {
-			t.Fatalf("shutdown allowed in-flight admission: %#v", result)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("in-flight admission did not finish during shutdown")
-	}
-	select {
-	case <-adminResult:
-	case <-time.After(time.Second):
-		t.Fatal("admin mutation did not finish after shutdown")
-	}
-}
-
 func TestDaemonRestartMarksChildUnavailableBeforeStopping(t *testing.T) {
 	d := New(context.Background(), Options{DerperOutput: io.Discard})
-	t.Cleanup(func() {
-		d.admission.Close()
-		_ = d.manager.Close()
-	})
 	fake := &daemonFakeProcess{stopEntered: make(chan struct{}), stopRelease: make(chan struct{})}
 	d.derper = fake
 	cfg := config.Default()
 	cfg.Server.Hostname = "derp.example.com"
 	root := t.TempDir()
 	cfg.Storage.StateDir = filepath.Join(root, "data")
-	cfg.Storage.TailnetStateDir = filepath.Join(root, "tailnets")
-	cfg.Storage.OrphanStateDir = filepath.Join(root, "orphans")
 	d.mu.Lock()
 	d.current = cfg.Clone()
 	d.desired = cfg.Clone()
 	d.started = true
 	d.mu.Unlock()
-	d.manager.Pool().Upsert("alice", &daemonReadyVerifier{})
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.controllerListener = listener
+	t.Cleanup(func() { listener.Close(); d.Shutdown() })
 	if err := d.syncDerper(context.Background()); err != nil {
 		t.Fatalf("initial syncDerper() error = %v", err)
 	}
-	if !d.healthSnapshot().DerperUsable {
+	if !d.derper.Running() || !d.childOK {
 		t.Fatal("initial fake derper is not usable")
 	}
+	stopEntered, stopRelease := fake.stopEntered, fake.stopRelease
 	restartDone := make(chan error, 1)
 	go func() { restartDone <- d.restartDerper(context.Background()) }()
 	select {
-	case <-fake.stopEntered:
+	case <-stopEntered:
 	case <-time.After(time.Second):
 		t.Fatal("restart did not attempt to stop derper")
 	}
 	if d.healthSnapshot().DerperUsable {
 		t.Fatal("derper remained usable while intentional restart was stopping it")
 	}
-	close(fake.stopRelease)
+	close(stopRelease)
 	select {
 	case err := <-restartDone:
 		if err != nil {
@@ -473,7 +188,7 @@ func TestDaemonRestartMarksChildUnavailableBeforeStopping(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("restartDerper() did not finish")
 	}
-	if !d.healthSnapshot().DerperUsable {
+	if !d.derper.Running() || !d.childOK {
 		t.Fatal("derper was not usable after successful restart")
 	}
 	fake.mu.Lock()
@@ -492,14 +207,6 @@ type daemonFakeProcess struct {
 	starts      int
 	stopEntered chan struct{}
 	stopRelease chan struct{}
-}
-
-type daemonBlockingFactory struct {
-	verifier *daemonBlockingVerifier
-}
-
-func (f *daemonBlockingFactory) New(context.Context, config.TailnetConfig, string, func(string, ...any)) (verifier.Verifier, error) {
-	return f.verifier, nil
 }
 
 func (p *daemonFakeProcess) Start(context.Context, config.ServerConfig, string, string) error {
@@ -544,6 +251,7 @@ func (p *daemonFakeProcess) Stop(context.Context) error {
 	running := p.running
 	entered := p.stopEntered
 	release := p.stopRelease
+	p.stopEntered, p.stopRelease = nil, nil
 	p.running = false
 	p.mu.Unlock()
 	if !running || done == nil {
@@ -557,57 +265,6 @@ func (p *daemonFakeProcess) Stop(context.Context) error {
 	}
 	close(done)
 	return nil
-}
-
-type daemonReadyVerifier struct{}
-
-func (*daemonReadyVerifier) Name() string { return "alice" }
-
-func (*daemonReadyVerifier) State() verifier.State { return verifier.StateConnected }
-
-func (*daemonReadyVerifier) ContainsNode(context.Context, key.NodePublic) (bool, error) {
-	return false, nil
-}
-
-func (*daemonReadyVerifier) Status(context.Context) verifier.Status {
-	return verifier.Status{Name: "alice", State: verifier.StateConnected, HardeningVerified: true}
-}
-
-func (*daemonReadyVerifier) Close() error { return nil }
-
-type daemonBlockingVerifier struct {
-	enteredOnce sync.Once
-	entered     chan struct{}
-	release     chan struct{}
-}
-
-func (v *daemonBlockingVerifier) Name() string { return "alice" }
-
-func (v *daemonBlockingVerifier) State() verifier.State { return verifier.StateConnected }
-
-func (v *daemonBlockingVerifier) ContainsNode(ctx context.Context, _ key.NodePublic) (bool, error) {
-	v.enteredOnce.Do(func() { close(v.entered) })
-	select {
-	case <-v.release:
-		return false, nil
-	case <-ctx.Done():
-		return false, ctx.Err()
-	}
-}
-
-func (v *daemonBlockingVerifier) Status(context.Context) verifier.Status {
-	return verifier.Status{Name: v.Name(), State: verifier.StateConnected, HardeningVerified: true}
-}
-
-func (v *daemonBlockingVerifier) Close() error { return nil }
-
-type daemonAdmissionResult struct {
-	allow bool
-	err   error
-}
-
-func keyAddrForDaemonTest() netip.Addr {
-	return netip.MustParseAddr("192.0.2.2")
 }
 
 func freeLoopbackAddress(t *testing.T) string {

@@ -37,7 +37,7 @@ func NewProcess(binary string, output io.Writer) *Process {
 	return &Process{Binary: binary, Output: output}
 }
 
-func (p *Process) Start(ctx context.Context, server config.ServerConfig, admissionAddress, keyPath string) error {
+func (p *Process) Start(ctx context.Context, server config.ServerConfig, managementAddress, keyPath string) error {
 	p.mu.Lock()
 	if p.command != nil {
 		p.mu.Unlock()
@@ -47,7 +47,7 @@ func (p *Process) Start(ctx context.Context, server config.ServerConfig, admissi
 		p.mu.Unlock()
 		return err
 	}
-	args, err := BuildArgs(server, admissionAddress, keyPath, p.Policy)
+	args, err := BuildArgs(server, managementAddress, keyPath, p.Policy)
 	if err != nil {
 		p.mu.Unlock()
 		return err

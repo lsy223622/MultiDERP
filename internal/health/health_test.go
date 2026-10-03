@@ -10,12 +10,10 @@ import (
 
 func TestHealthEndpointsReturnStructuredStatus(t *testing.T) {
 	want := Snapshot{
-		Live:              true,
-		Ready:             false,
-		Startup:           true,
-		DerperUsable:      false,
-		EligibleVerifiers: 0,
-		RequiredFailures:  1,
+		Live:         true,
+		Ready:        false,
+		Startup:      true,
+		DerperUsable: false,
 	}
 	handler := NewServer(func() Snapshot { return want }).Handler()
 

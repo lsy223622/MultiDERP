@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 )
@@ -19,7 +18,7 @@ func TestParseEmptyDocumentsUseDefaults(t *testing.T) {
 				t.Fatalf("Parse() error = %v", err)
 			}
 			want := Default()
-			if result.Config.Version != want.Version || result.Config.Server != want.Server || result.Config.Storage != want.Storage || result.Config.Logging != want.Logging || len(result.Config.Tailnets) != 0 {
+			if result.Config.Version != want.Version || result.Config.Server != want.Server || result.Config.Storage != want.Storage || result.Config.Logging != want.Logging {
 				t.Fatalf("Parse() config = %#v, want defaults %#v", result.Config, want)
 			}
 		})
@@ -81,101 +80,6 @@ func TestParseRejectsYAMLMergeKeys(t *testing.T) {
 	_, err := Parse([]byte("version: 2\nbase: &base\n  server: {}\n<<: *base\n"))
 	if err == nil || !strings.Contains(err.Error(), "YAML merge keys are not supported") {
 		t.Fatalf("Parse() error = %v, want merge-key error", err)
-	}
-}
-
-func TestValidateAuthenticationMatrix(t *testing.T) {
-	base := Default()
-	base.Server.Hostname = "derp.example.com"
-	tests := map[string]configAuthTest{
-		"web with secret": {
-			cfg:   tailnet("web", "secret", ""),
-			match: "web authentication cannot specify a secret file",
-		},
-		"oauth without secret": {
-			cfg:   tailnet("oauth", "", ""),
-			match: "client_secret_file is required",
-		},
-		"auth key without secret": {
-			cfg:   tailnet("auth_key", "", ""),
-			match: "auth_key_file is required",
-		},
-		"both secret files": {
-			cfg: func() TailnetConfig {
-				item := tailnet("oauth", "client", "")
-				item.Auth.AuthKeyFile = "key"
-				return item
-			}(),
-			match: "oauth authentication cannot specify auth_key_file",
-		},
-	}
-	for name, tt := range tests {
-		t.Run(name, func(t *testing.T) {
-			cfg := base.Clone()
-			cfg.Tailnets = []TailnetConfig{tt.cfg}
-			cfg.Normalize()
-			err := cfg.Validate()
-			if err == nil || !strings.Contains(err.Error(), tt.match) {
-				t.Fatalf("Validate() error = %v, want substring %q", err, tt.match)
-			}
-		})
-	}
-}
-
-func TestValidateOAuthRequiresAdvertiseTags(t *testing.T) {
-	cfg := Default()
-	cfg.Server.Hostname = "derp.example.com"
-	cfg.Tailnets = []TailnetConfig{tailnet("oauth", "client-secret", "")}
-	cfg.Normalize()
-	err := cfg.Validate()
-	if err == nil || !strings.Contains(err.Error(), "oauth authkeys require --advertise-tags") {
-		t.Fatalf("Validate() error = %v, want OAuth advertise-tags error", err)
-	}
-}
-
-func TestNormalizeAndValidateAdvertiseTags(t *testing.T) {
-	cfg := Default()
-	cfg.Server.Hostname = "derp.example.com"
-	item := tailnet("oauth", "client-secret", "")
-	item.Auth.Tags = []string{" tag:one ", "tag:two"}
-	cfg.Tailnets = []TailnetConfig{item}
-	cfg.Normalize()
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate() error = %v", err)
-	}
-	if want := []string{"tag:one", "tag:two"}; !reflect.DeepEqual(cfg.Tailnets[0].Auth.Tags, want) {
-		t.Fatalf("normalized tags = %#v, want %#v", cfg.Tailnets[0].Auth.Tags, want)
-	}
-}
-
-func TestValidateRejectsInvalidOrDuplicateAdvertiseTags(t *testing.T) {
-	for name, tags := range map[string][]string{
-		"missing prefix":    {"verifier"},
-		"invalid character": {"tag:verifier.example"},
-		"empty":             {"   "},
-		"duplicate":         {"tag:verifier", " tag:verifier "},
-	} {
-		t.Run(name, func(t *testing.T) {
-			cfg := Default()
-			cfg.Server.Hostname = "derp.example.com"
-			item := tailnet("auth_key", "", "key")
-			item.Auth.Tags = tags
-			cfg.Tailnets = []TailnetConfig{item}
-			cfg.Normalize()
-			if err := cfg.Validate(); err == nil {
-				t.Fatal("Validate() accepted invalid advertise tags")
-			}
-		})
-	}
-}
-
-func TestValidateDoesNotRequireTagsForWeb(t *testing.T) {
-	cfg := Default()
-	cfg.Server.Hostname = "derp.example.com"
-	cfg.Tailnets = []TailnetConfig{tailnet("web", "", "")}
-	cfg.Normalize()
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate() error = %v, want web config without tags to be valid", err)
 	}
 }
 
@@ -270,67 +174,6 @@ func TestValidateTLSCertificateModes(t *testing.T) {
 	}
 }
 
-type configAuthTest struct {
-	cfg   TailnetConfig
-	match string
-}
-
-func tailnet(authType, clientSecret, authKey string) TailnetConfig {
-	return TailnetConfig{
-		Name: "alice",
-		Auth: AuthConfig{
-			Type:             authType,
-			ClientSecretFile: clientSecret,
-			AuthKeyFile:      authKey,
-		},
-	}
-}
-
-func TestValidateReloadAllowsRestartOnlyAndRejectsIdentityChanges(t *testing.T) {
-	old := Default()
-	old.Server.Hostname = "derp.example.com"
-	old.Tailnets = []TailnetConfig{tailnet("web", "", "")}
-	old.Normalize()
-	if err := old.Validate(); err != nil {
-		t.Fatalf("old config is invalid: %v", err)
-	}
-
-	restartOnly := old.Clone()
-	restartOnly.Server.DERP.Listen = ":3378"
-	if err := ValidateReload(old, restartOnly); err != nil {
-		t.Fatalf("ValidateReload() restart-only error = %v", err)
-	}
-	if !RestartOnlyChanged(old, restartOnly) {
-		t.Fatal("RestartOnlyChanged() = false for DERP listener change")
-	}
-
-	identityChange := old.Clone()
-	identityChange.Tailnets[0].Hostname = "another.example.com"
-	if err := ValidateReload(old, identityChange); err == nil || !strings.Contains(err.Error(), "identity/auth/hostname changed") {
-		t.Fatalf("ValidateReload() error = %v, want identity-change error", err)
-	}
-
-	nameCaseChange := old.Clone()
-	nameCaseChange.Tailnets[0].Name = "Alice"
-	if err := ValidateReload(old, nameCaseChange); err == nil || !strings.Contains(err.Error(), "identity/auth/hostname changed") {
-		t.Fatalf("ValidateReload() case-only name error = %v, want identity-change error", err)
-	}
-
-	hot := old.Clone()
-	hot.Tailnets[0].Required = true
-	hot.Tailnets = append(hot.Tailnets, tailnet("web", "", ""))
-	hot.Tailnets[1].Name = "bob"
-	if err := ValidateReload(old, hot); err != nil {
-		t.Fatalf("ValidateReload() hot change error = %v", err)
-	}
-
-	removed := old.Clone()
-	removed.Tailnets = nil
-	if err := ValidateReload(old, removed); err == nil || !strings.Contains(err.Error(), "use tailnet remove") {
-		t.Fatalf("ValidateReload() removal error = %v, want explicit remove guidance", err)
-	}
-}
-
 func TestWriteAtomicNormalizesAndCanBeReloaded(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
@@ -372,9 +215,6 @@ func TestCreateFileIfMissingUsesExampleAndPreservesExistingFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse() created config error = %v", err)
 	}
-	if len(parsed.Config.Tailnets) != 0 {
-		t.Fatalf("created config contains tailnets: %#v", parsed.Config.Tailnets)
-	}
 	if parsed.Config.Server.DERP.Listen != DefaultDERPListen || parsed.Config.Storage.StateDir != DefaultStateDir || parsed.Config.Logging.Level != DefaultLoggingLevel {
 		t.Fatalf("created config did not contain expected defaults: %#v", parsed.Config)
 	}
@@ -403,15 +243,5 @@ func TestLoadFileMissingIsExplicitError(t *testing.T) {
 	_, err := LoadFile(filepath.Join(t.TempDir(), "missing.yaml"))
 	if err == nil || !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("LoadFile() error = %v, want wrapped not-exist error", err)
-	}
-}
-
-func TestIsWithin(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "root")
-	if !IsWithin(root, filepath.Join(root, "child")) {
-		t.Fatal("IsWithin() rejected child path")
-	}
-	if IsWithin(root, filepath.Join(root, "..", "outside")) {
-		t.Fatal("IsWithin() accepted escaped path")
 	}
 }

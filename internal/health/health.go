@@ -8,14 +8,12 @@ import (
 )
 
 type Snapshot struct {
-	Live              bool                  `json:"live"`
-	Ready             bool                  `json:"ready"`
-	Startup           bool                  `json:"startup"`
-	DerperUsable      bool                  `json:"derper_usable"`
-	EligibleVerifiers int                   `json:"eligible_verifiers"`
-	RequiredFailures  int                   `json:"required_failures"`
-	PendingRestart    bool                  `json:"pending_restart"`
-	Node              cluster.ControlStatus `json:"node"`
+	Live           bool                  `json:"live"`
+	Ready          bool                  `json:"ready"`
+	Startup        bool                  `json:"startup"`
+	DerperUsable   bool                  `json:"derper_usable"`
+	PendingRestart bool                  `json:"pending_restart"`
+	Node           cluster.ControlStatus `json:"node"`
 }
 
 type Provider func() Snapshot

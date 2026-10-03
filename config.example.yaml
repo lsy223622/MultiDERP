@@ -29,8 +29,6 @@ server:
 
 storage:
   state_dir: /data
-  tailnet_state_dir: /data/tailnets
-  orphan_state_dir: /data/orphans
 
 logging:
   level: info
