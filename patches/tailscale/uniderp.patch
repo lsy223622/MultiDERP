@@ -2309,7 +2309,7 @@
 +}
 --- /dev/null
 +++ b/derp/derpserver/uniderp_test.go
-@@ -0,0 +1,108 @@
+@@ -0,0 +1,113 @@
 +package derpserver
 +
 +import (
@@ -2321,6 +2321,7 @@
 +	"time"
 +
 +	"tailscale.com/derp"
++	"tailscale.com/tstest"
 +	"tailscale.com/types/key"
 +	"tailscale.com/types/logger"
 +)
@@ -2340,6 +2341,10 @@
 +	in, err := ln.Accept()
 +	if err != nil {
 +		t.Fatal(err)
++	}
++	if _, fakeClock := s.clock.(*tstest.Clock); fakeClock {
++		// Linux TCP statistics reschedule inside fake-clock callbacks.
++		in = struct{ net.Conn }{in}
 +	}
 +	go s.Accept(context.Background(), in, bufio.NewReadWriter(bufio.NewReader(in), bufio.NewWriter(in)), "127.0.0.1:12345")
 +	conn.SetDeadline(time.Now().Add(3 * time.Second))
