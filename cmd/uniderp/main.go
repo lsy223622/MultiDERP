@@ -112,6 +112,8 @@ func runCLI(socket string, args []string) int {
 	}
 
 	switch args[0] {
+	case "controller":
+		return runControllerCLI(call, args[1:])
 	case "tailnet":
 		return runTailnetCLI(call, args[1:])
 	case "orphan":
@@ -404,6 +406,8 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "Usage:")
 	fmt.Fprintln(os.Stderr, "  uniderp version")
 	fmt.Fprintln(os.Stderr, "  uniderp serve [--config path] [--derper binary]")
+	fmt.Fprintln(os.Stderr, "  uniderp [--socket path] controller init --username name --password-file path")
+	fmt.Fprintln(os.Stderr, "  uniderp [--socket path] controller recover --user-id id --password-file path")
 	fmt.Fprintln(os.Stderr, "  uniderp [--socket path] tailnet list|status [--verbose]|add|enable|disable|login|logout|reset|remove")
 	fmt.Fprintln(os.Stderr, "  uniderp [--socket path] orphan list|purge <orphan-id> [--yes]")
 	fmt.Fprintln(os.Stderr, "  uniderp [--socket path] config reload")

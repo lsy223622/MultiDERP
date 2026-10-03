@@ -18,6 +18,7 @@ import (
 	"github.com/lsy223622/UniDERP/v2/internal/admin"
 	"github.com/lsy223622/UniDERP/v2/internal/admission"
 	"github.com/lsy223622/UniDERP/v2/internal/config"
+	"github.com/lsy223622/UniDERP/v2/internal/control"
 	"github.com/lsy223622/UniDERP/v2/internal/derper"
 	"github.com/lsy223622/UniDERP/v2/internal/health"
 	"github.com/lsy223622/UniDERP/v2/internal/logging"
@@ -78,6 +79,9 @@ type Daemon struct {
 	healthListener       net.Listener
 	admissionServer      *http.Server
 	admissionListener    net.Listener
+	controllerStore      *control.Store
+	controllerServer     *http.Server
+	controllerListener   net.Listener
 
 	fatal            chan error
 	fatalOnce        sync.Once
@@ -167,6 +171,11 @@ func (d *Daemon) Start(ctx context.Context) error {
 	d.pendingRestart = false
 	d.mu.Unlock()
 	d.denyAdmission()
+	if parsed.Config.Controller.Enabled {
+		if err := d.startController(*parsed.Config.Controller); err != nil {
+			return d.abortStart(err)
+		}
+	}
 	if err := d.startAdmissionServer(); err != nil {
 		return d.abortStart(err)
 	}
@@ -435,6 +444,8 @@ func (d *Daemon) handleRequest(ctx context.Context, request admin.Request) admin
 		return admin.Failure("admin request canceled: " + err.Error())
 	}
 	switch request.Action {
+	case "controller.init", "controller.recover":
+		return d.controllerAdmin(ctx, request)
 	case "tailnet.list":
 		return admin.Success("", d.manager.List(ctx))
 	case "tailnet.status":
@@ -813,10 +824,20 @@ func (d *Daemon) shutdownInternal() error {
 		}
 	}
 	d.closeListeners()
+	if d.controllerStore != nil {
+		err = errors.Join(err, d.controllerStore.Close())
+	}
 	return err
 }
 
 func (d *Daemon) closeListeners() {
+	if d.controllerServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		if err := d.controllerServer.Shutdown(ctx); err != nil {
+			_ = d.controllerServer.Close()
+		}
+		cancel()
+	}
 	if d.healthServer != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		_ = d.healthServer.Shutdown(ctx)

@@ -13,6 +13,9 @@ const MaxFrameSize = 64 << 10
 
 type Request struct {
 	Action           string   `json:"action"`
+	Username         string   `json:"username,omitempty"`
+	UserID           string   `json:"user_id,omitempty"`
+	Password         string   `json:"password,omitempty"`
 	Name             string   `json:"name,omitempty"`
 	AuthType         string   `json:"auth_type,omitempty"`
 	ClientSecretFile string   `json:"client_secret_file,omitempty"`
