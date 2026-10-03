@@ -13,7 +13,7 @@ func TestStoreMigrationTransactionAndReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	var version int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 2 {
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 3 {
 		t.Fatalf("migration = %d, %v", version, err)
 	}
 	tx, err := s.db.BeginTx(context.Background(), nil)
@@ -43,13 +43,55 @@ func TestStoreMigrationTransactionAndReopen(t *testing.T) {
 	}
 }
 
-func TestStoreMigratesExistingAccounts(t *testing.T){
-	path:=filepath.Join(t.TempDir(),"controller.sqlite")
-	s,err:=OpenStore(path);if err!=nil{t.Fatal(err)}
-	admin,err:=s.InitializeAdmin(t.Context(),"admin",testPassword);if err!=nil{t.Fatal(err)}
-	if _,err:=s.db.Exec(`ALTER TABLE credentials DROP COLUMN revision; ALTER TABLE credentials DROP COLUMN refresh_seq; PRAGMA user_version=1;`);err!=nil{t.Fatal(err)}
-	s.Close();s,err=OpenStore(path);if err!=nil{t.Fatal(err)};defer s.Close()
-	token,_,err:=s.login(t.Context(),"admin",testPassword);if err!=nil{t.Fatal(err)}
-	actor,err:=s.Authenticate(t.Context(),token);if err!=nil||actor.ID!=admin.ID{t.Fatal("migration lost existing account")}
-	if _,err:=s.db.Exec("SELECT revision,refresh_seq FROM credentials");err!=nil{t.Fatal(err)}
+func TestStoreMigratesExistingAccounts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "controller.sqlite")
+	s, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin, err := s.InitializeAdmin(t.Context(), "admin", testPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`DROP TABLE node_challenges; ALTER TABLE enrollments DROP COLUMN response_encrypted; ALTER TABLE enrollments DROP COLUMN owner_id; ALTER TABLE credentials DROP COLUMN revision; ALTER TABLE credentials DROP COLUMN refresh_seq; PRAGMA user_version=1;`); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	s, err = OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	token, _, err := s.login(t.Context(), "admin", testPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor, err := s.Authenticate(t.Context(), token)
+	if err != nil || actor.ID != admin.ID {
+		t.Fatal("migration lost existing account")
+	}
+	if _, err := s.db.Exec("SELECT revision,refresh_seq FROM credentials"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNodeMigrationFailureRollsBack(t *testing.T) {
+	s, err := OpenStore(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.db.Exec(`ALTER TABLE enrollments DROP COLUMN response_encrypted; ALTER TABLE enrollments DROP COLUMN owner_id; PRAGMA user_version=2;`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.migrate(); err == nil {
+		t.Fatal("conflicting schema migrated")
+	}
+	var version int
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 2 {
+		t.Fatal("failed migration advanced version")
+	}
+	if _, err := s.db.Exec("SELECT response_encrypted FROM enrollments"); err == nil {
+		t.Fatal("failed migration left column behind")
+	}
 }

@@ -45,11 +45,11 @@ func (s *Store) EnableIdentity(keyFile string) error {
 	key, err := os.ReadFile(keyFile)
 	if errors.Is(err, os.ErrNotExist) {
 		var count int
-		if err := s.db.QueryRow("SELECT count(*) FROM credentials").Scan(&count); err != nil {
+		if err := s.db.QueryRow("SELECT (SELECT count(*) FROM credentials)+(SELECT count(*) FROM enrollments WHERE response_encrypted IS NOT NULL)").Scan(&count); err != nil {
 			return err
 		}
 		if count != 0 {
-			return errors.New("controller key is missing for existing credentials")
+			return errors.New("controller encryption key is missing")
 		}
 		if err := os.MkdirAll(filepath.Dir(keyFile), 0700); err != nil {
 			return err

@@ -14,10 +14,12 @@ import (
 const sessionCookie = "__Host-uniderp_session"
 
 type httpHandler struct {
-	store    *Store
-	mux      *http.ServeMux
-	mu       sync.Mutex
-	attempts map[string]loginAttempt
+	store        *Store
+	mux          *http.ServeMux
+	mu           sync.Mutex
+	attempts     map[string]loginAttempt
+	clusterMux   *http.ServeMux
+	nodeAttempts map[string]loginAttempt
 }
 type loginAttempt struct {
 	count int
@@ -25,8 +27,9 @@ type loginAttempt struct {
 }
 
 func NewHTTPHandler(s *Store) http.Handler {
-	h := &httpHandler{store: s, mux: http.NewServeMux(), attempts: make(map[string]loginAttempt)}
+	h := &httpHandler{store: s, mux: http.NewServeMux(), clusterMux: http.NewServeMux(), attempts: make(map[string]loginAttempt), nodeAttempts: make(map[string]loginAttempt)}
 	h.mountTailnets()
+	h.mountNodes()
 	h.mux.HandleFunc("POST /api/v1/login", h.login)
 	h.mux.HandleFunc("POST /api/v1/logout", func(w http.ResponseWriter, r *http.Request) {
 		cookie, _ := r.Cookie(sessionCookie)
@@ -148,6 +151,14 @@ func (h *httpHandler) actor(r *http.Request) Actor {
 func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if r.URL.Path == "/cluster/v1/enroll/challenge" || r.URL.Path == "/cluster/v1/enroll" || r.URL.Path == "/cluster/v1/session/challenge" || r.URL.Path == "/cluster/v1/session" {
+		if r.Method == "POST" && !h.allowNodeAttempt(r) {
+			http.Error(w, "registration rate limit", http.StatusTooManyRequests)
+			return
+		}
+		h.clusterMux.ServeHTTP(w, r)
+		return
+	}
 	if r.URL.Path != "/api/v1/login" {
 		cookie, err := r.Cookie(sessionCookie)
 		if err != nil {

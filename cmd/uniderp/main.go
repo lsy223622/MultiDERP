@@ -112,6 +112,8 @@ func runCLI(socket string, args []string) int {
 	}
 
 	switch args[0] {
+	case "node":
+		return runNodeCLI(call, args[1:])
 	case "controller":
 		return runControllerCLI(call, args[1:])
 	case "tailnet":
@@ -407,6 +409,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  uniderp version")
 	fmt.Fprintln(os.Stderr, "  uniderp serve [--config path] [--derper binary]")
 	fmt.Fprintln(os.Stderr, "  uniderp [--socket path] controller init --username name --password-file path")
+	fmt.Fprintln(os.Stderr, "  uniderp [--socket path] node enroll --controller https://controller.example.com --code-file path")
 	fmt.Fprintln(os.Stderr, "  uniderp [--socket path] controller recover --user-id id --password-file path")
 	fmt.Fprintln(os.Stderr, "  uniderp [--socket path] tailnet list|status [--verbose]|add|enable|disable|login|logout|reset|remove")
 	fmt.Fprintln(os.Stderr, "  uniderp [--socket path] orphan list|purge <orphan-id> [--yes]")

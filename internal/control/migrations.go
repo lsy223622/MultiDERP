@@ -7,21 +7,10 @@ func (s *Store) migrate() error {
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version == 2 {
+	if version == 3 {
 		return nil
 	}
-	if version == 1 {
-		tx, err := s.db.Begin()
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
-		if _, err := tx.Exec(`ALTER TABLE credentials ADD COLUMN revision INTEGER NOT NULL DEFAULT 1; ALTER TABLE credentials ADD COLUMN refresh_seq INTEGER NOT NULL DEFAULT 0; PRAGMA user_version=2;`); err != nil {
-			return err
-		}
-		return tx.Commit()
-	}
-	if version != 0 {
+	if version < 0 || version > 3 {
 		return fmt.Errorf("unsupported controller database version %d", version)
 	}
 	tx, err := s.db.Begin()
@@ -29,7 +18,13 @@ func (s *Store) migrate() error {
 		return err
 	}
 	defer tx.Rollback()
-	_, err = tx.Exec(`
+	if version == 1 {
+		if _, err := tx.Exec(`ALTER TABLE credentials ADD COLUMN revision INTEGER NOT NULL DEFAULT 1; ALTER TABLE credentials ADD COLUMN refresh_seq INTEGER NOT NULL DEFAULT 0;`); err != nil {
+			return err
+		}
+	}
+	if version == 0 {
+		_, err = tx.Exec(`
 CREATE TABLE users (
  id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE,
  role TEXT NOT NULL CHECK(role IN ('admin','member')), enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
@@ -99,9 +94,20 @@ CREATE TABLE events (
  resource_id TEXT NOT NULL, kind TEXT NOT NULL, message TEXT NOT NULL,
  created_at INTEGER NOT NULL, resolved_at INTEGER NOT NULL DEFAULT 0
 );
-PRAGMA user_version=2;
+
 `)
-	if err != nil {
+		if err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`ALTER TABLE enrollments ADD COLUMN response_encrypted BLOB;
+ALTER TABLE enrollments ADD COLUMN owner_id TEXT REFERENCES users(id);
+UPDATE enrollments SET owner_id=(SELECT owner_id FROM nodes WHERE nodes.id=enrollments.node_id);
+CREATE TABLE node_challenges (
+ nonce_hash BLOB PRIMARY KEY, node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+ payload BLOB NOT NULL, expires_at INTEGER NOT NULL, used_at INTEGER NOT NULL DEFAULT 0
+);
+PRAGMA user_version=3;`); err != nil {
 		return err
 	}
 	return tx.Commit()

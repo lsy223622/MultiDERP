@@ -1,6 +1,7 @@
 package control
 
 import (
+	"context"
 	"crypto/cipher"
 	"database/sql"
 	"errors"
@@ -9,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/lsy223622/UniDERP/v2/internal/cluster"
 
 	_ "modernc.org/sqlite"
 )
@@ -20,6 +23,9 @@ type Store struct {
 	apiBase          string
 	identityRequests chan struct{}
 	now              func() time.Time
+	clusterID        string
+	verifyDomain     func(context.Context, cluster.NodeChallenge) error
+	nodeRequests     chan struct{}
 }
 
 func OpenStore(path string) (*Store, error) {

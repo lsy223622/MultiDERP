@@ -17,6 +17,7 @@ import (
 
 	"github.com/lsy223622/UniDERP/v2/internal/admin"
 	"github.com/lsy223622/UniDERP/v2/internal/admission"
+	"github.com/lsy223622/UniDERP/v2/internal/cluster"
 	"github.com/lsy223622/UniDERP/v2/internal/config"
 	"github.com/lsy223622/UniDERP/v2/internal/control"
 	"github.com/lsy223622/UniDERP/v2/internal/derper"
@@ -84,6 +85,7 @@ type Daemon struct {
 	controllerListener   net.Listener
 	controllerCancel     context.CancelFunc
 	controllerDone       chan struct{}
+	nodeClient           *cluster.EnrollmentClient
 
 	fatal            chan error
 	fatalOnce        sync.Once
@@ -177,6 +179,8 @@ func (d *Daemon) Start(ctx context.Context) error {
 		if err := d.startController(ctx, *parsed.Config.Controller); err != nil {
 			return d.abortStart(err)
 		}
+	} else if err := d.startNode(ctx, parsed.Config.Node, "127.0.0.1:3341"); err != nil {
+		return d.abortStart(err)
 	}
 	if err := d.startAdmissionServer(); err != nil {
 		return d.abortStart(err)
@@ -446,6 +450,8 @@ func (d *Daemon) handleRequest(ctx context.Context, request admin.Request) admin
 		return admin.Failure("admin request canceled: " + err.Error())
 	}
 	switch request.Action {
+	case "node.enroll":
+		return d.nodeAdmin(ctx, request)
 	case "controller.init", "controller.recover":
 		return d.controllerAdmin(ctx, request)
 	case "tailnet.list":
@@ -708,6 +714,8 @@ func (d *Daemon) applyCommittedConfig(ctx context.Context, cfg config.Config, wa
 	if started {
 		runtime.Server = active.Server
 		runtime.Storage = active.Storage
+		runtime.Controller = active.Controller
+		runtime.Node = active.Node
 	}
 	pendingRestart := config.RestartOnlyChanged(runtime, cfg)
 	for _, warning := range warnings {

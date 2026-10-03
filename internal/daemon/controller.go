@@ -22,6 +22,9 @@ func (d *Daemon) startController(ctx context.Context, cfg config.ControllerConfi
 	if err := store.EnableIdentity(cfg.KeyFile); err != nil {
 		return fmt.Errorf("load controller key: %w", err)
 	}
+	if err := store.ConfigureNodes(cfg.AllowedNodeCIDRs); err != nil {
+		return fmt.Errorf("configure node registration: %w", err)
+	}
 	listener, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		return fmt.Errorf("listen controller: %w", err)
