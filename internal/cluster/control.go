@@ -21,8 +21,18 @@ type PolicyACK struct {
 }
 
 type PolicyApplication struct {
-	Revision uint64
-	Usable   bool
+	Revision          uint64
+	Usable            bool
+	Traffic           []TailnetTraffic
+	TrafficObservedAt time.Time
+}
+
+type TailnetTraffic struct {
+	TailnetID           string `json:"tailnet_id"`
+	RXPayloadBytes      uint64 `json:"rx_payload_bytes"`
+	TXPayloadBytes      uint64 `json:"tx_payload_bytes"`
+	RelayedPayloadBytes uint64 `json:"relayed_payload_bytes"`
+	QueuedPayloadBytes  uint64 `json:"queued_payload_bytes"`
 }
 
 const MaxControlMessageBytes = MaxPolicyBytes + 512

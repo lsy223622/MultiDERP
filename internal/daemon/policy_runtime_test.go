@@ -218,6 +218,9 @@ func TestDaemonControlAppliesAndExpiresCachedPolicy(t *testing.T) {
 	if !offline.Load() || !state.Ready || !state.DerperUsable || state.Node.AppliedRevision != p.Revision || state.Node.ReceivedRevision != p.Revision {
 		t.Fatal("daemon did not apply actual child policy", state)
 	}
+	if len(state.Node.Traffic) != 1 || state.Node.TrafficObservedAt.IsZero() {
+		t.Fatal("health did not sample actual child traffic", state.Node)
+	}
 	deadline = time.Now().Add(3 * time.Second)
 	for d.healthSnapshot().Ready && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)

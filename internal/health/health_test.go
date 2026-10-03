@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 )
 
@@ -34,7 +35,7 @@ func TestHealthEndpointsReturnStructuredStatus(t *testing.T) {
 		var got Snapshot
 		if err := json.Unmarshal(recorder.Body.Bytes(), &got); err != nil {
 			t.Errorf("GET %s response JSON error = %v", path, err)
-		} else if got != want {
+		} else if !reflect.DeepEqual(got, want) {
 			t.Errorf("GET %s response = %#v, want %#v", path, got, want)
 		}
 	}

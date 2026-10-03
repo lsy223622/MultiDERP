@@ -27,9 +27,11 @@ type policyNotice struct {
 }
 
 type policyReply struct {
-	Revision uint64 `json:"revision"`
-	Usable   bool   `json:"usable"`
-	Error    string `json:"error"`
+	Revision          uint64                   `json:"revision"`
+	Usable            bool                     `json:"usable"`
+	Error             string                   `json:"error"`
+	Traffic           []cluster.TailnetTraffic `json:"traffic,omitempty"`
+	TrafficObservedAt time.Time                `json:"traffic_observed_at"`
 }
 
 func (c PolicyClient) exchange(ctx context.Context, request policyNotice) (cluster.PolicyApplication, error) {
@@ -57,14 +59,14 @@ func (c PolicyClient) exchange(ctx context.Context, request policyNotice) (clust
 	if err := json.NewEncoder(conn).Encode(request); err != nil {
 		return cluster.PolicyApplication{}, err
 	}
-	body, err := bufio.NewReader(io.LimitReader(conn, 4097)).ReadBytes('\n')
+	body, err := bufio.NewReader(io.LimitReader(conn, cluster.MaxPolicyBytes+1)).ReadBytes('\n')
 	if err != nil {
 		if ctx.Err() != nil {
 			return cluster.PolicyApplication{}, ctx.Err()
 		}
 		return cluster.PolicyApplication{}, err
 	}
-	if len(body) > 4096 {
+	if len(body) > cluster.MaxPolicyBytes {
 		return cluster.PolicyApplication{}, errors.New("invalid derper policy response")
 	}
 	var reply policyReply
@@ -73,7 +75,7 @@ func (c PolicyClient) exchange(ctx context.Context, request policyNotice) (clust
 	if d.Decode(&reply) != nil || d.Decode(new(any)) != io.EOF {
 		return cluster.PolicyApplication{}, errors.New("invalid derper policy response")
 	}
-	result := cluster.PolicyApplication{Revision: reply.Revision, Usable: reply.Usable}
+	result := cluster.PolicyApplication{Revision: reply.Revision, Usable: reply.Usable, Traffic: reply.Traffic, TrafficObservedAt: reply.TrafficObservedAt}
 	if reply.Error != "" {
 		return result, errors.New("derper policy application failed")
 	}

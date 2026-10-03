@@ -12,13 +12,15 @@ import (
 )
 
 type ControlStatus struct {
-	Connected        bool      `json:"connected"`
-	DesiredRevision  uint64    `json:"desired_revision"`
-	ReceivedRevision uint64    `json:"received_revision"`
-	AppliedRevision  uint64    `json:"applied_revision"`
-	Usable           bool      `json:"usable"`
-	LastContact      time.Time `json:"last_contact"`
-	Error            string    `json:"error"`
+	Connected         bool             `json:"connected"`
+	DesiredRevision   uint64           `json:"desired_revision"`
+	ReceivedRevision  uint64           `json:"received_revision"`
+	AppliedRevision   uint64           `json:"applied_revision"`
+	Usable            bool             `json:"usable"`
+	LastContact       time.Time        `json:"last_contact"`
+	Error             string           `json:"error"`
+	Traffic           []TailnetTraffic `json:"traffic,omitempty"`
+	TrafficObservedAt time.Time        `json:"traffic_observed_at"`
 }
 
 func (c *EnrollmentClient) ControlStatus() ControlStatus {
@@ -67,6 +69,8 @@ func (c *EnrollmentClient) RunControl(ctx context.Context, path string, apply fu
 					c.controlStatus.ReceivedRevision = p.Revision
 					c.controlStatus.AppliedRevision = result.Revision
 					c.controlStatus.Usable = result.Usable
+					c.controlStatus.Traffic = result.Traffic
+					c.controlStatus.TrafficObservedAt = result.TrafficObservedAt
 					c.mu.Unlock()
 				}
 			}
@@ -223,6 +227,8 @@ func (c *EnrollmentClient) controlConnection(ctx context.Context, path string, s
 			c.mu.Lock()
 			c.controlStatus.AppliedRevision = result.Revision
 			c.controlStatus.Usable = result.Usable
+			c.controlStatus.Traffic = result.Traffic
+			c.controlStatus.TrafficObservedAt = result.TrafficObservedAt
 			c.controlStatus.Error = ""
 			c.mu.Unlock()
 		}

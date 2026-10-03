@@ -437,6 +437,8 @@ func (d *Daemon) healthSnapshot() health.Snapshot {
 		applied, err := d.policyClient.Status(ctx)
 		cancel()
 		usable = applied.Usable
+		nodeStatus.Traffic = applied.Traffic
+		nodeStatus.TrafficObservedAt = applied.TrafficObservedAt
 		if applied.Revision != 0 || err == nil {
 			nodeStatus.AppliedRevision = applied.Revision
 		}
