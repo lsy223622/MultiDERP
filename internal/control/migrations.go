@@ -7,8 +7,19 @@ func (s *Store) migrate() error {
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version == 1 {
+	if version == 2 {
 		return nil
+	}
+	if version == 1 {
+		tx, err := s.db.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		if _, err := tx.Exec(`ALTER TABLE credentials ADD COLUMN revision INTEGER NOT NULL DEFAULT 1; ALTER TABLE credentials ADD COLUMN refresh_seq INTEGER NOT NULL DEFAULT 0; PRAGMA user_version=2;`); err != nil {
+			return err
+		}
+		return tx.Commit()
 	}
 	if version != 0 {
 		return fmt.Errorf("unsupported controller database version %d", version)
@@ -35,6 +46,7 @@ CREATE TABLE tailnets (
 CREATE TABLE credentials (
  tailnet_id TEXT PRIMARY KEY REFERENCES tailnets(id) ON DELETE CASCADE,
  kind TEXT NOT NULL, encrypted BLOB NOT NULL, status TEXT NOT NULL,
+ revision INTEGER NOT NULL DEFAULT 1, refresh_seq INTEGER NOT NULL DEFAULT 0,
  updated_at INTEGER NOT NULL, error TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE identity_snapshots (
@@ -87,7 +99,7 @@ CREATE TABLE events (
  resource_id TEXT NOT NULL, kind TEXT NOT NULL, message TEXT NOT NULL,
  created_at INTEGER NOT NULL, resolved_at INTEGER NOT NULL DEFAULT 0
 );
-PRAGMA user_version=1;
+PRAGMA user_version=2;
 `)
 	if err != nil {
 		return err

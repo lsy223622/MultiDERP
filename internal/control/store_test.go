@@ -13,7 +13,7 @@ func TestStoreMigrationTransactionAndReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	var version int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 1 {
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 2 {
 		t.Fatalf("migration = %d, %v", version, err)
 	}
 	tx, err := s.db.BeginTx(context.Background(), nil)
@@ -41,4 +41,15 @@ func TestStoreMigrationTransactionAndReopen(t *testing.T) {
 	if err := s.db.QueryRow("SELECT count(*) FROM users").Scan(&count); err != nil || count != 0 {
 		t.Fatalf("reopen = %d %v", count, err)
 	}
+}
+
+func TestStoreMigratesExistingAccounts(t *testing.T){
+	path:=filepath.Join(t.TempDir(),"controller.sqlite")
+	s,err:=OpenStore(path);if err!=nil{t.Fatal(err)}
+	admin,err:=s.InitializeAdmin(t.Context(),"admin",testPassword);if err!=nil{t.Fatal(err)}
+	if _,err:=s.db.Exec(`ALTER TABLE credentials DROP COLUMN revision; ALTER TABLE credentials DROP COLUMN refresh_seq; PRAGMA user_version=1;`);err!=nil{t.Fatal(err)}
+	s.Close();s,err=OpenStore(path);if err!=nil{t.Fatal(err)};defer s.Close()
+	token,_,err:=s.login(t.Context(),"admin",testPassword);if err!=nil{t.Fatal(err)}
+	actor,err:=s.Authenticate(t.Context(),token);if err!=nil||actor.ID!=admin.ID{t.Fatal("migration lost existing account")}
+	if _,err:=s.db.Exec("SELECT revision,refresh_seq FROM credentials");err!=nil{t.Fatal(err)}
 }

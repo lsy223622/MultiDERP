@@ -26,6 +26,7 @@ type loginAttempt struct {
 
 func NewHTTPHandler(s *Store) http.Handler {
 	h := &httpHandler{store: s, mux: http.NewServeMux(), attempts: make(map[string]loginAttempt)}
+	h.mountTailnets()
 	h.mux.HandleFunc("POST /api/v1/login", h.login)
 	h.mux.HandleFunc("POST /api/v1/logout", func(w http.ResponseWriter, r *http.Request) {
 		cookie, _ := r.Cookie(sessionCookie)

@@ -1,16 +1,26 @@
 package control
 
 import (
+	"crypto/cipher"
 	"database/sql"
 	"errors"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
 
-type Store struct{ db *sql.DB }
+type Store struct {
+	db               *sql.DB
+	credentialAEAD   cipher.AEAD
+	apiClient        *http.Client
+	apiBase          string
+	identityRequests chan struct{}
+	now              func() time.Time
+}
 
 func OpenStore(path string) (*Store, error) {
 	if path == "" {
@@ -43,7 +53,7 @@ func OpenStore(path string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db}
+	s := &Store{db: db, now: time.Now, identityRequests: make(chan struct{}, 4)}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err

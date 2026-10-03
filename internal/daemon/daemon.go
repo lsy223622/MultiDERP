@@ -82,6 +82,8 @@ type Daemon struct {
 	controllerStore      *control.Store
 	controllerServer     *http.Server
 	controllerListener   net.Listener
+	controllerCancel     context.CancelFunc
+	controllerDone       chan struct{}
 
 	fatal            chan error
 	fatalOnce        sync.Once
@@ -172,7 +174,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 	d.mu.Unlock()
 	d.denyAdmission()
 	if parsed.Config.Controller.Enabled {
-		if err := d.startController(*parsed.Config.Controller); err != nil {
+		if err := d.startController(ctx, *parsed.Config.Controller); err != nil {
 			return d.abortStart(err)
 		}
 	}
@@ -824,6 +826,10 @@ func (d *Daemon) shutdownInternal() error {
 		}
 	}
 	d.closeListeners()
+	if d.controllerCancel != nil {
+		d.controllerCancel()
+		<-d.controllerDone
+	}
 	if d.controllerStore != nil {
 		err = errors.Join(err, d.controllerStore.Close())
 	}
