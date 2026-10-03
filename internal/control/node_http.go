@@ -35,6 +35,19 @@ func (h *httpHandler) allowNodeAttempt(r *http.Request) bool {
 
 func (h *httpHandler) mountNodes() {
 	s := h.store
+	h.mux.HandleFunc("POST /api/v1/nodes/{id}/recover", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			InstanceID string `json:"instance_id"`
+		}
+		if !decodeRequest(w, r, &body) {
+			return
+		}
+		if err := s.RecoverNodeInstance(r.Context(), h.actor(r), r.PathValue("id"), body.InstanceID); err != nil {
+			httpError(w, err)
+			return
+		}
+		writeJSON(w, map[string]bool{"ok": true})
+	})
 	h.mux.HandleFunc("GET /api/v1/nodes", func(w http.ResponseWriter, r *http.Request) {
 		items, err := s.ListNodes(r.Context(), h.actor(r))
 		if err != nil {

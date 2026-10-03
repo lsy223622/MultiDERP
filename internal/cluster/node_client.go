@@ -64,13 +64,14 @@ type nodeRegistration struct {
 }
 
 type EnrollmentClient struct {
-	mu         sync.Mutex
-	privateKey ed25519.PrivateKey
-	instanceID string
-	statePath  string
-	state      nodeRegistration
-	responder  *DomainResponder
-	httpClient *http.Client
+	mu            sync.Mutex
+	privateKey    ed25519.PrivateKey
+	instanceID    string
+	statePath     string
+	state         nodeRegistration
+	responder     *DomainResponder
+	httpClient    *http.Client
+	controlStatus ControlStatus
 }
 
 func NewEnrollmentClient(controllerURL, stateDir string) (*EnrollmentClient, error) {
@@ -94,14 +95,13 @@ func NewEnrollmentClient(controllerURL, stateDir string) (*EnrollmentClient, err
 	}
 	var id [32]byte
 	rand.Read(id[:])
-	c := &EnrollmentClient{privateKey: key, instanceID: hex.EncodeToString(id[:]), statePath: filepath.Join(stateDir, "registration.json"), state: nodeRegistration{ControllerURL: controllerURL}, responder: NewDomainResponder(key), httpClient: &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = 15 * time.Second
+	c := &EnrollmentClient{privateKey: key, instanceID: hex.EncodeToString(id[:]), statePath: filepath.Join(stateDir, "registration.json"), state: nodeRegistration{ControllerURL: controllerURL}, responder: NewDomainResponder(key), httpClient: &http.Client{Transport: transport, Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 	b, err := os.ReadFile(c.statePath)
 	if err == nil {
 		if len(b) > 64<<10 || decodeNodeJSON(b, &c.state) != nil || c.state.ControllerURL != controllerURL {
 			return nil, errors.New("invalid or differently bound node registration")
-		}
-		if c.state.Pending != nil {
-			c.instanceID = c.state.Pending.Challenge.InstanceID
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
@@ -149,7 +149,7 @@ func (c *EnrollmentClient) saveRegistration() error {
 	return os.Rename(f.Name(), c.statePath)
 }
 
-func (c *EnrollmentClient) post(ctx context.Context, path string, body, dst any) error {
+func (c *EnrollmentClient) post(ctx context.Context, path string, body, dst any, token string) error {
 	b, err := json.Marshal(body)
 	if err != nil {
 		return errors.New("invalid node request")
@@ -159,12 +159,25 @@ func (c *EnrollmentClient) post(ctx context.Context, path string, body, dst any)
 		return errors.New("invalid controller request")
 	}
 	r.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		r.Header.Set("Authorization", "Bearer "+token)
+	}
 	response, err := c.httpClient.Do(r)
 	if err != nil {
 		return errors.New("controller HTTPS request failed")
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
+		if path == "/cluster/v1/session" && response.StatusCode == http.StatusConflict {
+			b, err := io.ReadAll(io.LimitReader(response.Body, 4097))
+			var failure struct {
+				Error string `json:"error"`
+				Code  string `json:"code"`
+			}
+			if err == nil && len(b) <= 4096 && decodeNodeJSON(b, &failure) == nil && failure.Code == "identity_conflict" {
+				return ErrIdentityConflict
+			}
+		}
 		return errors.New("controller rejected node request")
 	}
 	b, err = io.ReadAll(io.LimitReader(response.Body, (64<<10)+1))
@@ -184,7 +197,7 @@ func (c *EnrollmentClient) validChallenge(ch NodeChallenge, purpose string) bool
 }
 
 func (c *EnrollmentClient) acceptSession(session NodeSession, ch NodeChallenge) error {
-	if session.ClusterID != ch.ClusterID || session.NodeID != ch.NodeID || session.InstanceID != ch.InstanceID || !validNodeToken(session.Token) || !time.Now().Before(session.ExpiresAt) || session.ExpiresAt.After(time.Now().Add(61*time.Minute)) {
+	if session.ClusterID != ch.ClusterID || session.NodeID != ch.NodeID || session.InstanceID != ch.InstanceID || !validNodeToken(session.Token) || !time.Now().Before(session.ExpiresAt) || session.ExpiresAt.After(time.Now().Add(61*time.Minute)) || session.LeaseUntil.IsZero() || session.LeaseUntil.After(session.ExpiresAt) || session.LeaseUntil.After(time.Now().Add(2*time.Minute)) {
 		return errors.New("controller returned a differently bound session")
 	}
 	previous := c.state
@@ -215,7 +228,7 @@ func (c *EnrollmentClient) Enroll(ctx context.Context, code string) (NodeSession
 			Code       string `json:"code"`
 			PublicKey  []byte `json:"public_key"`
 			InstanceID string `json:"instance_id"`
-		}{code, c.privateKey.Public().(ed25519.PublicKey), c.instanceID}, &ch); err != nil {
+		}{code, c.privateKey.Public().(ed25519.PublicKey), c.instanceID}, &ch, ""); err != nil {
 			return NodeSession{}, err
 		}
 		if !c.validChallenge(ch, "enroll") {
@@ -228,7 +241,7 @@ func (c *EnrollmentClient) Enroll(ctx context.Context, code string) (NodeSession
 	}
 	c.responder.SetChallenge(c.state.Pending.Challenge)
 	var session NodeSession
-	if err := c.post(ctx, "/cluster/v1/enroll", c.state.Pending, &session); err != nil {
+	if err := c.post(ctx, "/cluster/v1/enroll", c.state.Pending, &session, ""); err != nil {
 		return NodeSession{}, err
 	}
 	if err := c.acceptSession(session, c.state.Pending.Challenge); err != nil {
@@ -247,7 +260,7 @@ func (c *EnrollmentClient) RenewSession(ctx context.Context) (NodeSession, error
 	if err := c.post(ctx, "/cluster/v1/session/challenge", struct {
 		NodeID     string `json:"node_id"`
 		InstanceID string `json:"instance_id"`
-	}{c.state.Session.NodeID, c.instanceID}, &ch); err != nil {
+	}{c.state.Session.NodeID, c.instanceID}, &ch, ""); err != nil {
 		return NodeSession{}, err
 	}
 	if !c.validChallenge(ch, "session") || ch.NodeID != c.state.Session.NodeID || ch.ClusterID != c.state.Session.ClusterID || ch.Domain != c.state.Domain {
@@ -257,7 +270,7 @@ func (c *EnrollmentClient) RenewSession(ctx context.Context) (NodeSession, error
 	if err := c.post(ctx, "/cluster/v1/session", struct {
 		Challenge NodeChallenge `json:"challenge"`
 		Signature []byte        `json:"signature"`
-	}{ch, ed25519.Sign(c.privateKey, ch.SigningBytes())}, &session); err != nil {
+	}{ch, ed25519.Sign(c.privateKey, ch.SigningBytes())}, &session, ""); err != nil {
 		return NodeSession{}, err
 	}
 	if err := c.acceptSession(session, ch); err != nil {

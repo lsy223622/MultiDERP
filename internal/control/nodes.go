@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/netip"
 	"strings"
 	"time"
@@ -47,7 +48,7 @@ func (s *Store) ConfigureNodes(allowedCIDRs []string) error {
 	if s.credentialAEAD == nil {
 		return ErrInvalid
 	}
-	if _, err := s.db.Exec("INSERT INTO settings(key,value) VALUES('cluster_id',?) ON CONFLICT(key) DO NOTHING", randomToken()); err != nil {
+	if _, err := s.db.Exec("INSERT INTO settings(key,value) VALUES('cluster_id',?),('identity_retention_seconds','86400'),('control_retention_seconds','86400') ON CONFLICT(key) DO NOTHING", randomToken()); err != nil {
 		return err
 	}
 	if err := s.db.QueryRow("SELECT value FROM settings WHERE key='cluster_id'").Scan(&s.clusterID); err != nil {
@@ -238,7 +239,7 @@ func (s *Store) checkNodeChallenge(ctx context.Context, tx *sql.Tx, c cluster.No
 }
 
 func (s *Store) mintNodeSession(ctx context.Context, tx *sql.Tx, id, instance string) (cluster.NodeSession, error) {
-	session := cluster.NodeSession{ClusterID: s.clusterID, NodeID: id, InstanceID: instance, Token: randomToken(), ExpiresAt: s.now().Add(time.Hour).UTC().Truncate(time.Second)}
+	session := cluster.NodeSession{ClusterID: s.clusterID, NodeID: id, InstanceID: instance, Token: randomToken(), ExpiresAt: s.now().Add(time.Hour).UTC().Truncate(time.Second), LeaseUntil: s.now().Add(90 * time.Second).UTC().Truncate(time.Second)}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM node_sessions WHERE node_id=?", id); err != nil {
 		return cluster.NodeSession{}, err
 	}
@@ -322,6 +323,9 @@ func (s *Store) EnrollNode(ctx context.Context, req cluster.EnrollmentRequest) (
 	if _, err := tx.ExecContext(ctx, "INSERT INTO node_policies(node_id) VALUES(?)", req.Challenge.NodeID); err != nil {
 		return cluster.NodeSession{}, err
 	}
+	if _, err := s.buildPolicy(ctx, tx, req.Challenge.NodeID, s.now()); err != nil {
+		return cluster.NodeSession{}, err
+	}
 	if _, err := tx.ExecContext(ctx, "UPDATE node_challenges SET used_at=? WHERE nonce_hash=?", s.now().Unix(), tokenHash(req.Challenge.Nonce)); err != nil {
 		return cluster.NodeSession{}, err
 	}
@@ -374,12 +378,35 @@ func (s *Store) RenewNodeSession(ctx context.Context, c cluster.NodeChallenge, s
 	}
 	var pub []byte
 	var instance string
+	var owner string
 	var lease int64
-	if err := tx.QueryRowContext(ctx, `SELECT n.public_key,n.instance_id,n.lease_until FROM nodes n JOIN users u ON u.id=n.owner_id WHERE n.id=? AND n.domain=? AND n.state IN ('registered','ready','offline') AND u.enabled=1`, c.NodeID, c.Domain).Scan(&pub, &instance, &lease); err != nil || !bytes.Equal(pub, c.PublicKey) {
+	if err := tx.QueryRowContext(ctx, `SELECT n.public_key,n.instance_id,n.lease_until,n.owner_id FROM nodes n JOIN users u ON u.id=n.owner_id WHERE n.id=? AND n.domain=? AND n.state IN ('registered','ready','offline') AND u.enabled=1`, c.NodeID, c.Domain).Scan(&pub, &instance, &lease, &owner); err != nil || !bytes.Equal(pub, c.PublicKey) {
 		return cluster.NodeSession{}, ErrUnauthorized
 	}
 	if instance != c.InstanceID && lease > s.now().Unix() {
-		return cluster.NodeSession{}, ErrConflict
+		if _, err := tx.ExecContext(ctx, "UPDATE nodes SET state='identity_conflict',last_error='node identity is active on another instance' WHERE id=?", c.NodeID); err != nil {
+			return cluster.NodeSession{}, err
+		}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM node_sessions WHERE node_id=?", c.NodeID); err != nil {
+			return cluster.NodeSession{}, err
+		}
+		if _, err := tx.ExecContext(ctx, "UPDATE node_challenges SET used_at=? WHERE nonce_hash=?", s.now().Unix(), tokenHash(c.Nonce)); err != nil {
+			return cluster.NodeSession{}, err
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT INTO events(owner_id,resource_type,resource_id,kind,message,created_at) VALUES(?,'node',?,'identity_conflict','Node identity was presented by another running instance.',?)", owner, c.NodeID, s.now().Unix()); err != nil {
+			return cluster.NodeSession{}, err
+		}
+		if err := writeAudit(ctx, tx, "node:"+c.NodeID, owner, "node", c.NodeID, "node.identity_conflict"); err != nil {
+			return cluster.NodeSession{}, err
+		}
+		if _, err := s.buildPolicy(ctx, tx, c.NodeID, s.now()); err != nil {
+			return cluster.NodeSession{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return cluster.NodeSession{}, err
+		}
+		s.notifyPolicy(c.NodeID)
+		return cluster.NodeSession{}, errors.Join(ErrConflict, cluster.ErrIdentityConflict)
 	}
 	if _, err := tx.ExecContext(ctx, "UPDATE node_challenges SET used_at=? WHERE nonce_hash=?", s.now().Unix(), tokenHash(c.Nonce)); err != nil {
 		return cluster.NodeSession{}, err
@@ -394,20 +421,77 @@ func (s *Store) RenewNodeSession(ctx context.Context, c cluster.NodeChallenge, s
 	return session, tx.Commit()
 }
 
+func (s *Store) RecoverNodeInstance(ctx context.Context, actor Actor, id, instance string) error {
+	if !validNodeInstance(instance) {
+		return ErrInvalid
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := activeActor(ctx, tx, actor); err != nil {
+		return err
+	}
+	n, err := scanNode(tx.QueryRowContext(ctx, "SELECT "+nodeColumns+" FROM nodes WHERE id=?", id))
+	if err != nil {
+		return err
+	}
+	if err := RequireOwner(actor, n.OwnerID); err != nil {
+		return err
+	}
+	if n.State != "identity_conflict" {
+		return ErrConflict
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE nodes SET state='registered',instance_id=?,lease_until=?,last_error='' WHERE id=?", instance, s.now().Add(90*time.Second).Unix(), id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM node_sessions WHERE node_id=?", id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM node_challenges WHERE node_id=?", id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE events SET resolved_at=? WHERE resource_type='node' AND resource_id=? AND kind='identity_conflict' AND resolved_at=0", s.now().Unix(), id); err != nil {
+		return err
+	}
+	if err := writeAudit(ctx, tx, actor.ID, n.OwnerID, "node", id, "node.recover"); err != nil {
+		return err
+	}
+	if _, err := s.buildPolicy(ctx, tx, id, s.now()); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.notifyPolicy(id)
+	return nil
+}
+
 func (s *Store) AuthenticateNode(ctx context.Context, token string) (cluster.NodeSession, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return cluster.NodeSession{}, err
+	}
+	defer tx.Rollback()
+	return s.nodeSession(ctx, tx, token)
+}
+
+func (s *Store) nodeSession(ctx context.Context, tx *sql.Tx, token string) (cluster.NodeSession, error) {
 	var session cluster.NodeSession
-	var expires int64
+	var expires, lease int64
 	if len(token) != 64 {
 		return session, ErrUnauthorized
 	}
 	if _, err := hex.DecodeString(token); err != nil {
 		return session, ErrUnauthorized
 	}
-	err := s.db.QueryRowContext(ctx, `SELECT n.id,n.instance_id,s.expires_at FROM node_sessions s JOIN nodes n ON n.id=s.node_id JOIN users u ON u.id=n.owner_id WHERE s.token_hash=? AND s.expires_at>? AND s.instance_id=n.instance_id AND n.state IN ('registered','ready','offline') AND u.enabled=1`, tokenHash(token), s.now().Unix()).Scan(&session.NodeID, &session.InstanceID, &expires)
+	err := tx.QueryRowContext(ctx, `SELECT n.id,n.instance_id,s.expires_at,n.lease_until FROM node_sessions s JOIN nodes n ON n.id=s.node_id JOIN users u ON u.id=n.owner_id WHERE s.token_hash=? AND s.expires_at>? AND s.instance_id=n.instance_id AND n.state IN ('registered','ready','offline') AND u.enabled=1`, tokenHash(token), s.now().Unix()).Scan(&session.NodeID, &session.InstanceID, &expires, &lease)
 	if err != nil {
 		return cluster.NodeSession{}, ErrUnauthorized
 	}
 	session.ClusterID = s.clusterID
 	session.ExpiresAt = time.Unix(expires, 0).UTC()
+	session.LeaseUntil = time.Unix(lease, 0).UTC()
 	return session, nil
 }

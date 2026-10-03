@@ -7,10 +7,10 @@ func (s *Store) migrate() error {
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version == 3 {
+	if version == 4 {
 		return nil
 	}
-	if version < 0 || version > 3 {
+	if version < 0 || version > 4 {
 		return fmt.Errorf("unsupported controller database version %d", version)
 	}
 	tx, err := s.db.Begin()
@@ -100,7 +100,8 @@ CREATE TABLE events (
 			return err
 		}
 	}
-	if _, err := tx.Exec(`ALTER TABLE enrollments ADD COLUMN response_encrypted BLOB;
+	if version < 3 {
+		if _, err := tx.Exec(`ALTER TABLE enrollments ADD COLUMN response_encrypted BLOB;
 ALTER TABLE enrollments ADD COLUMN owner_id TEXT REFERENCES users(id);
 UPDATE enrollments SET owner_id=(SELECT owner_id FROM nodes WHERE nodes.id=enrollments.node_id);
 CREATE TABLE node_challenges (
@@ -108,6 +109,10 @@ CREATE TABLE node_challenges (
  payload BLOB NOT NULL, expires_at INTEGER NOT NULL, used_at INTEGER NOT NULL DEFAULT 0
 );
 PRAGMA user_version=3;`); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`ALTER TABLE grants ADD COLUMN last_control_success INTEGER NOT NULL DEFAULT 0; ALTER TABLE node_policies ADD COLUMN derper_usable INTEGER NOT NULL DEFAULT 0; PRAGMA user_version=4;`); err != nil {
 		return err
 	}
 	return tx.Commit()

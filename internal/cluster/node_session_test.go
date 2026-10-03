@@ -43,7 +43,7 @@ func TestNodeClientSessionRenewalChecksEveryBinding(t *testing.T) {
 					if !ed25519.Verify(ch.PublicKey, ch.SigningBytes(), body.Signature) {
 						t.Error("missing private proof")
 					}
-					session := NodeSession{ClusterID: ch.ClusterID, NodeID: ch.NodeID, InstanceID: ch.InstanceID, Token: strings.Repeat("c", 64), ExpiresAt: time.Now().Add(time.Hour)}
+					session := NodeSession{ClusterID: ch.ClusterID, NodeID: ch.NodeID, InstanceID: ch.InstanceID, Token: strings.Repeat("c", 64), ExpiresAt: time.Now().Add(time.Hour), LeaseUntil: time.Now().Add(90 * time.Second)}
 					if mutation == "session" {
 						session.NodeID = strings.Repeat("d", 64)
 					}

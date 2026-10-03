@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/lsy223622/UniDERP/v2/internal/cluster"
@@ -26,6 +27,8 @@ type Store struct {
 	clusterID        string
 	verifyDomain     func(context.Context, cluster.NodeChallenge) error
 	nodeRequests     chan struct{}
+	policyMu         sync.Mutex
+	policyStreams    map[string]*nodeControlStream
 }
 
 func OpenStore(path string) (*Store, error) {
@@ -59,7 +62,7 @@ func OpenStore(path string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db, now: time.Now, identityRequests: make(chan struct{}, 4)}
+	s := &Store{db: db, now: time.Now, identityRequests: make(chan struct{}, 4), policyStreams: make(map[string]*nodeControlStream)}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
@@ -67,4 +70,12 @@ func OpenStore(path string) (*Store, error) {
 	return s, nil
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	s.policyMu.Lock()
+	for id, stream := range s.policyStreams {
+		stream.stop()
+		delete(s.policyStreams, id)
+	}
+	s.policyMu.Unlock()
+	return s.db.Close()
+}

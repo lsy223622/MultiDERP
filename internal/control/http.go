@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/lsy223622/UniDERP/v2/internal/cluster"
 )
 
 const sessionCookie = "__Host-uniderp_session"
@@ -30,6 +32,7 @@ func NewHTTPHandler(s *Store) http.Handler {
 	h := &httpHandler{store: s, mux: http.NewServeMux(), clusterMux: http.NewServeMux(), attempts: make(map[string]loginAttempt), nodeAttempts: make(map[string]loginAttempt)}
 	h.mountTailnets()
 	h.mountNodes()
+	h.mountNodeControl()
 	h.mux.HandleFunc("POST /api/v1/login", h.login)
 	h.mux.HandleFunc("POST /api/v1/logout", func(w http.ResponseWriter, r *http.Request) {
 		cookie, _ := r.Cookie(sessionCookie)
@@ -151,6 +154,10 @@ func (h *httpHandler) actor(r *http.Request) Actor {
 func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if r.URL.Path == "/cluster/v1/control" || r.URL.Path == "/cluster/v1/heartbeat" || r.URL.Path == "/cluster/v1/ack" {
+		h.clusterMux.ServeHTTP(w, r)
+		return
+	}
 	if r.URL.Path == "/cluster/v1/enroll/challenge" || r.URL.Path == "/cluster/v1/enroll" || r.URL.Path == "/cluster/v1/session/challenge" || r.URL.Path == "/cluster/v1/session" {
 		if r.Method == "POST" && !h.allowNodeAttempt(r) {
 			http.Error(w, "registration rate limit", http.StatusTooManyRequests)
@@ -255,5 +262,9 @@ func httpError(w http.ResponseWriter, err error) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]string{"error": message})
+	body := map[string]string{"error": message}
+	if errors.Is(err, cluster.ErrIdentityConflict) {
+		body["code"] = "identity_conflict"
+	}
+	json.NewEncoder(w).Encode(body)
 }

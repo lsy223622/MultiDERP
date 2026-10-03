@@ -68,7 +68,7 @@ func TestNodeClientUsesVerifiedTLSAndBoundEnrollment(t *testing.T) {
 				w.WriteHeader(503)
 				return
 			}
-			session = NodeSession{ClusterID: c.ClusterID, NodeID: c.NodeID, InstanceID: c.InstanceID, Token: strings.Repeat("d", 64), ExpiresAt: time.Now().Add(time.Hour)}
+			session = NodeSession{ClusterID: c.ClusterID, NodeID: c.NodeID, InstanceID: c.InstanceID, Token: strings.Repeat("d", 64), ExpiresAt: time.Now().Add(time.Hour), LeaseUntil: time.Now().Add(90 * time.Second)}
 			json.NewEncoder(w).Encode(session)
 		default:
 			t.Error("unexpected URL")

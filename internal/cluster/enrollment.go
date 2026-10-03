@@ -42,6 +42,7 @@ type NodeSession struct {
 	InstanceID string    `json:"instance_id"`
 	Token      string    `json:"token"`
 	ExpiresAt  time.Time `json:"expires_at"`
+	LeaseUntil time.Time `json:"lease_until"`
 }
 
 type DomainResponse struct {
