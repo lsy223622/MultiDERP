@@ -51,7 +51,7 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go build -trimpath -o uniderp ./cmd/uniderp
-      - run: go build -trimpath -o derper tailscale.com/cmd/derper
+      - run: go run ./scripts/build-derper -goos linux -goarch amd64 -out derper
 
   build-windows:
     name: Windows build
@@ -68,7 +68,7 @@ jobs:
           $env:GOOS = 'windows'
           $env:GOARCH = 'amd64'
           go build -trimpath -o uniderp.exe ./cmd/uniderp
-          go build -trimpath -o derper.exe tailscale.com/cmd/derper
+          go run ./scripts/build-derper -goos windows -goarch amd64 -out derper.exe
 
   docker:
     name: Docker image

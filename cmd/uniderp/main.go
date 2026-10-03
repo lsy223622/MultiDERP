@@ -49,7 +49,7 @@ func runServe(args []string) int {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	configPath := flags.String("config", config.DefaultConfigPath, "path to the YAML configuration")
-	derperBinary := flags.String("derper", "derper", "upstream derper binary")
+	derperBinary := flags.String("derper", "derper", "patched derper binary")
 	admissionAddress := flags.String("admission-address", config.DefaultAdmissionAddress, "internal admission controller address")
 	if err := flags.Parse(args); err != nil {
 		return 2

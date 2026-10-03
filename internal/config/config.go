@@ -7,7 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
+	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -22,7 +25,7 @@ import (
 	"tailscale.com/tailcfg"
 )
 
-const CurrentVersion = 1
+const CurrentVersion = 2
 
 const (
 	DefaultDERPListen       = ":3377"
@@ -39,11 +42,27 @@ const (
 )
 
 type Config struct {
-	Version  int             `yaml:"version"`
-	Server   ServerConfig    `yaml:"server"`
-	Storage  StorageConfig   `yaml:"storage"`
-	Logging  LoggingConfig   `yaml:"logging"`
-	Tailnets []TailnetConfig `yaml:"tailnets"`
+	Controller *ControllerConfig `yaml:"controller"`
+	Node       NodeConfig        `yaml:"node"`
+	Version    int               `yaml:"version"`
+	Server     ServerConfig      `yaml:"server"`
+	Storage    StorageConfig     `yaml:"storage"`
+	Logging    LoggingConfig     `yaml:"logging"`
+	Tailnets   []TailnetConfig   `yaml:"tailnets,omitempty"`
+}
+
+type ControllerConfig struct {
+	Enabled          bool     `yaml:"enabled"`
+	Listen           string   `yaml:"listen"`
+	Database         string   `yaml:"database"`
+	KeyFile          string   `yaml:"key_file"`
+	AllowedNodeCIDRs []string `yaml:"allowed_node_cidrs,omitempty"`
+}
+
+type NodeConfig struct {
+	ControllerURL string `yaml:"controller_url,omitempty"`
+	StateDir      string `yaml:"state_dir"`
+	MaxBudgetBPS  uint64 `yaml:"max_budget_bps,omitempty"`
 }
 
 type ServerConfig struct {
@@ -130,6 +149,23 @@ func (c *Config) Normalize() {
 	if c.Storage.StateDir == "" {
 		c.Storage.StateDir = DefaultStateDir
 	}
+	if c.Controller == nil {
+		c.Controller = &ControllerConfig{Enabled: true}
+	}
+	if c.Controller.Enabled {
+		if c.Controller.Listen == "" {
+			c.Controller.Listen = "127.0.0.1:3341"
+		}
+		if c.Controller.Database == "" {
+			c.Controller.Database = filepath.Join(c.Storage.StateDir, "controller.sqlite")
+		}
+		if c.Controller.KeyFile == "" {
+			c.Controller.KeyFile = filepath.Join(c.Storage.StateDir, "controller.key")
+		}
+	}
+	if c.Node.StateDir == "" {
+		c.Node.StateDir = filepath.Join(c.Storage.StateDir, "node")
+	}
 	if c.Storage.TailnetStateDir == "" {
 		c.Storage.TailnetStateDir = DefaultTailnetStateDir
 	}
@@ -151,6 +187,11 @@ func (c *Config) Normalize() {
 
 func (c Config) Clone() Config {
 	clone := c
+	if c.Controller != nil {
+		controller := *c.Controller
+		controller.AllowedNodeCIDRs = append([]string(nil), controller.AllowedNodeCIDRs...)
+		clone.Controller = &controller
+	}
 	clone.Tailnets = make([]TailnetConfig, len(c.Tailnets))
 	copy(clone.Tailnets, c.Tailnets)
 	for i := range clone.Tailnets {
@@ -209,7 +250,13 @@ func Parse(data []byte) (ParseResult, error) {
 		return ParseResult{}, fmt.Errorf("config version must be an integer: %w", err)
 	}
 	if version != CurrentVersion {
+		if version == 1 {
+			return ParseResult{}, errors.New("config version 1 requires migration to version 2")
+		}
 		return ParseResult{}, fmt.Errorf("unsupported config version %d; expected %d", version, CurrentVersion)
+	}
+	if mappingValue(document, "tailnets") != nil {
+		return ParseResult{}, errors.New("tailnets must be managed through the controller; migrate local configuration to version 2")
 	}
 
 	warnings := make([]string, 0)
@@ -286,6 +333,43 @@ func CreateFileIfMissing(path string, data []byte) (bool, error) {
 func (c Config) Validate() error {
 	if c.Version != CurrentVersion {
 		return fmt.Errorf("unsupported config version %d; expected %d", c.Version, CurrentVersion)
+	}
+	if c.Controller == nil {
+		return errors.New("controller role is required")
+	}
+	if c.Controller.Enabled {
+		if c.Node.ControllerURL != "" {
+			return errors.New("controller cannot join another controller")
+		}
+		if strings.TrimSpace(c.Controller.Database) == "" || strings.TrimSpace(c.Controller.KeyFile) == "" {
+			return errors.New("controller database and key_file are required")
+		}
+		if err := validateListenAddress(c.Controller.Listen, "controller.listen"); err != nil {
+			return err
+		}
+		host, _, _ := net.SplitHostPort(c.Controller.Listen)
+		if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+			return errors.New("controller.listen must be loopback")
+		}
+		for _, cidr := range c.Controller.AllowedNodeCIDRs {
+			if _, err := netip.ParsePrefix(cidr); err != nil {
+				return errors.New("controller.allowed_node_cidrs contains an invalid range")
+			}
+		}
+	} else {
+		if c.Controller.Listen != "" || c.Controller.Database != "" || c.Controller.KeyFile != "" || len(c.Controller.AllowedNodeCIDRs) != 0 {
+			return errors.New("member node cannot configure controller storage or settings")
+		}
+		u, err := url.Parse(c.Node.ControllerURL)
+		if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+			return errors.New("node.controller_url must be an HTTPS origin")
+		}
+	}
+	if strings.TrimSpace(c.Node.StateDir) == "" {
+		return errors.New("node.state_dir is required")
+	}
+	if c.Node.MaxBudgetBPS > math.MaxInt64 || (c.Node.MaxBudgetBPS != 0 && c.Node.MaxBudgetBPS < 8) {
+		return errors.New("node.max_budget_bps overflows the supported budget")
 	}
 	needsDERPHostname := false
 	for _, tailnet := range c.Tailnets {
@@ -477,7 +561,8 @@ func RestartOnlyChanged(oldConfig, newConfig Config) bool {
 		!reflect.DeepEqual(oldConfig.Server.DERP, newConfig.Server.DERP) ||
 		oldConfig.Server.Admin.Socket != newConfig.Server.Admin.Socket ||
 		oldConfig.Server.Health.Listen != newConfig.Server.Health.Listen ||
-		oldConfig.Storage != newConfig.Storage
+		oldConfig.Storage != newConfig.Storage ||
+		!reflect.DeepEqual(oldConfig.Controller, newConfig.Controller) || oldConfig.Node != newConfig.Node
 }
 
 func WriteAtomic(path string, cfg Config) error {
@@ -627,11 +712,12 @@ type schemaNode struct {
 
 var (
 	rootSchema = &schemaNode{Fields: map[string]*schemaNode{
-		"version":  nil,
-		"server":   serverSchema,
-		"storage":  storageSchema,
-		"logging":  loggingSchema,
-		"tailnets": {Item: tailnetSchema},
+		"version":    nil,
+		"server":     serverSchema,
+		"storage":    storageSchema,
+		"logging":    loggingSchema,
+		"controller": {Fields: map[string]*schemaNode{"enabled": nil, "listen": nil, "database": nil, "key_file": nil, "allowed_node_cidrs": nil}},
+		"node":       {Fields: map[string]*schemaNode{"controller_url": nil, "state_dir": nil, "max_budget_bps": nil}},
 	}}
 	serverSchema = &schemaNode{Fields: map[string]*schemaNode{
 		"hostname": nil,

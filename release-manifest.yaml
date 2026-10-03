@@ -6,6 +6,9 @@ upstream:
   version: v1.102.3
   commit: 53a0d659afa51835dd7a9283873cca44261454f8
   source: https://github.com/tailscale/tailscale
+  patch:
+    file: patches/tailscale/uniderp.patch
+    sha256: df59eb94ded432b1207ca58dcee033acbb3a458311599951aa9bb772e5a8f628
 
 images:
   - name: build

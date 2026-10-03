@@ -1,4 +1,13 @@
-version: 1
+version: 2
+
+controller:
+  enabled: true
+  listen: "127.0.0.1:3341"
+  database: /data/controller.sqlite
+  key_file: /data/controller.key
+
+node:
+  state_dir: /data/node
 
 server:
   # Replace this with the public DNS name used by your DERP map.
@@ -25,7 +34,3 @@ storage:
 
 logging:
   level: info
-
-# Add verifier entries with the CLI after the daemon starts.
-# Secret values never belong in this YAML file.
-tailnets: []

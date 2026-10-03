@@ -43,37 +43,31 @@ func TestParseRequiresExplicitVersion(t *testing.T) {
 }
 
 func TestParseRejectsDuplicateKeys(t *testing.T) {
-	_, err := Parse([]byte("version: 1\nserver:\n  derp:\n    listen: ':3377'\n    listen: ':3378'\n"))
+	_, err := Parse([]byte("version: 2\nserver:\n  derp:\n    listen: ':3377'\n    listen: ':3378'\n"))
 	if err == nil || !strings.Contains(err.Error(), "duplicate YAML mapping key") {
 		t.Fatalf("Parse() error = %v, want duplicate-key error", err)
 	}
 }
 
 func TestParseUnknownFieldsWarnWithPaths(t *testing.T) {
-	result, err := Parse([]byte(`version: 1
+	result, err := Parse([]byte(`version: 2
 server:
   hostname: derp.example.com
   future_server_option: true
-tailnets:
-  - name: alice
-    auth:
-      type: web
-      future_auth_option: true
+node:
+  future_node_option: true
 `))
 	if err != nil {
-		t.Fatalf("Parse() error = %v", err)
+		t.Fatal(err)
 	}
-	want := []string{
-		"unknown config field ignored: server.future_server_option",
-		"unknown config field ignored: tailnets[0].auth.future_auth_option",
-	}
+	want := []string{"unknown config field ignored: node.future_node_option", "unknown config field ignored: server.future_server_option"}
 	if strings.Join(result.Warnings, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("warnings = %#v, want %#v", result.Warnings, want)
 	}
 }
 
 func TestParseRejectsUnsupportedFieldInsideUnknownMapping(t *testing.T) {
-	_, err := Parse([]byte(`version: 1
+	_, err := Parse([]byte(`version: 2
 future:
   nested:
     control_url: https://control.example.invalid
@@ -84,7 +78,7 @@ future:
 }
 
 func TestParseRejectsYAMLMergeKeys(t *testing.T) {
-	_, err := Parse([]byte("version: 1\nbase: &base\n  server: {}\n<<: *base\n"))
+	_, err := Parse([]byte("version: 2\nbase: &base\n  server: {}\n<<: *base\n"))
 	if err == nil || !strings.Contains(err.Error(), "YAML merge keys are not supported") {
 		t.Fatalf("Parse() error = %v, want merge-key error", err)
 	}
@@ -151,27 +145,6 @@ func TestNormalizeAndValidateAdvertiseTags(t *testing.T) {
 	}
 	if want := []string{"tag:one", "tag:two"}; !reflect.DeepEqual(cfg.Tailnets[0].Auth.Tags, want) {
 		t.Fatalf("normalized tags = %#v, want %#v", cfg.Tailnets[0].Auth.Tags, want)
-	}
-}
-
-func TestParseLoadsOAuthAdvertiseTags(t *testing.T) {
-	result, err := Parse([]byte(`version: 1
-server:
-  hostname: derp.example.com
-tailnets:
-  - name: company
-    auth:
-      type: oauth
-      client_secret_file: /run/secrets/company-oauth
-      tags:
-        - tag:one
-        - tag:two
-`))
-	if err != nil {
-		t.Fatalf("Parse() error = %v", err)
-	}
-	if want := []string{"tag:one", "tag:two"}; !reflect.DeepEqual(result.Config.Tailnets[0].Auth.Tags, want) {
-		t.Fatalf("parsed OAuth tags = %#v, want %#v", result.Config.Tailnets[0].Auth.Tags, want)
 	}
 }
 
@@ -406,7 +379,7 @@ func TestCreateFileIfMissingUsesExampleAndPreservesExistingFile(t *testing.T) {
 		t.Fatalf("created config did not contain expected defaults: %#v", parsed.Config)
 	}
 
-	replacement := []byte("version: 1\n")
+	replacement := []byte("version: 2\n")
 	if err := os.WriteFile(path, replacement, 0o600); err != nil {
 		t.Fatalf("write existing config: %v", err)
 	}
