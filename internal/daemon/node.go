@@ -42,7 +42,7 @@ func (d *Daemon) startNodeControl(ctx context.Context) {
 	d.nodeDone = make(chan struct{})
 	go func() {
 		defer close(d.nodeDone)
-		err := d.nodeClient.RunControl(ctx, d.policyClient.Path, d.policyClient.ApplyPolicy)
+		err := d.nodeClient.RunControl(ctx, d.policyClient.Path, d.policyClient.ApplyPolicy, d.policyClient.Status)
 		if errors.Is(err, cluster.ErrIdentityConflict) {
 			d.derperMu.Lock()
 			defer d.derperMu.Unlock()

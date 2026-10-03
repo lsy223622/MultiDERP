@@ -7,10 +7,10 @@ func (s *Store) migrate() error {
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version == 4 {
+	if version == 5 {
 		return nil
 	}
-	if version < 0 || version > 4 {
+	if version < 0 || version > 5 {
 		return fmt.Errorf("unsupported controller database version %d", version)
 	}
 	tx, err := s.db.Begin()
@@ -112,7 +112,19 @@ PRAGMA user_version=3;`); err != nil {
 			return err
 		}
 	}
-	if _, err := tx.Exec(`ALTER TABLE grants ADD COLUMN last_control_success INTEGER NOT NULL DEFAULT 0; ALTER TABLE node_policies ADD COLUMN derper_usable INTEGER NOT NULL DEFAULT 0; PRAGMA user_version=4;`); err != nil {
+	if version < 4 {
+		if _, err := tx.Exec(`ALTER TABLE grants ADD COLUMN last_control_success INTEGER NOT NULL DEFAULT 0; ALTER TABLE node_policies ADD COLUMN derper_usable INTEGER NOT NULL DEFAULT 0;`); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`ALTER TABLE nodes ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1));
+ALTER TABLE nodes ADD COLUMN domain_verified_at INTEGER NOT NULL DEFAULT 0;
+UPDATE nodes SET domain_verified_at=coalesce((SELECT max(created_at) FROM audit WHERE resource_type='node' AND resource_id=nodes.id AND action='node.enroll'),0) WHERE public_key IS NOT NULL;
+CREATE TABLE node_observations (
+ node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+ report_instance TEXT NOT NULL DEFAULT '', report_json BLOB, reported_at INTEGER NOT NULL DEFAULT 0,
+ probes_json BLOB, previous_report_json BLOB
+); PRAGMA user_version=5;`); err != nil {
 		return err
 	}
 	return tx.Commit()

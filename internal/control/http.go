@@ -34,6 +34,8 @@ func NewHTTPHandler(s *Store) http.Handler {
 	h.mountNodes()
 	h.mountNodeControl()
 	h.mountGrants()
+	h.mountObservability()
+	h.mountResources()
 	h.mux.HandleFunc("POST /api/v1/login", h.login)
 	h.mux.HandleFunc("POST /api/v1/logout", func(w http.ResponseWriter, r *http.Request) {
 		cookie, _ := r.Cookie(sessionCookie)
@@ -155,6 +157,9 @@ func (h *httpHandler) actor(r *http.Request) Actor {
 func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if serveManagement(w, r) {
+		return
+	}
 	if r.URL.Path == "/cluster/v1/control" || r.URL.Path == "/cluster/v1/heartbeat" || r.URL.Path == "/cluster/v1/ack" {
 		h.clusterMux.ServeHTTP(w, r)
 		return
@@ -260,6 +265,12 @@ func httpError(w http.ResponseWriter, err error) {
 	case errors.Is(err, ErrConflict):
 		status = 409
 		message = ErrConflict.Error()
+	case errors.Is(err, ErrRateLimited):
+		status = 429
+		message = ErrRateLimited.Error()
+	case errors.Is(err, ErrIdentityUnavailable):
+		status = 503
+		message = ErrIdentityUnavailable.Error()
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

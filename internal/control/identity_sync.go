@@ -80,12 +80,13 @@ func (s *Store) RunIdentitySync(ctx context.Context) error {
 		if err := rows.Err(); err != nil {
 			return err
 		}
+		rows.Close()
 		for id, state := range states {
 			if !active[id] && !state.busy {
 				delete(states, id)
 			}
 		}
-		return nil
+		return s.refreshExpiryEvents(ctx)
 	}
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()

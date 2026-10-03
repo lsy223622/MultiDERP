@@ -28,15 +28,18 @@ type Grant struct {
 	State          string    `json:"state"`
 	Revision       uint64    `json:"revision"`
 	ExplicitUntil  time.Time `json:"explicit_until"`
+	NodeName       string    `json:"node_name"`
+	TailnetName    string    `json:"tailnet_name"`
+	Applicant      string    `json:"applicant"`
 }
 
-const grantColumns = `g.id,g.node_id,g.tailnet_id,n.owner_id,t.owner_id,g.state,g.revision,g.explicit_until`
+const grantColumns = `g.id,g.node_id,g.tailnet_id,n.owner_id,t.owner_id,g.state,g.revision,g.explicit_until,n.display_name,t.display_name,(SELECT username FROM users WHERE id=t.owner_id)`
 const grantJoins = ` FROM grants g JOIN nodes n ON n.id=g.node_id JOIN tailnets t ON t.id=g.tailnet_id`
 
 func scanGrant(row interface{ Scan(...any) error }, now time.Time) (Grant, error) {
 	var g Grant
 	var until int64
-	err := row.Scan(&g.ID, &g.NodeID, &g.TailnetID, &g.NodeOwnerID, &g.TailnetOwnerID, &g.State, &g.Revision, &until)
+	err := row.Scan(&g.ID, &g.NodeID, &g.TailnetID, &g.NodeOwnerID, &g.TailnetOwnerID, &g.State, &g.Revision, &until, &g.NodeName, &g.TailnetName, &g.Applicant)
 	if until != 0 {
 		g.ExplicitUntil = time.Unix(until, 0).UTC()
 		if !now.Before(g.ExplicitUntil) && (g.State == "requested" || g.State == "owner_approved" || g.State == "active") {
@@ -79,7 +82,7 @@ func (s *Store) ListGrants(ctx context.Context, actor Actor) ([]Grant, error) {
 
 func grantResourcesEnabled(ctx context.Context, tx *sql.Tx, node, tailnet string) (bool, error) {
 	var enabled bool
-	err := tx.QueryRowContext(ctx, `SELECT n.state IN ('registered','ready','offline') AND nu.enabled=1 AND t.enabled=1 AND tu.enabled=1 FROM nodes n JOIN users nu ON nu.id=n.owner_id JOIN tailnets t ON t.id=? JOIN users tu ON tu.id=t.owner_id WHERE n.id=?`, tailnet, node).Scan(&enabled)
+	err := tx.QueryRowContext(ctx, `SELECT n.enabled=1 AND n.state IN ('registered','ready','offline') AND nu.enabled=1 AND t.enabled=1 AND tu.enabled=1 FROM nodes n JOIN users nu ON nu.id=n.owner_id JOIN tailnets t ON t.id=? JOIN users tu ON tu.id=t.owner_id WHERE n.id=?`, tailnet, node).Scan(&enabled)
 	return enabled, err
 }
 
@@ -100,8 +103,8 @@ func (s *Store) RequestGrant(ctx context.Context, actor Actor, node, tailnet str
 	if err := activeActor(ctx, tx, actor); err != nil {
 		return Grant{}, err
 	}
-	var nodeOwner, tailnetOwner string
-	if err := tx.QueryRowContext(ctx, "SELECT n.owner_id,t.owner_id FROM nodes n JOIN tailnets t ON t.id=? WHERE n.id=?", tailnet, node).Scan(&nodeOwner, &tailnetOwner); err != nil {
+	var nodeOwner, tailnetOwner, nodeName, tailnetName, applicant string
+	if err := tx.QueryRowContext(ctx, "SELECT n.owner_id,t.owner_id,n.display_name,t.display_name,(SELECT username FROM users WHERE id=t.owner_id) FROM nodes n JOIN tailnets t ON t.id=? WHERE n.id=?", tailnet, node).Scan(&nodeOwner, &tailnetOwner, &nodeName, &tailnetName, &applicant); err != nil {
 		return Grant{}, err
 	}
 	if err := RequireOwner(actor, tailnetOwner); err != nil {
@@ -123,7 +126,7 @@ func (s *Store) RequestGrant(ctx context.Context, actor Actor, node, tailnet str
 		if expected != 0 {
 			return Grant{}, ErrConflict
 		}
-		g = Grant{ID: randomToken(), NodeID: node, TailnetID: tailnet, NodeOwnerID: nodeOwner, TailnetOwnerID: tailnetOwner}
+		g = Grant{ID: randomToken(), NodeID: node, TailnetID: tailnet, NodeOwnerID: nodeOwner, TailnetOwnerID: tailnetOwner, NodeName: nodeName, TailnetName: tailnetName, Applicant: applicant}
 	} else if err != nil {
 		return Grant{}, err
 	} else {

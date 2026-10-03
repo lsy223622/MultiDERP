@@ -174,6 +174,9 @@ func (c *EnrollmentClient) post(ctx context.Context, path string, body, dst any,
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
+		if token != "" && response.StatusCode == http.StatusUnauthorized {
+			return errNodeSessionRejected
+		}
 		if path == "/cluster/v1/session" && response.StatusCode == http.StatusConflict {
 			b, err := io.ReadAll(io.LimitReader(response.Body, 4097))
 			var failure struct {
@@ -269,8 +272,12 @@ func (c *EnrollmentClient) RenewSession(ctx context.Context) (NodeSession, error
 	}{c.state.Session.NodeID, c.instanceID}, &ch, ""); err != nil {
 		return NodeSession{}, err
 	}
-	if !c.validChallenge(ch, "session") || ch.NodeID != c.state.Session.NodeID || ch.ClusterID != c.state.Session.ClusterID || ch.Domain != c.state.Domain {
+	valid := (c.validChallenge(ch, "session") && ch.Domain == c.state.Domain) || c.validChallenge(ch, "domain_change")
+	if !valid || ch.NodeID != c.state.Session.NodeID || ch.ClusterID != c.state.Session.ClusterID {
 		return NodeSession{}, errors.New("invalid session challenge")
+	}
+	if ch.Purpose == "domain_change" {
+		c.responder.SetChallenge(ch)
 	}
 	var session NodeSession
 	if err := c.post(ctx, "/cluster/v1/session", struct {

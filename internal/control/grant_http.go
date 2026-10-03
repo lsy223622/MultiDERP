@@ -12,7 +12,7 @@ func (s *Store) ListRelays(ctx context.Context, actor Actor) ([]Node, error) {
 	if err := RequireOwner(actor, actor.ID); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, "SELECT n.id,n.owner_id,n.domain,n.display_name,n.region_id,n.state,n.last_heartbeat,n.last_error FROM nodes n JOIN users u ON u.id=n.owner_id WHERE u.enabled=1 AND n.state IN ('registered','ready','offline') ORDER BY n.display_name,n.id")
+	rows, err := s.db.QueryContext(ctx, "SELECT n.id,n.owner_id,n.domain,n.display_name,n.region_id,n.state,n.last_heartbeat,n.last_error,n.enabled FROM nodes n JOIN users u ON u.id=n.owner_id WHERE u.enabled=1 AND n.enabled=1 AND n.state IN ('registered','ready','offline') ORDER BY n.display_name,n.id")
 	if err != nil {
 		return nil, err
 	}

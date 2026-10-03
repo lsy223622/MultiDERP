@@ -94,7 +94,7 @@ func TestPolicyRetentionChangesAreExplicitAndIdentityDoesNotRenew(t *testing.T) 
 		t.Fatal("retention deadlines wrong")
 	}
 	now = initial.Add(20 * time.Minute)
-	if _, err := s.NodeHeartbeat(t.Context(), session.Token); err != nil {
+	if _, err := s.NodeHeartbeat(t.Context(), session.Token, nil); err != nil {
 		t.Fatal(err)
 	}
 	renewed, err := s.BuildPolicy(t.Context(), n.ID, now)

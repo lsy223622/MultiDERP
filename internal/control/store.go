@@ -26,6 +26,7 @@ type Store struct {
 	now              func() time.Time
 	clusterID        string
 	verifyDomain     func(context.Context, cluster.NodeChallenge) error
+	probeDomain      func(context.Context, string) NodeProbes
 	nodeRequests     chan struct{}
 	policyMu         sync.Mutex
 	policyStreams    map[string]*nodeControlStream

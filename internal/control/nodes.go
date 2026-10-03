@@ -26,6 +26,7 @@ type Node struct {
 	State         string `json:"state"`
 	LastHeartbeat int64  `json:"last_heartbeat"`
 	LastError     string `json:"last_error"`
+	Enabled       bool   `json:"enabled"`
 }
 
 type Enrollment struct {
@@ -54,16 +55,18 @@ func (s *Store) ConfigureNodes(allowedCIDRs []string) error {
 	if err := s.db.QueryRow("SELECT value FROM settings WHERE key='cluster_id'").Scan(&s.clusterID); err != nil {
 		return err
 	}
-	s.verifyDomain = newDomainVerifier(prefixes).verify
+	verifier := newDomainVerifier(prefixes)
+	s.verifyDomain = verifier.verify
+	s.probeDomain = verifier.probe
 	s.nodeRequests = make(chan struct{}, 4)
 	return nil
 }
 
-const nodeColumns = `id,owner_id,domain,display_name,region_id,state,last_heartbeat,last_error`
+const nodeColumns = `id,owner_id,domain,display_name,region_id,state,last_heartbeat,last_error,enabled`
 
 func scanNode(row interface{ Scan(...any) error }) (Node, error) {
 	var n Node
-	err := row.Scan(&n.ID, &n.OwnerID, &n.Domain, &n.DisplayName, &n.RegionID, &n.State, &n.LastHeartbeat, &n.LastError)
+	err := row.Scan(&n.ID, &n.OwnerID, &n.Domain, &n.DisplayName, &n.RegionID, &n.State, &n.LastHeartbeat, &n.LastError, &n.Enabled)
 	return n, err
 }
 
@@ -133,7 +136,7 @@ func (s *Store) CreateNode(ctx context.Context, actor Actor, name, domain string
 	if region == 0 {
 		return Node{}, Enrollment{}, ErrConflict
 	}
-	n := Node{ID: randomToken(), OwnerID: actor.ID, Domain: domain, DisplayName: name, RegionID: region, State: "pending"}
+	n := Node{ID: randomToken(), OwnerID: actor.ID, Domain: domain, DisplayName: name, RegionID: region, State: "pending", Enabled: true}
 	if _, err := tx.ExecContext(ctx, "INSERT INTO nodes(id,owner_id,domain,display_name,region_id) VALUES(?,?,?,?,?)", n.ID, n.OwnerID, n.Domain, n.DisplayName, n.RegionID); err != nil {
 		return Node{}, Enrollment{}, conflictError(err)
 	}
@@ -317,7 +320,7 @@ func (s *Store) EnrollNode(ctx context.Context, req cluster.EnrollmentRequest) (
 	if err := tx.QueryRowContext(ctx, "SELECT owner_id FROM nodes WHERE id=? AND domain=? AND state='pending' AND public_key IS NULL", req.Challenge.NodeID, req.Challenge.Domain).Scan(&owner); err != nil {
 		return cluster.NodeSession{}, ErrUnauthorized
 	}
-	if _, err := tx.ExecContext(ctx, "UPDATE nodes SET public_key=?,instance_id=?,state='registered',lease_until=? WHERE id=?", req.Challenge.PublicKey, req.Challenge.InstanceID, s.now().Add(90*time.Second).Unix(), req.Challenge.NodeID); err != nil {
+	if _, err := tx.ExecContext(ctx, "UPDATE nodes SET public_key=?,instance_id=?,state='registered',lease_until=?,domain_verified_at=? WHERE id=?", req.Challenge.PublicKey, req.Challenge.InstanceID, s.now().Add(90*time.Second).Unix(), s.now().Unix(), req.Challenge.NodeID); err != nil {
 		return cluster.NodeSession{}, err
 	}
 	if _, err := tx.ExecContext(ctx, "INSERT INTO node_policies(node_id) VALUES(?)", req.Challenge.NodeID); err != nil {
@@ -355,12 +358,16 @@ func (s *Store) SessionChallenge(ctx context.Context, id, instance string) (clus
 		return cluster.NodeChallenge{}, err
 	}
 	defer tx.Rollback()
-	var domain string
+	var domain, state string
 	var pub []byte
-	if err := tx.QueryRowContext(ctx, `SELECT n.domain,n.public_key FROM nodes n JOIN users u ON u.id=n.owner_id WHERE n.id=? AND n.state IN ('registered','ready','offline') AND u.enabled=1`, id).Scan(&domain, &pub); err != nil || len(pub) != ed25519.PublicKeySize {
+	if err := tx.QueryRowContext(ctx, `SELECT n.domain,n.public_key,n.state FROM nodes n JOIN users u ON u.id=n.owner_id WHERE n.id=? AND n.state IN ('registered','ready','offline','domain_pending') AND u.enabled=1`, id).Scan(&domain, &pub, &state); err != nil || len(pub) != ed25519.PublicKeySize {
 		return cluster.NodeChallenge{}, ErrUnauthorized
 	}
-	c, err := s.newNodeChallenge(ctx, tx, "session", id, domain, pub, instance)
+	purpose := "session"
+	if state == "domain_pending" {
+		purpose = "domain_change"
+	}
+	c, err := s.newNodeChallenge(ctx, tx, purpose, id, domain, pub, instance)
 	if err != nil {
 		return cluster.NodeChallenge{}, err
 	}
@@ -368,19 +375,51 @@ func (s *Store) SessionChallenge(ctx context.Context, id, instance string) (clus
 }
 
 func (s *Store) RenewNodeSession(ctx context.Context, c cluster.NodeChallenge, sig []byte) (cluster.NodeSession, error) {
+	if c.Purpose != "session" && c.Purpose != "domain_change" {
+		return cluster.NodeSession{}, ErrUnauthorized
+	}
+	if c.Purpose == "domain_change" {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return cluster.NodeSession{}, err
+		}
+		err = s.checkNodeChallenge(ctx, tx, c, sig, "domain_change")
+		if err == nil {
+			var count int
+			err = tx.QueryRowContext(ctx, `SELECT count(*) FROM nodes n JOIN users u ON u.id=n.owner_id WHERE n.id=? AND n.domain=? AND n.public_key=? AND n.state='domain_pending' AND u.enabled=1`, c.NodeID, c.Domain, c.PublicKey).Scan(&count)
+			if err == nil && count != 1 {
+				err = ErrUnauthorized
+			}
+		}
+		tx.Rollback()
+		if err != nil {
+			return cluster.NodeSession{}, err
+		}
+		probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		select {
+		case s.nodeRequests <- struct{}{}:
+			defer func() { <-s.nodeRequests }()
+		case <-probeCtx.Done():
+			return cluster.NodeSession{}, ErrUnauthorized
+		}
+		if err := s.verifyDomain(probeCtx, c); err != nil {
+			return cluster.NodeSession{}, ErrUnauthorized
+		}
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return cluster.NodeSession{}, err
 	}
 	defer tx.Rollback()
-	if err := s.checkNodeChallenge(ctx, tx, c, sig, "session"); err != nil {
+	if err := s.checkNodeChallenge(ctx, tx, c, sig, c.Purpose); err != nil {
 		return cluster.NodeSession{}, err
 	}
 	var pub []byte
 	var instance string
 	var owner string
 	var lease int64
-	if err := tx.QueryRowContext(ctx, `SELECT n.public_key,n.instance_id,n.lease_until,n.owner_id FROM nodes n JOIN users u ON u.id=n.owner_id WHERE n.id=? AND n.domain=? AND n.state IN ('registered','ready','offline') AND u.enabled=1`, c.NodeID, c.Domain).Scan(&pub, &instance, &lease, &owner); err != nil || !bytes.Equal(pub, c.PublicKey) {
+	if err := tx.QueryRowContext(ctx, `SELECT n.public_key,n.instance_id,n.lease_until,n.owner_id FROM nodes n JOIN users u ON u.id=n.owner_id WHERE n.id=? AND n.domain=? AND ((?='session' AND n.state IN ('registered','ready','offline')) OR (?='domain_change' AND n.state='domain_pending')) AND u.enabled=1`, c.NodeID, c.Domain, c.Purpose, c.Purpose).Scan(&pub, &instance, &lease, &owner); err != nil || !bytes.Equal(pub, c.PublicKey) {
 		return cluster.NodeSession{}, ErrUnauthorized
 	}
 	if instance != c.InstanceID && lease > s.now().Unix() {
@@ -411,8 +450,16 @@ func (s *Store) RenewNodeSession(ctx context.Context, c cluster.NodeChallenge, s
 	if _, err := tx.ExecContext(ctx, "UPDATE node_challenges SET used_at=? WHERE nonce_hash=?", s.now().Unix(), tokenHash(c.Nonce)); err != nil {
 		return cluster.NodeSession{}, err
 	}
-	if _, err := tx.ExecContext(ctx, "UPDATE nodes SET instance_id=?,lease_until=? WHERE id=?", c.InstanceID, s.now().Add(90*time.Second).Unix(), c.NodeID); err != nil {
+	if _, err := tx.ExecContext(ctx, "UPDATE nodes SET instance_id=?,lease_until=?,state=CASE WHEN state='domain_pending' THEN 'registered' ELSE state END WHERE id=?", c.InstanceID, s.now().Add(90*time.Second).Unix(), c.NodeID); err != nil {
 		return cluster.NodeSession{}, err
+	}
+	if c.Purpose == "domain_change" {
+		if _, err := tx.ExecContext(ctx, "UPDATE nodes SET domain_verified_at=? WHERE id=?", s.now().Unix(), c.NodeID); err != nil {
+			return cluster.NodeSession{}, err
+		}
+		if err := writeAudit(ctx, tx, "node:"+c.NodeID, owner, "node", c.NodeID, "node.domain.verify"); err != nil {
+			return cluster.NodeSession{}, err
+		}
 	}
 	session, err := s.mintNodeSession(ctx, tx, c.NodeID, c.InstanceID)
 	if err != nil {

@@ -439,6 +439,7 @@ func (d *Daemon) healthSnapshot() health.Snapshot {
 		usable = applied.Usable
 		nodeStatus.Traffic = applied.Traffic
 		nodeStatus.TrafficObservedAt = applied.TrafficObservedAt
+		nodeStatus.ActiveConnections = applied.ActiveConnections
 		if applied.Revision != 0 || err == nil {
 			nodeStatus.AppliedRevision = applied.Revision
 		}

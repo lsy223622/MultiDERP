@@ -25,9 +25,11 @@ type PolicyApplication struct {
 	Usable            bool
 	Traffic           []TailnetTraffic
 	TrafficObservedAt time.Time
+	ActiveConnections uint64
 }
 
 type TailnetTraffic struct {
+	CounterID           uint64 `json:"counter_id"`
 	TailnetID           string `json:"tailnet_id"`
 	RXPayloadBytes      uint64 `json:"rx_payload_bytes"`
 	TXPayloadBytes      uint64 `json:"tx_payload_bytes"`
@@ -36,6 +38,18 @@ type TailnetTraffic struct {
 }
 
 const MaxControlMessageBytes = MaxPolicyBytes + 512
+
+type NodeReport struct {
+	Revision          uint64           `json:"revision"`
+	Usable            bool             `json:"usable"`
+	ObservedAt        time.Time        `json:"observed_at"`
+	Traffic           []TailnetTraffic `json:"traffic"`
+	ActiveConnections *uint64          `json:"active_connections,omitempty"`
+}
+
+type NodeHeartbeatRequest struct {
+	Report *NodeReport `json:"report,omitempty"`
+}
 
 type NodeHeartbeat struct {
 	NodeID                  string    `json:"node_id"`

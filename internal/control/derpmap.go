@@ -18,7 +18,7 @@ func (s *Store) BuildDERPMap(ctx context.Context, actor Actor, tailnet string) (
 	if _, err := tailnetOwner(ctx, tx, actor, tailnet); err != nil {
 		return nil, err
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT n.id,n.domain,n.display_name,n.region_id,p.policy_json FROM grants g JOIN nodes n ON n.id=g.node_id JOIN users nu ON nu.id=n.owner_id JOIN tailnets t ON t.id=g.tailnet_id JOIN users tu ON tu.id=t.owner_id JOIN node_policies p ON p.node_id=n.id WHERE g.tailnet_id=? AND g.state='active' AND n.state IN ('registered','ready','offline') AND nu.enabled=1 AND t.enabled=1 AND tu.enabled=1 ORDER BY n.region_id`, tailnet)
+	rows, err := tx.QueryContext(ctx, `SELECT n.id,n.domain,n.display_name,n.region_id,p.policy_json FROM grants g JOIN nodes n ON n.id=g.node_id JOIN users nu ON nu.id=n.owner_id JOIN tailnets t ON t.id=g.tailnet_id JOIN users tu ON tu.id=t.owner_id JOIN node_policies p ON p.node_id=n.id WHERE g.tailnet_id=? AND g.state='active' AND n.enabled=1 AND n.state IN ('registered','ready','offline') AND nu.enabled=1 AND t.enabled=1 AND tu.enabled=1 ORDER BY n.region_id`, tailnet)
 	if err != nil {
 		return nil, err
 	}

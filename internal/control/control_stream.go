@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"math"
 	"net/http"
 	"strconv"
@@ -66,11 +67,15 @@ func (h *httpHandler) mountNodeControl() {
 	s := h.store
 	h.clusterMux.HandleFunc("GET /cluster/v1/control", h.controlStream)
 	h.clusterMux.HandleFunc("POST /cluster/v1/heartbeat", func(w http.ResponseWriter, r *http.Request) {
-		var body struct{}
-		if !decodeRequest(w, r, &body) {
+		var body cluster.NodeHeartbeatRequest
+		r.Body = http.MaxBytesReader(w, r.Body, cluster.MaxPolicyBytes)
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if dec.Decode(&body) != nil || dec.Decode(new(any)) != io.EOF {
+			httpError(w, ErrInvalid)
 			return
 		}
-		state, err := s.NodeHeartbeat(r.Context(), nodeBearer(r))
+		state, err := s.NodeHeartbeat(r.Context(), nodeBearer(r), body.Report)
 		if err != nil {
 			httpError(w, err)
 			return

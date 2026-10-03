@@ -32,6 +32,7 @@ type policyReply struct {
 	Error             string                   `json:"error"`
 	Traffic           []cluster.TailnetTraffic `json:"traffic,omitempty"`
 	TrafficObservedAt time.Time                `json:"traffic_observed_at"`
+	ActiveConnections uint64                   `json:"active_connections"`
 }
 
 func (c PolicyClient) exchange(ctx context.Context, request policyNotice) (cluster.PolicyApplication, error) {
@@ -75,7 +76,7 @@ func (c PolicyClient) exchange(ctx context.Context, request policyNotice) (clust
 	if d.Decode(&reply) != nil || d.Decode(new(any)) != io.EOF {
 		return cluster.PolicyApplication{}, errors.New("invalid derper policy response")
 	}
-	result := cluster.PolicyApplication{Revision: reply.Revision, Usable: reply.Usable, Traffic: reply.Traffic, TrafficObservedAt: reply.TrafficObservedAt}
+	result := cluster.PolicyApplication{Revision: reply.Revision, Usable: reply.Usable, Traffic: reply.Traffic, TrafficObservedAt: reply.TrafficObservedAt, ActiveConnections: reply.ActiveConnections}
 	if reply.Error != "" {
 		return result, errors.New("derper policy application failed")
 	}

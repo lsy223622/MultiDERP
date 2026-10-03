@@ -16,6 +16,7 @@ import (
 
 var (
 	ErrUnauthorized = errors.New("authentication required")
+	ErrRateLimited  = errors.New("too many requests")
 	ErrForbidden    = errors.New("permission denied")
 	ErrInvalid      = errors.New("invalid input")
 	ErrConflict     = errors.New("conflicting operation")

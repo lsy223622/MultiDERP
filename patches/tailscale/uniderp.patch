@@ -61,7 +61,7 @@
 +}
 --- /dev/null
 +++ b/cmd/derper/uniderp_policy.go
-@@ -0,0 +1,193 @@
+@@ -0,0 +1,194 @@
 +package main
 +
 +import (
@@ -96,6 +96,7 @@
 +	Error             string                             `json:"error"`
 +	Traffic           []derpserver.UniDERPTailnetTraffic `json:"traffic,omitempty"`
 +	TrafficObservedAt time.Time                          `json:"traffic_observed_at"`
++	ActiveConnections uint64                             `json:"active_connections"`
 +}
 +type policyWatermark struct {
 +	ClusterID  string    `json:"cluster_id"`
@@ -234,7 +235,7 @@
 +				errorCode = lastError
 +			}
 +			state := s.UniDERPPolicyStatus()
-+			json.NewEncoder(conn).Encode(policyIPCResponse{Revision: state.Revision, Usable: state.Usable, Error: errorCode, Traffic: state.Traffic, TrafficObservedAt: state.TrafficObservedAt})
++			json.NewEncoder(conn).Encode(policyIPCResponse{Revision: state.Revision, Usable: state.Usable, Error: errorCode, Traffic: state.Traffic, TrafficObservedAt: state.TrafficObservedAt, ActiveConnections: state.ActiveConnections})
 +			mu.Lock()
 +			active = nil
 +			mu.Unlock()
@@ -554,21 +555,30 @@
 +}
 --- a/derp/derpserver/derpserver.go
 +++ b/derp/derpserver/derpserver.go
-@@ -126,6 +126,13 @@
+@@ -126,6 +126,14 @@
  
  // Server is a DERP server.
  type Server struct {
-+	uniderpPolicy      *uniderpPolicyState
-+	uniderpGroupQueued [2]atomic.Int64
-+	uniderpTimer       tstime.TimerController
-+	uniderpObserved    time.Time
-+	uniderpClockBad    bool
-+	uniderpRX          atomic.Pointer[uniderpScheduler]
-+	uniderpTX          atomic.Pointer[uniderpScheduler]
++	uniderpPolicy          *uniderpPolicyState
++	uniderpGroupQueued     [2]atomic.Int64
++	uniderpTrafficSequence uint64
++	uniderpTimer           tstime.TimerController
++	uniderpObserved        time.Time
++	uniderpClockBad        bool
++	uniderpRX              atomic.Pointer[uniderpScheduler]
++	uniderpTX              atomic.Pointer[uniderpScheduler]
  	// WriteTimeout, if non-zero, specifies how long to wait
  	// before failing when writing to a client.
  	WriteTimeout time.Duration
-@@ -473,6 +480,11 @@
+@@ -393,6 +401,7 @@
+ 		clock:               tstime.StdClock{},
+ 		tcpWriteTimeout:     DefaultTCPWiteTimeout,
+ 	}
++	s.uniderpTrafficSequence = rand.Uint64()
+ 	s.initMetacert()
+ 	s.packetsRecvDisco = s.packetsRecvByKind.Get(string(packetKindDisco))
+ 	s.packetsRecvOther = s.packetsRecvByKind.Get(string(packetKindOther))
+@@ -473,6 +482,11 @@
  //
  // It must be called before serving begins.
  func (s *Server) SetMeshKey(v string) error {
@@ -580,7 +590,7 @@
  	k, err := key.ParseDERPMesh(v)
  	if err != nil {
  		return err
-@@ -608,9 +620,18 @@
+@@ -608,9 +622,18 @@
  	s.mu.Lock()
  	wasClosed := s.closed
  	s.closed = true
@@ -599,7 +609,7 @@
  	}
  
  	var closedChs []chan struct{}
-@@ -761,10 +782,13 @@
+@@ -761,10 +784,13 @@
  // placed in a non-active state where we read from them (primarily to
  // observe EOFs/timeouts) but won't send them frames on the assumption
  // that they're dead.
@@ -614,7 +624,7 @@
  	c.setRateLimit(s.rateConfig.PerClientRateLimitBytesPerSec, s.rateConfig.PerClientRateBurstBytes)
  
  	cs, ok := s.clients.Load(c.key)
-@@ -814,6 +838,7 @@
+@@ -814,6 +840,7 @@
  		s.curClientsNotIdeal.Add(1)
  	}
  	s.broadcastPeerStateChangeLocked(c.key, c.remoteIPPort, c.presentFlags(), true)
@@ -622,7 +632,7 @@
  }
  
  // broadcastPeerStateChangeLocked enqueues a message to all watchers
-@@ -1028,6 +1053,12 @@
+@@ -1028,6 +1055,12 @@
  	if err := s.verifyClient(ctx, clientKey, clientInfo, remoteIPPort.Addr()); err != nil {
  		return fmt.Errorf("client %v rejected: %v", clientKey, err)
  	}
@@ -635,7 +645,7 @@
  
  	// At this point we trust the client so we don't time out.
  	nc.SetDeadline(time.Time{})
-@@ -1036,6 +1067,9 @@
+@@ -1036,6 +1069,9 @@
  	defer cancel()
  
  	c := &sclient{
@@ -645,7 +655,7 @@
  		connNum:        connNum,
  		s:              s,
  		key:            clientKey,
-@@ -1071,7 +1105,9 @@
+@@ -1071,7 +1107,9 @@
  		f(clientKey, c.info)
  	}
  
@@ -656,7 +666,7 @@
  	defer s.unregisterClient(c)
  
  	err = s.sendServerInfo(c.bw, clientKey)
-@@ -1130,6 +1166,17 @@
+@@ -1130,6 +1168,17 @@
  			}
  			return fmt.Errorf("client %s: readFrameHeader: %w", c.key.ShortString(), err)
  		}
@@ -674,7 +684,7 @@
  		// Rate-limit by DERP frame length (fl), which excludes TLS protocol and
  		// DERP frame length field overheads.
  		// Note: meshed clients are exempt from rate limits.
-@@ -1329,6 +1376,7 @@
+@@ -1329,6 +1378,7 @@
  	if err != nil {
  		return fmt.Errorf("client %v: recvPacket: %v", c.key, err)
  	}
@@ -682,7 +692,7 @@
  
  	dst, fwd, dstLen := c.lookupDest(dstKey)
  
-@@ -1452,13 +1500,14 @@
+@@ -1452,13 +1502,14 @@
  type dropReason string
  
  const (
@@ -704,7 +714,7 @@
  )
  
  func (s *Server) recordDrop(packetBytes []byte, srcKey, dstKey key.NodePublic, reason dropReason) {
-@@ -1488,6 +1537,16 @@
+@@ -1488,6 +1539,16 @@
  func (c *sclient) sendPkt(dst *sclient, p pkt) error {
  	s := c.s
  	dstKey := dst.key
@@ -721,7 +731,7 @@
  
  	// Attempt to queue for sending up to 3 times. On each attempt, if
  	// the queue is full, try to drop from queue head to prioritize
-@@ -1506,6 +1565,7 @@
+@@ -1506,6 +1567,7 @@
  		}
  		select {
  		case sendQueue <- p:
@@ -729,7 +739,7 @@
  			dst.debugLogf("sendPkt attempt %d enqueued", attempt)
  			return nil
  		default:
-@@ -1513,6 +1573,7 @@
+@@ -1513,6 +1575,7 @@
  
  		select {
  		case pkt := <-sendQueue:
@@ -737,7 +747,7 @@
  			s.recordDrop(pkt.bs, c.key, dstKey, dropReasonQueueHead)
  			c.recordQueueTime(pkt.enqueuedAt)
  		default:
-@@ -1579,6 +1640,16 @@
+@@ -1579,6 +1642,16 @@
  // verifyClient checks whether the client is allowed to connect to the derper,
  // depending on how & whether the server's been configured to verify.
  func (s *Server) verifyClient(ctx context.Context, clientKey key.NodePublic, info *derp.ClientInfo, clientIP netip.Addr) error {
@@ -754,7 +764,7 @@
  	if s.isMeshPeer(info) {
  		// Trusted mesh peer. No need to verify further. In fact, verifying
  		// further wouldn't work: it's not part of the tailnet so tailscaled and
-@@ -1821,6 +1892,9 @@
+@@ -1821,6 +1894,9 @@
  //
  // (The "s" prefix is to more explicitly distinguish it from Client in derp_client.go)
  type sclient struct {
@@ -764,7 +774,7 @@
  	// Static after construction.
  	connNum        int64 // process-wide unique counter, incremented each Accept
  	s              *Server
-@@ -1908,6 +1982,8 @@
+@@ -1908,6 +1984,8 @@
  
  // pkt is a request to write a data frame to an sclient.
  type pkt struct {
@@ -773,7 +783,7 @@
  	// enqueuedAt is when a packet was put onto a queue before it was sent,
  	// and is used for reporting metrics on the duration of packets in the queue.
  	enqueuedAt time.Time
-@@ -1988,8 +2064,10 @@
+@@ -1988,8 +2066,10 @@
  	for {
  		select {
  		case pkt := <-c.sendQueue:
@@ -784,7 +794,7 @@
  			c.s.recordDrop(pkt.bs, pkt.src, c.key, dropReasonGoneDisconnected)
  		default:
  			return
-@@ -2026,11 +2104,11 @@
+@@ -2026,11 +2106,11 @@
  			werr = c.sendMeshUpdates()
  			continue
  		case msg := <-c.sendQueue:
@@ -798,7 +808,7 @@
  			c.recordQueueTime(msg.enqueuedAt)
  			continue
  		case msg := <-c.sendPongCh:
-@@ -2060,10 +2138,10 @@
+@@ -2060,10 +2140,10 @@
  		case <-c.meshUpdate:
  			werr = c.sendMeshUpdates()
  		case msg := <-c.sendQueue:
@@ -811,7 +821,7 @@
  			c.recordQueueTime(msg.enqueuedAt)
  		case msg := <-c.sendPongCh:
  			werr = c.sendPong(msg)
-@@ -2207,6 +2285,14 @@
+@@ -2207,6 +2287,14 @@
  // returns, do not retain slices.
  // It does not flush its bufio.Writer.
  func (c *sclient) sendPacket(srcKey key.NodePublic, contents []byte) (err error) {
@@ -826,7 +836,7 @@
  	defer func() {
  		// Stats update.
  		if err != nil {
-@@ -2214,6 +2300,7 @@
+@@ -2214,6 +2302,7 @@
  		} else {
  			c.s.packetsSent.Add(1)
  			c.s.bytesSent.Add(int64(len(contents)))
@@ -841,7 +851,7 @@
 \ No newline at end of file
 --- /dev/null
 +++ b/derp/derpserver/uniderp.go
-@@ -0,0 +1,243 @@
+@@ -0,0 +1,250 @@
 +package derpserver
 +
 +import (
@@ -860,6 +870,7 @@
 +	Usable            bool                    `json:"usable"`
 +	Traffic           []UniDERPTailnetTraffic `json:"traffic,omitempty"`
 +	TrafficObservedAt time.Time               `json:"traffic_observed_at"`
++	ActiveConnections uint64                  `json:"active_connections"`
 +}
 +
 +type uniderpBinding struct {
@@ -950,6 +961,11 @@
 +		}
 +		if counters == nil {
 +			counters = new(uniderpTraffic)
++			s.uniderpTrafficSequence++
++			if s.uniderpTrafficSequence == 0 {
++				s.uniderpTrafficSequence++
++			}
++			counters.id = s.uniderpTrafficSequence
 +		}
 +		counters.group = 0
 +		if rule.Group == "shared" {
@@ -1064,6 +1080,7 @@
 +		return UniDERPAppliedPolicy{}
 +	}
 +	result := UniDERPAppliedPolicy{Revision: s.uniderpPolicy.policy.Revision, Traffic: s.uniderpTrafficLocked(), TrafficObservedAt: now.UTC()}
++	result.ActiveConnections = uint64(max(s.curClients.Value(), 0))
 +	if !s.uniderpClockValidLocked(now) {
 +		return result
 +	}
@@ -2403,7 +2420,7 @@
 +}
 --- /dev/null
 +++ b/derp/derpserver/uniderp_traffic.go
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,86 @@
 +package derpserver
 +
 +import "sync/atomic"
@@ -2412,6 +2429,7 @@
 +const uniderpGroupQueueBytes = 8 << 20
 +
 +type uniderpTraffic struct {
++	id     uint64
 +	queued atomic.Int64
 +	rx     atomic.Uint64
 +	tx     atomic.Uint64
@@ -2419,6 +2437,7 @@
 +}
 +
 +type UniDERPTailnetTraffic struct {
++	CounterID           uint64 `json:"counter_id"`
 +	TailnetID           string `json:"tailnet_id"`
 +	RXPayloadBytes      uint64 `json:"rx_payload_bytes"`
 +	TXPayloadBytes      uint64 `json:"tx_payload_bytes"`
@@ -2448,7 +2467,7 @@
 +	for _, rule := range s.uniderpPolicy.policy.QoS.Tailnets {
 +		traffic := s.uniderpPolicy.traffic[rule.TailnetID]
 +		tx := traffic.tx.Load()
-+		result = append(result, UniDERPTailnetTraffic{TailnetID: rule.TailnetID, RXPayloadBytes: traffic.rx.Load(), TXPayloadBytes: tx, RelayedPayloadBytes: tx, QueuedPayloadBytes: uint64(traffic.queued.Load())})
++		result = append(result, UniDERPTailnetTraffic{CounterID: traffic.id, TailnetID: rule.TailnetID, RXPayloadBytes: traffic.rx.Load(), TXPayloadBytes: tx, RelayedPayloadBytes: tx, QueuedPayloadBytes: uint64(traffic.queued.Load())})
 +	}
 +	return result
 +}
@@ -2490,7 +2509,7 @@
 +}
 --- /dev/null
 +++ b/derp/derpserver/uniderp_traffic_test.go
-@@ -0,0 +1,64 @@
+@@ -0,0 +1,100 @@
 +package derpserver
 +
 +import (
@@ -2533,6 +2552,9 @@
 +		body, _ := json.Marshal(s.UniDERPPolicyStatus())
 +		var state map[string]any
 +		json.Unmarshal(body, &state)
++		if state["active_connections"] != float64(2) {
++			t.Fatal("actual active connection count missing", string(body))
++		}
 +		traffic, ok := state["traffic"].([]any)
 +		if !ok || len(traffic) != 1 {
 +			t.Fatal("missing bounded tailnet traffic", string(body))
@@ -2540,6 +2562,10 @@
 +		return traffic[0].(map[string]any)
 +	}
 +	tally := read()
++	id := s.UniDERPPolicyStatus().Traffic[0].CounterID
++	if id == 0 {
++		t.Fatal("traffic counter identity missing", tally)
++	}
 +	for _, field := range []string{"rx_payload_bytes", "tx_payload_bytes", "relayed_payload_bytes"} {
 +		if tally[field] != float64(len(payload)) {
 +			t.Fatal("direction double-counted or missing", field, tally)
@@ -2551,7 +2577,36 @@
 +	p.Revision++
 +	p.QoS.OwnerWeight = 9
 +	installTestPolicy(t, s, p)
-+	if after := read(); after["relayed_payload_bytes"] != tally["relayed_payload_bytes"] {
++	if after := read(); after["relayed_payload_bytes"] != tally["relayed_payload_bytes"] || s.UniDERPPolicyStatus().Traffic[0].CounterID != id {
 +		t.Fatal("hot policy reset traffic", after)
++	}
++	kept := p
++	p.Revision++
++	p.Grants = []UniDERPGrantPolicy{}
++	p.QoS.Tailnets = []UniDERPPolicyTailnetQoS{}
++	installTestPolicy(t, s, p)
++	kept.Revision = p.Revision + 1
++	installTestPolicy(t, s, kept)
++	body, _ := json.Marshal(s.UniDERPPolicyStatus())
++	var state map[string]any
++	json.Unmarshal(body, &state)
++	if s.UniDERPPolicyStatus().Traffic[0].CounterID == id {
++		t.Fatal("rebuilt counter reused identity", string(body))
++	}
++}
++
++func TestUniDERPTrafficIdentityChangesAfterRestart(t *testing.T) {
++	private := key.NewNode()
++	p := testUniDERPPolicy(map[key.NodePublic]string{key.NewNode().Public(): "a"}, time.Now())
++	var first uint64
++	for i := 0; i < 2; i++ {
++		s := New(private, logger.Discard)
++		installTestPolicy(t, s, p)
++		id := s.UniDERPPolicyStatus().Traffic[0].CounterID
++		s.Close()
++		if id == 0 || id == first {
++			t.Fatal("server restart reused traffic identity", id)
++		}
++		first = id
 +	}
 +}

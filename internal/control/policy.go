@@ -130,7 +130,7 @@ func (s *Store) BuildPolicy(ctx context.Context, id string, now time.Time) (clus
 func (s *Store) buildPolicy(ctx context.Context, tx *sql.Tx, id string, now time.Time) (cluster.Policy, error) {
 	var owner, state string
 	var enabled bool
-	if err := tx.QueryRowContext(ctx, "SELECT n.owner_id,n.state,u.enabled FROM nodes n JOIN users u ON u.id=n.owner_id WHERE n.id=?", id).Scan(&owner, &state, &enabled); err != nil {
+	if err := tx.QueryRowContext(ctx, "SELECT n.owner_id,n.state,n.enabled=1 AND u.enabled=1 FROM nodes n JOIN users u ON u.id=n.owner_id WHERE n.id=?", id).Scan(&owner, &state, &enabled); err != nil {
 		return cluster.Policy{}, err
 	}
 	p := cluster.Policy{ClusterID: s.clusterID, NodeID: id, Grants: []cluster.GrantPolicy{}, QoS: cluster.QoSPolicy{Tailnets: []cluster.TailnetQoS{}}}
@@ -236,7 +236,7 @@ func (s *Store) buildPolicy(ctx context.Context, tx *sql.Tx, id string, now time
 	return p, nil
 }
 
-func (s *Store) NodeHeartbeat(ctx context.Context, token string) (cluster.NodeHeartbeat, error) {
+func (s *Store) NodeHeartbeat(ctx context.Context, token string, report *cluster.NodeReport) (cluster.NodeHeartbeat, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return cluster.NodeHeartbeat{}, err
@@ -257,6 +257,11 @@ func (s *Store) NodeHeartbeat(ctx context.Context, token string) (cluster.NodeHe
 	p, err := s.buildPolicy(ctx, tx, session.NodeID, now)
 	if err != nil {
 		return cluster.NodeHeartbeat{}, err
+	}
+	if report != nil {
+		if err := saveNodeReport(ctx, tx, session, *report, p.Revision, now); err != nil {
+			return cluster.NodeHeartbeat{}, err
+		}
 	}
 	retention, err := readRetentions(ctx, tx)
 	if err != nil {

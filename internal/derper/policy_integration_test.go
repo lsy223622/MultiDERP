@@ -123,12 +123,12 @@ func TestPolicyApplicationOnPatchedDerper(t *testing.T) {
 		}
 	}
 	status, err = process.Policy.Status(ctx)
-	if err != nil || len(status.Traffic) != 1 || status.TrafficObservedAt.IsZero() {
+	if err != nil || len(status.Traffic) != 1 || status.TrafficObservedAt.IsZero() || status.ActiveConnections != 2 {
 		t.Fatal("actual child traffic snapshot missing", status, err)
 	}
 	traffic := status.Traffic[0]
 	bytes := uint64(len("actual patched relay") + len("hot policy"))
-	if traffic.TailnetID != p.Grants[0].TailnetID || traffic.RXPayloadBytes != bytes || traffic.TXPayloadBytes != bytes || traffic.RelayedPayloadBytes != bytes || traffic.QueuedPayloadBytes != 0 {
+	if traffic.CounterID == 0 || traffic.TailnetID != p.Grants[0].TailnetID || traffic.RXPayloadBytes != bytes || traffic.TXPayloadBytes != bytes || traffic.RelayedPayloadBytes != bytes || traffic.QueuedPayloadBytes != 0 {
 		t.Fatal("actual child payload counters have wrong scope", traffic)
 	}
 	p.Revision++

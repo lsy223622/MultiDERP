@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+var errNodeSessionRejected = errors.New("node session rejected")
+
 type ControlStatus struct {
 	Connected         bool             `json:"connected"`
 	DesiredRevision   uint64           `json:"desired_revision"`
@@ -21,6 +23,7 @@ type ControlStatus struct {
 	Error             string           `json:"error"`
 	Traffic           []TailnetTraffic `json:"traffic,omitempty"`
 	TrafficObservedAt time.Time        `json:"traffic_observed_at"`
+	ActiveConnections uint64           `json:"active_connections"`
 }
 
 func (c *EnrollmentClient) ControlStatus() ControlStatus {
@@ -40,13 +43,14 @@ func waitControl(ctx context.Context, d time.Duration) error {
 	}
 }
 
-func (c *EnrollmentClient) RunControl(ctx context.Context, path string, apply func(context.Context, Policy) (PolicyApplication, error)) error {
-	if path == "" || apply == nil {
-		return errors.New("policy cache and application callback are required")
+func (c *EnrollmentClient) RunControl(ctx context.Context, path string, apply func(context.Context, Policy) (PolicyApplication, error), status func(context.Context) (PolicyApplication, error)) error {
+	if path == "" || apply == nil || status == nil {
+		return errors.New("policy cache, application and status callbacks are required")
 	}
 	defer func() { c.mu.Lock(); c.controlStatus.Connected = false; c.mu.Unlock() }()
 	loaded := false
 	backoff := time.Second
+	renewRequired := false
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -75,7 +79,7 @@ func (c *EnrollmentClient) RunControl(ctx context.Context, path string, apply fu
 				}
 			}
 		}
-		if session.InstanceID != c.instanceID || !time.Now().Add(10*time.Minute).Before(session.ExpiresAt) {
+		if renewRequired || session.InstanceID != c.instanceID || !time.Now().Add(10*time.Minute).Before(session.ExpiresAt) {
 			if session.InstanceID != c.instanceID {
 				if err := waitControl(ctx, time.Until(session.LeaseUntil)); err != nil {
 					return err
@@ -102,10 +106,14 @@ func (c *EnrollmentClient) RunControl(ctx context.Context, path string, apply fu
 				backoff = min(backoff*2, 30*time.Second)
 				continue
 			}
+			renewRequired = false
 		}
-		err := c.controlConnection(ctx, path, session, apply)
+		err := c.controlConnection(ctx, path, session, apply, status)
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if errors.Is(err, errNodeSessionRejected) {
+			renewRequired = true
 		}
 		if errors.Is(err, ErrIdentityConflict) {
 			c.mu.Lock()
@@ -130,7 +138,7 @@ func (c *EnrollmentClient) RunControl(ctx context.Context, path string, apply fu
 	}
 }
 
-func (c *EnrollmentClient) controlConnection(ctx context.Context, path string, session NodeSession, apply func(context.Context, Policy) (PolicyApplication, error)) error {
+func (c *EnrollmentClient) controlConnection(ctx context.Context, path string, session NodeSession, apply func(context.Context, Policy) (PolicyApplication, error), status func(context.Context) (PolicyApplication, error)) error {
 	applicationContext := ctx
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -150,6 +158,9 @@ func (c *EnrollmentClient) controlConnection(ctx context.Context, path string, s
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
+		if response.StatusCode == http.StatusUnauthorized {
+			return errNodeSessionRejected
+		}
 		return errors.New("controller stream rejected")
 	}
 	c.mu.Lock()
@@ -158,7 +169,7 @@ func (c *EnrollmentClient) controlConnection(ctx context.Context, path string, s
 	heartbeatErrors := make(chan error, 1)
 	var workers sync.WaitGroup
 	workers.Go(func() {
-		if err := c.controlHeartbeats(ctx, session); err != nil {
+		if err := c.controlHeartbeats(ctx, session, status); err != nil {
 			heartbeatErrors <- err
 			cancel()
 		}
@@ -250,13 +261,27 @@ func (c *EnrollmentClient) controlConnection(ctx context.Context, path string, s
 	return errors.New("controller stream ended")
 }
 
-func (c *EnrollmentClient) controlHeartbeats(ctx context.Context, session NodeSession) error {
+func (c *EnrollmentClient) controlHeartbeats(ctx context.Context, session NodeSession, status func(context.Context) (PolicyApplication, error)) error {
 	for {
 		if !time.Now().Add(5 * time.Minute).Before(session.ExpiresAt) {
 			return errors.New("node session needs renewal")
 		}
+		request := NodeHeartbeatRequest{}
+		sampleCtx, cancel := context.WithTimeout(ctx, time.Second)
+		sample, sampleErr := status(sampleCtx)
+		cancel()
+		if sampleErr == nil && !sample.TrafficObservedAt.IsZero() {
+			connections := sample.ActiveConnections
+			request.Report = &NodeReport{Revision: sample.Revision, Usable: sample.Usable, ObservedAt: sample.TrafficObservedAt, Traffic: sample.Traffic, ActiveConnections: &connections}
+			c.mu.Lock()
+			c.controlStatus.Usable = sample.Usable
+			c.controlStatus.Traffic = sample.Traffic
+			c.controlStatus.TrafficObservedAt = sample.TrafficObservedAt
+			c.controlStatus.ActiveConnections = sample.ActiveConnections
+			c.mu.Unlock()
+		}
 		var heartbeat NodeHeartbeat
-		if err := c.post(ctx, "/cluster/v1/heartbeat", struct{}{}, &heartbeat, session.Token); err != nil {
+		if err := c.post(ctx, "/cluster/v1/heartbeat", request, &heartbeat, session.Token); err != nil {
 			return err
 		}
 		if heartbeat.NodeID != session.NodeID || heartbeat.LeaseUntil.IsZero() || heartbeat.HeartbeatIntervalMillis < 250 || heartbeat.HeartbeatIntervalMillis > 30000 {
