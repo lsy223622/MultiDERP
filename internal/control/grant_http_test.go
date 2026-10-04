@@ -6,7 +6,7 @@ import (
 )
 
 func TestGrantHTTPEnforcesCSRFAndResourceOwnership(t *testing.T) {
-	s, _, _, n, tn := grantFixture(t)
+	s, provider, applicant, n, tn := grantFixture(t)
 	h := NewHTTPHandler(s)
 	providerCookie, providerCSRF := loginTest(t, h, "admin")
 	applicantCookie, applicantCSRF := loginTest(t, h, "alice")
@@ -14,13 +14,20 @@ func TestGrantHTTPEnforcesCSRFAndResourceOwnership(t *testing.T) {
 	if w := accountRequest(h, applicantCookie, "", "POST", "/api/v1/grants", body); w.Code != 403 {
 		t.Fatal("missing CSRF allowed", w.Code)
 	}
-	w := accountRequest(h, applicantCookie, applicantCSRF, "POST", "/api/v1/grants", body)
+	w := accountRequest(h, providerCookie, providerCSRF, "POST", "/api/v1/grants", body)
 	if w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	var g Grant
 	if err := json.Unmarshal(w.Body.Bytes(), &g); err != nil {
 		t.Fatal(err)
+	}
+	if g.TailnetOwnerID != applicant.ID || g.State != "requested" {
+		t.Fatal("administrator request changed applicant or bypassed approval", g)
+	}
+	audit, err := s.Audit(t.Context(), applicant)
+	if err != nil || len(audit) == 0 || audit[0].Action != "grant.request" || audit[0].ActorID != provider.ID || audit[0].ResourceID != g.ID {
+		t.Fatal("administrator request did not retain actual actor", audit, err)
 	}
 	path := "/api/v1/grants/" + g.ID + "/actions"
 	body = map[string]any{"expected_revision": g.Revision, "action": "approve"}
