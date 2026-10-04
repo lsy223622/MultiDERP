@@ -6,7 +6,7 @@ UniDERP 让自建 Tailscale DERP 中继服务多个独立 tailnet。单个主控
 
 主控本机也可提供中继，注册和授权规则与成员节点相同。成员只保存节点身份及有效策略；OAuth 凭据和账号数据库留在主控。Tailscale 继续负责对端身份、网络策略和 WireGuard 加密。
 
-当前分支处于 v2 发布准备阶段，示例使用本地构建镜像。隔离账号的真实只读 OAuth、原版 Tailscale 应用、公网 external 和手动证书 passthrough 中继已有验收结果；标准 Dockerfile 使用正常构建缓存的完整构建已通过。第二个独立真实 tailnet 和自动证书签发仍未验证；不使用依赖缓存的构建在依赖下载时遇到 EOF 错误。
+当前分支处于 v2 发布准备阶段，示例使用本地构建镜像。两个独立真实 tailnet 的只读 OAuth 和原版 Tailscale 应用已有隔离验收结果，包括共享确认前拒绝连接，以及通过主控和成员中继的公网 external 与手动证书 passthrough 文件传输；标准 Dockerfile 使用正常构建缓存的完整构建已通过。自动证书签发仍未验证；不使用依赖缓存的构建在依赖下载时遇到 EOF 错误。
 
 ## 构建
 
