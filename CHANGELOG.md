@@ -22,7 +22,8 @@
   public external/manual-TLS relay transfers and online revocation/recovery on
   controller and member relays. The complete canonical Dockerfile build passed
   with normal caching. Automatic certificate issuance remains unverified;
-  earlier builds without cached dependencies failed on download EOF errors.
+  the latest full no-cache retry failed in `go mod download` with EOF errors
+  downloading `modernc.org/sqlite` and `modernc.org/libc`.
 
 ## [1.0.3] - 2026-09-04
 

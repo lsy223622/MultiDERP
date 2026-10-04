@@ -140,7 +140,7 @@ Delete the temporary file after success. Enrollment verifies possession of the n
 2. Select a relay in the directory and request access for your tailnet. Its provider approves the request. The applicant then confirms activation. Before confirmation, the grant cannot admit devices. A provider's own tailnet becomes active directly.
 3. Export the tailnet's DERP map and merge its `Regions` into `derpMap.Regions` in that tailnet's existing Tailscale policy. Preserve existing ACLs/grants, other regions and default DERP settings. Region IDs 900–999 must not collide with existing custom regions. UniDERP does not edit that policy or distribute client configuration automatically. See [custom DERP servers](https://tailscale.com/docs/reference/derp-servers).
 
-The map advertises effective authorized resources on DERP TCP 443 and STUN UDP 3478. Discovery and authorization are separate: retaining a removed map entry does not authorize a device key. Stock-client compatibility is the intended interface; the local library-client tests are not a substitute for testing stock applications in real tailnets.
+The map advertises effective authorized resources using their saved public DERP TCP and STUN UDP ports, which default to 443 and 3478. Discovery and authorization are separate: retaining a removed map entry does not authorize a device key. Stock-client compatibility is the intended interface; the local library-client tests are not a substitute for testing stock applications in real tailnets.
 
 ## Bandwidth and expiration
 

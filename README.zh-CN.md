@@ -140,7 +140,7 @@ docker exec uniderp-node uniderp node enroll \
 2. 在服务器目录为自己的 tailnet 申请使用中继。提供者批准后，申请人还需确认生效；未确认不能放行设备。提供者自己的尾网直接生效。
 3. 导出该尾网 DERP map，将 `Regions` 合并到现有 Tailscale policy 的 `derpMap.Regions`。保留原有 ACL/grants、其他区域和默认 DERP 设置，并检查 900–999 的区域 ID 是否冲突。UniDERP 不自动修改 policy 或分发客户端配置。参见 [自定义 DERP 服务器](https://tailscale.com/docs/reference/derp-servers)。
 
-map 公布仍有效的授权资源，使用 DERP TCP 443、STUN UDP 3478。发现与授权分开：旧 map 条目不会赋予设备公钥权限。标准协议面向原版客户端，但本地 DERP library 测试不能替代真实尾网中的原版应用验证。
+map 公布仍有效的授权资源，使用各资源保存的公开 DERP TCP 和 STUN UDP 端口，默认分别为 443 和 3478。发现与授权分开：旧 map 条目不会赋予设备公钥权限。标准协议面向原版客户端，但本地 DERP library 测试不能替代真实尾网中的原版应用验证。
 
 ## 带宽与失效期限
 
