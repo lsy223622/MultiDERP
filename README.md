@@ -6,7 +6,7 @@ UniDERP shares self-hosted Tailscale DERP relays across independent tailnets. On
 
 The controller also runs a local relay, subject to the same registration and authorization rules as members. Members hold their node identity and effective policy, while OAuth credentials and the account database stay on the controller. Tailscale continues to manage peer identity, network policy and WireGuard encryption.
 
-This branch is v2 release preparation. The examples use a locally built image. Real OAuth accounts, stock Tailscale applications and a public-network deployment still require isolated acceptance testing before release.
+This branch is v2 release preparation. The examples use a locally built image. Isolated acceptance has exercised real read-only OAuth, stock Tailscale applications, and public relays using external TLS and manual-certificate passthrough. A second independent real tailnet, automatic certificate issuance and a clean-network Docker build remain unverified.
 
 ## Build
 
@@ -50,6 +50,8 @@ Open `https://YOUR-CONTROLLER-DOMAIN/manage/`. The administrator creates member 
 
 ### TLS and proxy
 
+`tls_mode: external` means the reverse proxy terminates TLS and derper receives HTTP. `tls_mode: passthrough` means derper terminates TLS and loads its own certificate; clients may connect directly or through a TCP proxy that forwards TLS unchanged. The name refers to passing TLS through an upstream proxy to derper.
+
 The external profile publishes the plaintext backend only at `127.0.0.1:3377`. A compatible host reverse proxy terminates TLS, preserves HTTP/1.1 upgrades, and streams long-lived controller responses. Forward all paths to the backend; patched derper routes `/manage/`, `/api/v1/` and `/cluster/v1/` to the internal management service. For an existing Nginx TLS server, the relevant location settings are:
 
 ```nginx
@@ -80,7 +82,44 @@ server:
     cert_dir: /data/certs
 ```
 
-This profile publishes TCP 80/443 and grants `NET_BIND_SERVICE`. Manual TLS uses `cert_mode: manual`, with `relay.example.com.crt` and `relay.example.com.key` in `cert_dir`, readable by UID 10001. Certificate issuance and your production reverse proxy must be verified in your deployment.
+This profile publishes TCP 80/443 and grants `NET_BIND_SERVICE`. Certificate issuance and your production reverse proxy must be verified in your deployment.
+
+For an existing certificate, use `cert_mode: manual`. Place the PEM certificate chain, including the leaf and required intermediates, in `relay.example.com.crt`, and its matching private key in `relay.example.com.key`, under `cert_dir`. The certificate must cover `server.hostname`. Make the directory accessible to UID 10001 and keep the private key readable only by that service identity. Manual certificates are loaded when derper starts; restart the node after replacing them.
+
+Manual TLS can use a non-443 backend port:
+
+```yaml
+server:
+  hostname: relay.example.com
+  derp:
+    listen: ":3377"
+    stun_listen: ":3478"
+    tls_mode: passthrough
+    cert_mode: manual
+    cert_dir: /data/certs
+```
+
+For example, publishing host TCP 3489 to container TCP 3377 exposes direct TLS on 3489. Set `DERPPort: 3489` in the manually installed Tailscale DERP map; the generated map uses 443 by default. The controller still verifies the node's public HTTPS domain on port 443, so keep that entry point reachable too. Open the published port in both the host and cloud firewall, and serve every advertised DNS address family. Let's Encrypt mode requires the configured DERP listener on 443 and its ACME entry points; changing a port alone does not adapt that mode.
+
+Manual TLS requires SNI matching `server.hostname`. To check a loopback backend while preserving the hostname and normal certificate validation, use:
+
+```sh
+curl --resolve relay.example.com:3489:127.0.0.1 \
+  https://relay.example.com:3489/derp/probe
+```
+
+An HTTP reverse proxy can also terminate public TLS and establish a separate TLS connection to a `passthrough` backend. This differs from forwarding TLS unchanged through a TCP proxy. In the earlier Nginx location, replace the HTTP `proxy_pass` and add:
+
+```nginx
+proxy_pass https://127.0.0.1:3489;
+proxy_ssl_server_name on;
+proxy_ssl_name relay.example.com;
+proxy_ssl_verify on;
+proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+proxy_ssl_verify_depth 3;
+```
+
+The CA bundle path must exist inside the proxy's container or host. Nginx defaults to no upstream SNI, disabled upstream certificate verification and a verification depth of 1. A valid longer chain can fail with `certificate chain too long`; choose a depth sufficient for the deployed chain rather than disabling verification. The example uses 3. These `proxy_ssl_*` settings apply only to an HTTPS backend; the `external` HTTP backend needs none of them. See the [Nginx upstream TLS directives](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_ssl_verify_depth).
 
 ## Join a relay
 

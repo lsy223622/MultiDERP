@@ -6,7 +6,7 @@ UniDERP 让自建 Tailscale DERP 中继服务多个独立 tailnet。单个主控
 
 主控本机也可提供中继，注册和授权规则与成员节点相同。成员只保存节点身份及有效策略；OAuth 凭据和账号数据库留在主控。Tailscale 继续负责对端身份、网络策略和 WireGuard 加密。
 
-当前分支处于 v2 发布准备阶段，示例使用本地构建镜像。正式发布前仍需用隔离账号验证真实 OAuth、原版 Tailscale 应用和公网部署。
+当前分支处于 v2 发布准备阶段，示例使用本地构建镜像。隔离账号的真实只读 OAuth、原版 Tailscale 应用、公网 external 和手动证书 passthrough 中继已有验收结果；第二个独立真实 tailnet、自动证书签发和干净网络 Docker 构建仍未完成。
 
 ## 构建
 
@@ -50,6 +50,8 @@ docker exec uniderp uniderp controller init \
 
 ### TLS 与代理
 
+`tls_mode: external` 由反向代理终止 TLS，derper 接收 HTTP。`tls_mode: passthrough` 由 derper 自己终止 TLS 并加载证书，客户端可直连，或通过透传 TLS 的 TCP 代理连接。这里的 passthrough 指上游代理将 TLS 传给 derper。
+
 external 示例只把明文后端暴露在 `127.0.0.1:3377`。主机反向代理负责 TLS、HTTP/1.1 upgrade 和主控长连接响应。所有路径转发到后端，patched derper 将 `/manage/`、`/api/v1/`、`/cluster/v1/` 路由到内部管理服务。已有 Nginx TLS server 可采用以下 location 设置：
 
 ```nginx
@@ -80,7 +82,44 @@ server:
     cert_dir: /data/certs
 ```
 
-该示例公开 TCP 80/443，授予 `NET_BIND_SERVICE`。手动证书使用 `cert_mode: manual`，在 `cert_dir` 中提供 `relay.example.com.crt` 和 `relay.example.com.key`，允许 UID 10001 读取。实际签发和生产代理仍需在部署环境验证。
+该示例公开 TCP 80/443，授予 `NET_BIND_SERVICE`。实际签发和生产代理仍需在部署环境验证。
+
+使用已有证书时设置 `cert_mode: manual`。在 `cert_dir` 中提供 PEM 格式的 `relay.example.com.crt`（站点证书及所需中间证书链）和匹配的 `relay.example.com.key`；证书必须覆盖 `server.hostname`。目录允许 UID 10001 访问，私钥仅允许该服务身份读取。手动证书在 derper 启动时加载，更换后需重启节点。
+
+手动 TLS 可使用非 443 后端端口：
+
+```yaml
+server:
+  hostname: relay.example.com
+  derp:
+    listen: ":3377"
+    stun_listen: ":3478"
+    tls_mode: passthrough
+    cert_mode: manual
+    cert_dir: /data/certs
+```
+
+例如将主机 TCP 3489 映射到容器 TCP 3377，就能在 3489 上提供直连 TLS。手动安装到 Tailscale 的 DERP map 需设置 `DERPPort: 3489`，平台默认导出 443。主控仍通过公网 HTTPS 443 验证节点域名，因此该入口也要可达。主机和云防火墙都需放行映射后的端口，并服务 DNS 公布的各地址族。Let's Encrypt 模式要求配置中的 DERP listener 使用 443，并保证 ACME 入口可达，不能只改端口就沿用该模式。
+
+手动 TLS 要求握手 SNI 与 `server.hostname` 匹配。检查回环后端时，可保留域名和正常证书验证：
+
+```sh
+curl --resolve relay.example.com:3489:127.0.0.1 \
+  https://relay.example.com:3489/derp/probe
+```
+
+HTTP 反代也可以终止公网 TLS，再与 passthrough 后端建立另一条 TLS 连接；这与 TCP 代理原样透传 TLS 不同。在前面的 Nginx location 中替换 HTTP `proxy_pass`，并加入：
+
+```nginx
+proxy_pass https://127.0.0.1:3489;
+proxy_ssl_server_name on;
+proxy_ssl_name relay.example.com;
+proxy_ssl_verify on;
+proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+proxy_ssl_verify_depth 3;
+```
+
+CA bundle 路径必须存在于代理所在的容器或主机。Nginx 默认不发送后端 SNI、不验证后端证书，验证深度默认是 1；有效但较长的证书链可能报 `certificate chain too long`。应根据实际证书链设置足够的深度，示例使用 3，保留证书验证。`proxy_ssl_*` 仅用于 HTTPS 后端；external 的 HTTP 后端不需要这些设置。参见 [Nginx 后端 TLS 指令](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_ssl_verify_depth)。
 
 ## 加入成员中继
 
