@@ -61,7 +61,7 @@ func TestPolicyIdentityRefreshAndCredentialDeletionPublishAtomically(t *testing.
 		t.Fatal(err)
 	}
 	s.verifyDomain = func(context.Context, cluster.NodeChallenge) error { return nil }
-	n, enrollment, err := s.CreateNode(t.Context(), admin, "Relay", "relay.example.com")
+	n, enrollment, err := s.CreateNode(t.Context(), admin, "Relay", "relay.example.com", 443, 3478)
 	if err != nil {
 		t.Fatal(err)
 	}

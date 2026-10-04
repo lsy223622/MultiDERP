@@ -82,7 +82,7 @@ func (s *Store) RelaySummary(ctx context.Context, actor Actor, id string) (Relay
 	n := &result.Node
 	var lease int64
 	var probes []byte
-	err := s.db.QueryRowContext(ctx, `SELECT n.id,n.owner_id,n.domain,n.display_name,n.region_id,n.state,n.last_heartbeat,n.last_error,n.enabled,u.username,n.lease_until,p.budget_bps,p.owner_weight,p.shared_weight,p.shared_max_bps,n.domain_verified_at,o.probes_json FROM nodes n JOIN users u ON u.id=n.owner_id JOIN node_policies p ON p.node_id=n.id LEFT JOIN node_observations o ON o.node_id=n.id WHERE n.id=? AND n.enabled=1 AND u.enabled=1 AND n.state IN ('registered','ready','offline')`, id).Scan(&n.ID, &n.OwnerID, &n.Domain, &n.DisplayName, &n.RegionID, &n.State, &n.LastHeartbeat, &n.LastError, &n.Enabled, &result.Provider, &lease, &result.QoS.BudgetBPS, &result.QoS.OwnerWeight, &result.QoS.SharedWeight, &result.QoS.SharedMaxBPS, &result.DomainVerifiedAt, &probes)
+	err := s.db.QueryRowContext(ctx, `SELECT n.id,n.owner_id,n.domain,n.derp_port,n.stun_port,n.display_name,n.region_id,n.state,n.last_heartbeat,n.last_error,n.enabled,u.username,n.lease_until,p.budget_bps,p.owner_weight,p.shared_weight,p.shared_max_bps,n.domain_verified_at,o.probes_json FROM nodes n JOIN users u ON u.id=n.owner_id JOIN node_policies p ON p.node_id=n.id LEFT JOIN node_observations o ON o.node_id=n.id WHERE n.id=? AND n.enabled=1 AND u.enabled=1 AND n.state IN ('registered','ready','offline')`, id).Scan(&n.ID, &n.OwnerID, &n.Domain, &n.DERPPort, &n.STUNPort, &n.DisplayName, &n.RegionID, &n.State, &n.LastHeartbeat, &n.LastError, &n.Enabled, &result.Provider, &lease, &result.QoS.BudgetBPS, &result.QoS.OwnerWeight, &result.QoS.SharedWeight, &result.QoS.SharedMaxBPS, &result.DomainVerifiedAt, &probes)
 	if err != nil {
 		return result, err
 	}

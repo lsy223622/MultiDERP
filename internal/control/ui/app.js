@@ -44,11 +44,20 @@ async function credential(t){const c=card('替换 '+t.display_name+' 的凭据')
 async function nodes(){
   page('我的服务器','注册后仍需接收并应用策略。暂停会发布空许可；删除和域名变更后，需要使用者更新自己的 DERP map。');
   const items=await api('/nodes');
-  table(card('服务器'),['名称','域名','状态','最近心跳','操作'],items.map(n=>[
-    n.display_name,el('code',n.domain),actions(status(n.state),...(!n.enabled?[status('paused')]:[])),time(n.last_heartbeat),
-    actions(button('状态',()=>nodeState(n)),...(n.state!=='pending'?[button('规则',()=>qos(n,true))]:[button('注册码',()=>enrollment(n))]),button(n.enabled?'暂停':'启用',async()=>{await api('/nodes/'+n.id+'/enabled','POST',{enabled:!n.enabled});await render();}),...(n.state!=='pending'?[button('域名',()=>changeDomain(n))]:[]),button('删除',()=>deleteNode(n),'danger'))
+  table(card('服务器'),['名称','域名 / 公开端口','状态','最近心跳','操作'],items.map(n=>[
+    n.display_name,el('code',n.domain+' · DERP TCP '+n.derp_port+' / STUN UDP '+n.stun_port),actions(status(n.state),...(!n.enabled?[status('paused')]:[])),time(n.last_heartbeat),
+    actions(button('状态',()=>nodeState(n)),button('公开端口',()=>nodePorts(n)),...(n.state!=='pending'?[button('规则',()=>qos(n,true))]:[button('注册码',()=>enrollment(n))]),button(n.enabled?'暂停':'启用',async()=>{await api('/nodes/'+n.id+'/enabled','POST',{enabled:!n.enabled});await render();}),...(n.state!=='pending'?[button('域名',()=>changeDomain(n))]:[]),button('删除',()=>deleteNode(n),'danger'))
   ]));
-  const f=form(card('添加服务器'),'创建并签发注册码',async data=>{const result=await api('/nodes','POST',{display_name:data.get('name'),domain:data.get('domain')});return()=>showEnrollment(result.enrollment);});field(f,'name','显示名称');field(f,'domain','公共 DERP 域名');done(f);
+  const f=form(card('添加服务器'),'创建并签发注册码',async data=>{const result=await api('/nodes','POST',{display_name:data.get('name'),domain:data.get('domain'),derp_port:Number(data.get('derp_port')),stun_port:Number(data.get('stun_port'))});return()=>showEnrollment(result.enrollment);});field(f,'name','显示名称');field(f,'domain','公共 DERP 域名');publicPortFields(f,{derp_port:443,stun_port:3478});done(f);
+}
+function publicPortFields(f,n) {
+  for(const [name,label] of [['derp_port','公开 DERP TCP 端口'],['stun_port','公开 STUN UDP 端口']]){const input=field(f,name,label,'number',true,n[name]);input.min='1';input.max='65535';input.step='1';}
+}
+async function nodePorts(n) {
+  const c=card(n.display_name+' · 公开端口');
+  c.append(el('p','填写客户端访问的宿主机映射或代理端口。先配置对应入口，再保存并更新使用者的 DERP map；节点域名注册证明仍使用 HTTPS 443。','muted'));
+  const f=form(c,'保存公开端口',data=>api('/nodes/'+n.id+'/ports','POST',{derp_port:Number(data.get('derp_port')),stun_port:Number(data.get('stun_port'))}));
+  publicPortFields(f,n);done(f);c.scrollIntoView({behavior:'smooth'});
 }
 async function changeDomain(n){
   const c=card(n.display_name+' · 更换域名');
@@ -71,8 +80,8 @@ async function deleteNode(n){
 }
 function showEnrollment(e){const c=card('一次性注册码');c.append(el('p','有效至 '+time(e.expires_at)),el('pre',e.code));c.append(button('关闭并清除',()=>c.remove()));c.scrollIntoView({behavior:'smooth'});}
 async function enrollment(n){const e=await api('/nodes/'+n.id+'/enrollment','POST',{});showEnrollment(e);}
-function probeTable(parent,probes) {
-  table(parent,['主控独立探测','结果','检查时间'],['derp','stun'].map(name=>[name==='derp'?'HTTPS DERP 端点':'UDP STUN 端点',probes?.[name]?.state==='ok'?'成功':probes?.[name]?.state==='failed'?'失败':'尚未检查',time(probes?.[name]?.observed_at)]));
+function probeTable(parent,probes,node) {
+  table(parent,['主控独立探测','结果','检查时间'],['derp','stun'].map(name=>[name==='derp'?'HTTPS DERP '+node.domain+':'+node.derp_port:'UDP STUN '+node.domain+':'+node.stun_port,probes?.[name]?.state==='ok'?'成功':probes?.[name]?.state==='failed'?'失败':'尚未检查',time(probes?.[name]?.observed_at)]));
   parent.append(el('p','探测仅表示主控当次能访问该端点。客户端是否能从所在网络连接，需要实际验证。','muted'));
 }
 function ruleSummary(parent,q) {
@@ -115,7 +124,7 @@ async function nodeState(n) {
     table(c,['尾网','累计 RX / TX 载荷（字节）','平均 RX / TX（Mbps）','采样间隔','排队载荷（字节）'],s.report.traffic.map(t=>{const r=rates.get(t.tailnet_id);return[t.tailnet_id,t.rx_payload_bytes+' / '+t.tx_payload_bytes,r?(r.rx_bits_per_second/1000000).toFixed(3)+' / '+(r.tx_bits_per_second/1000000).toFixed(3):'等待两次连续计数样本',r?r.interval_seconds.toFixed(1)+' 秒':'—',t.queued_payload_bytes];}));
     c.append(el('p','计数来自节点 derper；累计值从当前进程的相应尾网计数开始。平均值只覆盖最近两次采样之间的 DERP 载荷，不包含协议开销，也不证明对端应用收到数据。','muted'));
   } else c.append(el('p','尚无当前节点实例的运行报告。','muted'));
-  c.append(el('h2','主控独立端点探测'));probeTable(c,s.probes);
+  c.append(el('h2','主控独立端点探测'));probeTable(c,s.probes,s.node);
   if((actor.role==='admin'||n.owner_id===actor.id)&&['registered','ready','offline'].includes(s.node.state))c.append(button('立即检查端点',async()=>{await api('/nodes/'+n.id+'/probe','POST',{});c.remove();await nodeState(n);}));
   c.scrollIntoView({behavior:'smooth'});
 }
@@ -123,7 +132,7 @@ async function directory(){
   page('服务器目录','选择你的尾网申请共享。提供者批准后，需要申请方确认，授权才会生效。');
   const [nodes,tailnets]=await Promise.all([api('/relays'),api('/tailnets')]);
   const summaries=await Promise.all(nodes.map(n=>api('/nodes/'+n.id+'/summary')));
-  table(card('可申请服务器'),['服务器 / 提供者','域名','最近心跳','操作'],summaries.map(s=>[actions(el('span',s.node.display_name),el('span','提供者 '+s.provider)),el('code',s.node.domain),actions(status(s.node.state),el('span',time(s.node.last_heartbeat))),actions(button('申请',()=>request(s.node,tailnets)),button('规则与探测',()=>{const c=card(s.node.display_name+' · 共享信息');ruleSummary(c,s.qos);c.append(el('p','域名注册验证：'+time(s.domain_verified_at)));probeTable(c,s.probes);c.scrollIntoView({behavior:'smooth'});}))]));
+  table(card('可申请服务器'),['服务器 / 提供者','域名 / 公开端口','最近心跳','操作'],summaries.map(s=>[actions(el('span',s.node.display_name),el('span','提供者 '+s.provider)),el('code',s.node.domain+' · DERP TCP '+s.node.derp_port+' / STUN UDP '+s.node.stun_port),actions(status(s.node.state),el('span',time(s.node.last_heartbeat))),actions(button('申请',()=>request(s.node,tailnets)),button('规则与探测',()=>{const c=card(s.node.display_name+' · 共享信息');ruleSummary(c,s.qos);c.append(el('p','域名注册验证：'+time(s.domain_verified_at)));probeTable(c,s.probes,s.node);c.scrollIntoView({behavior:'smooth'});}))]));
 }
 async function request(n,tailnets){if(!tailnets.length)throw new Error('请先绑定自己的尾网。');const c=card('申请 '+n.display_name);const f=form(c,'提交申请',async data=>{const existing=await api('/grants');const g=existing.find(g=>g.node_id===n.id&&g.tailnet_id===data.get('tailnet'));await api('/grants','POST',{node_id:n.id,tailnet_id:data.get('tailnet'),expected_revision:g?.revision||0,explicit_until:data.get('until')?new Date(data.get('until')).toISOString():'0001-01-01T00:00:00Z'});});select(f,'tailnet','使用尾网',tailnets.filter(t=>actor.role==='admin'||t.owner_id===actor.id).map(t=>[t.id,t.display_name]));field(f,'until','明确截止（可选）','datetime-local',false);done(f);c.scrollIntoView({behavior:'smooth'});}
 async function grants(){page('申请与授权','申请 → 提供者批准 → 申请方确认。撤销后重新申请会产生新版本，凭据恢复不会重新激活旧授权。');const items=await api('/grants');table(card('授权关系'),['服务器','尾网','状态','截止 / 版本','操作'],items.map(g=>{const owner=actor.role==='admin'||g.node_owner_id===actor.id,applicant=actor.role==='admin'||g.tailnet_owner_id===actor.id;const available=[];if(g.state==='requested'){if(owner)available.push(['approve','批准'],['reject','拒绝']);if(applicant)available.push(['cancel','取消']);}if(g.state==='owner_approved'){if(applicant)available.push(['confirm','确认'],['cancel','取消']);if(owner)available.push(['revoke','撤销']);}if(g.state==='active'){if(owner)available.push(['revoke','撤销']);if(applicant)available.push(['leave','退出']);}return[g.node_name,actions(el('span',g.tailnet_name),el('span','申请者 '+g.applicant)),status(g.state),(g.explicit_until==='0001-01-01T00:00:00Z'?'未另设截止':time(g.explicit_until))+' · r'+g.revision,actions(...available.map(([action,label])=>button(label,async()=>{if(['revoke','leave'].includes(action)&&!confirm('确认'+label+'此授权？'))return;await api('/grants/'+g.id+'/actions','POST',{expected_revision:g.revision,action});await render();})),...(['requested','owner_approved','active'].includes(g.state)?[button('当前规则',()=>qos({id:g.node_id,display_name:g.node_name},false)),button('观测状态',()=>nodeState({id:g.node_id,display_name:g.node_name,owner_id:g.node_owner_id}))]:[]))];}));}

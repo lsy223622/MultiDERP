@@ -21,6 +21,8 @@ type Node struct {
 	ID            string `json:"id"`
 	OwnerID       string `json:"owner_id"`
 	Domain        string `json:"domain"`
+	DERPPort      int    `json:"derp_port"`
+	STUNPort      int    `json:"stun_port"`
 	DisplayName   string `json:"display_name"`
 	RegionID      int    `json:"region_id"`
 	State         string `json:"state"`
@@ -62,11 +64,11 @@ func (s *Store) ConfigureNodes(allowedCIDRs []string) error {
 	return nil
 }
 
-const nodeColumns = `id,owner_id,domain,display_name,region_id,state,last_heartbeat,last_error,enabled`
+const nodeColumns = `id,owner_id,domain,derp_port,stun_port,display_name,region_id,state,last_heartbeat,last_error,enabled`
 
 func scanNode(row interface{ Scan(...any) error }) (Node, error) {
 	var n Node
-	err := row.Scan(&n.ID, &n.OwnerID, &n.Domain, &n.DisplayName, &n.RegionID, &n.State, &n.LastHeartbeat, &n.LastError, &n.Enabled)
+	err := row.Scan(&n.ID, &n.OwnerID, &n.Domain, &n.DERPPort, &n.STUNPort, &n.DisplayName, &n.RegionID, &n.State, &n.LastHeartbeat, &n.LastError, &n.Enabled)
 	return n, err
 }
 
@@ -110,8 +112,8 @@ func (s *Store) issueEnrollment(ctx context.Context, tx *sql.Tx, n Node) (Enroll
 	return e, err
 }
 
-func (s *Store) CreateNode(ctx context.Context, actor Actor, name, domain string) (Node, Enrollment, error) {
-	if s.clusterID == "" || strings.TrimSpace(name) == "" || len(name) > 160 {
+func (s *Store) CreateNode(ctx context.Context, actor Actor, name, domain string, derpPort, stunPort int) (Node, Enrollment, error) {
+	if s.clusterID == "" || strings.TrimSpace(name) == "" || len(name) > 160 || derpPort < 1 || derpPort > 65535 || stunPort < 1 || stunPort > 65535 {
 		return Node{}, Enrollment{}, ErrInvalid
 	}
 	domain, err := normalizeNodeDomain(domain)
@@ -136,8 +138,8 @@ func (s *Store) CreateNode(ctx context.Context, actor Actor, name, domain string
 	if region == 0 {
 		return Node{}, Enrollment{}, ErrConflict
 	}
-	n := Node{ID: randomToken(), OwnerID: actor.ID, Domain: domain, DisplayName: name, RegionID: region, State: "pending", Enabled: true}
-	if _, err := tx.ExecContext(ctx, "INSERT INTO nodes(id,owner_id,domain,display_name,region_id) VALUES(?,?,?,?,?)", n.ID, n.OwnerID, n.Domain, n.DisplayName, n.RegionID); err != nil {
+	n := Node{ID: randomToken(), OwnerID: actor.ID, Domain: domain, DERPPort: derpPort, STUNPort: stunPort, DisplayName: name, RegionID: region, State: "pending", Enabled: true}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO nodes(id,owner_id,domain,derp_port,stun_port,display_name,region_id) VALUES(?,?,?,?,?,?,?)", n.ID, n.OwnerID, n.Domain, n.DERPPort, n.STUNPort, n.DisplayName, n.RegionID); err != nil {
 		return Node{}, Enrollment{}, conflictError(err)
 	}
 	e, err := s.issueEnrollment(ctx, tx, n)

@@ -7,10 +7,10 @@ func (s *Store) migrate() error {
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version == 5 {
+	if version == 6 {
 		return nil
 	}
-	if version < 0 || version > 5 {
+	if version < 0 || version > 6 {
 		return fmt.Errorf("unsupported controller database version %d", version)
 	}
 	tx, err := s.db.Begin()
@@ -117,7 +117,8 @@ PRAGMA user_version=3;`); err != nil {
 			return err
 		}
 	}
-	if _, err := tx.Exec(`ALTER TABLE nodes ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1));
+	if version < 5 {
+		if _, err := tx.Exec(`ALTER TABLE nodes ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1));
 ALTER TABLE nodes ADD COLUMN domain_verified_at INTEGER NOT NULL DEFAULT 0;
 UPDATE nodes SET domain_verified_at=coalesce((SELECT max(created_at) FROM audit WHERE resource_type='node' AND resource_id=nodes.id AND action='node.enroll'),0) WHERE public_key IS NOT NULL;
 CREATE TABLE node_observations (
@@ -125,6 +126,12 @@ CREATE TABLE node_observations (
  report_instance TEXT NOT NULL DEFAULT '', report_json BLOB, reported_at INTEGER NOT NULL DEFAULT 0,
  probes_json BLOB, previous_report_json BLOB
 ); PRAGMA user_version=5;`); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`ALTER TABLE nodes ADD COLUMN derp_port INTEGER NOT NULL DEFAULT 443 CHECK(derp_port BETWEEN 1 AND 65535);
+ALTER TABLE nodes ADD COLUMN stun_port INTEGER NOT NULL DEFAULT 3478 CHECK(stun_port BETWEEN 1 AND 65535);
+PRAGMA user_version=6;`); err != nil {
 		return err
 	}
 	return tx.Commit()

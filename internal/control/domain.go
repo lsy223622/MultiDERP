@@ -136,8 +136,12 @@ func (v *domainVerifier) resolve(ctx context.Context, domain string) ([]netip.Ad
 }
 
 func (v *domainVerifier) dialDomain(ctx context.Context, network, address string) (net.Conn, error) {
+	return v.dialDomainPort(ctx, network, address, "443")
+}
+
+func (v *domainVerifier) dialDomainPort(ctx context.Context, network, address, expectedPort string) (net.Conn, error) {
 	domain, port, err := net.SplitHostPort(address)
-	if err != nil || network != "tcp" || port != "443" {
+	if err != nil || network != "tcp" || port != expectedPort {
 		return nil, ErrInvalid
 	}
 	ips, err := v.resolve(ctx, domain)

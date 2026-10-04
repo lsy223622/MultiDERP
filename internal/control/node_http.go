@@ -65,14 +65,16 @@ func (h *httpHandler) mountNodes() {
 		writeJSON(w, n)
 	})
 	h.mux.HandleFunc("POST /api/v1/nodes", func(w http.ResponseWriter, r *http.Request) {
-		var body struct {
+		body := struct {
 			DisplayName string `json:"display_name"`
 			Domain      string `json:"domain"`
-		}
+			DERPPort    int    `json:"derp_port"`
+			STUNPort    int    `json:"stun_port"`
+		}{DERPPort: 443, STUNPort: 3478}
 		if !decodeRequest(w, r, &body) {
 			return
 		}
-		n, e, err := s.CreateNode(r.Context(), h.actor(r), body.DisplayName, body.Domain)
+		n, e, err := s.CreateNode(r.Context(), h.actor(r), body.DisplayName, body.Domain, body.DERPPort, body.STUNPort)
 		if err != nil {
 			httpError(w, err)
 			return
@@ -81,6 +83,20 @@ func (h *httpHandler) mountNodes() {
 			Node       Node       `json:"node"`
 			Enrollment Enrollment `json:"enrollment"`
 		}{n, e})
+	})
+	h.mux.HandleFunc("POST /api/v1/nodes/{id}/ports", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			DERPPort int `json:"derp_port"`
+			STUNPort int `json:"stun_port"`
+		}
+		if !decodeRequest(w, r, &body) {
+			return
+		}
+		if err := s.SetNodePorts(r.Context(), h.actor(r), r.PathValue("id"), body.DERPPort, body.STUNPort); err != nil {
+			httpError(w, err)
+			return
+		}
+		writeJSON(w, map[string]bool{"ok": true})
 	})
 	h.mux.HandleFunc("POST /api/v1/nodes/{id}/enrollment", func(w http.ResponseWriter, r *http.Request) {
 		e, err := s.IssueEnrollment(r.Context(), h.actor(r), r.PathValue("id"))

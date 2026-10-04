@@ -80,15 +80,15 @@ func TestDERPMapForeignOwnerAndIdentityExpiry(t *testing.T) {
 func TestDERPMapRegionCapacityAndDuplicateDomain(t *testing.T) {
 	s, admin, _ := nodeTestStore(t)
 	for i := 0; i < 100; i++ {
-		n, _, err := s.CreateNode(t.Context(), admin, "Relay", fmt.Sprintf("r%d.example.com", i))
+		n, _, err := s.CreateNode(t.Context(), admin, "Relay", fmt.Sprintf("r%d.example.com", i), 443, 3478)
 		if err != nil || n.RegionID != 900+i {
 			t.Fatal(i, n.RegionID, err)
 		}
 	}
-	if _, _, err := s.CreateNode(t.Context(), admin, "Full", "full.example.com"); !errors.Is(err, ErrConflict) {
+	if _, _, err := s.CreateNode(t.Context(), admin, "Full", "full.example.com", 443, 3478); !errors.Is(err, ErrConflict) {
 		t.Fatal("region range extended", err)
 	}
-	if _, _, err := s.CreateNode(t.Context(), admin, "Duplicate", "R0.EXAMPLE.COM."); !errors.Is(err, ErrConflict) {
+	if _, _, err := s.CreateNode(t.Context(), admin, "Duplicate", "R0.EXAMPLE.COM.", 443, 3478); !errors.Is(err, ErrConflict) {
 		t.Fatal("duplicate canonical domain accepted", err)
 	}
 }

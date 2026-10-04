@@ -13,7 +13,7 @@ func TestStoreMigrationTransactionAndReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	var version int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 5 {
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 6 {
 		t.Fatalf("migration = %d, %v", version, err)
 	}
 	tx, err := s.db.BeginTx(context.Background(), nil)
@@ -53,7 +53,7 @@ func TestStoreMigratesExistingAccounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec(`DROP TABLE node_observations; ALTER TABLE nodes DROP COLUMN enabled; ALTER TABLE nodes DROP COLUMN domain_verified_at; ALTER TABLE node_policies DROP COLUMN derper_usable; ALTER TABLE grants DROP COLUMN last_control_success; DROP TABLE node_challenges; ALTER TABLE enrollments DROP COLUMN response_encrypted; ALTER TABLE enrollments DROP COLUMN owner_id; ALTER TABLE credentials DROP COLUMN revision; ALTER TABLE credentials DROP COLUMN refresh_seq; PRAGMA user_version=1;`); err != nil {
+	if _, err := s.db.Exec(`ALTER TABLE nodes DROP COLUMN derp_port; ALTER TABLE nodes DROP COLUMN stun_port; DROP TABLE node_observations; ALTER TABLE nodes DROP COLUMN enabled; ALTER TABLE nodes DROP COLUMN domain_verified_at; ALTER TABLE node_policies DROP COLUMN derper_usable; ALTER TABLE grants DROP COLUMN last_control_success; DROP TABLE node_challenges; ALTER TABLE enrollments DROP COLUMN response_encrypted; ALTER TABLE enrollments DROP COLUMN owner_id; ALTER TABLE credentials DROP COLUMN revision; ALTER TABLE credentials DROP COLUMN refresh_seq; PRAGMA user_version=1;`); err != nil {
 		t.Fatal(err)
 	}
 	s.Close()
@@ -84,7 +84,7 @@ func TestStoreMigratesObservationsFromVersionFour(t *testing.T) {
 	if _, err := s.InitializeAdmin(t.Context(), "admin", testPassword); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec("DROP TABLE node_observations; ALTER TABLE nodes DROP COLUMN enabled; ALTER TABLE nodes DROP COLUMN domain_verified_at; PRAGMA user_version=4;"); err != nil {
+	if _, err := s.db.Exec("ALTER TABLE nodes DROP COLUMN derp_port; ALTER TABLE nodes DROP COLUMN stun_port; DROP TABLE node_observations; ALTER TABLE nodes DROP COLUMN enabled; ALTER TABLE nodes DROP COLUMN domain_verified_at; PRAGMA user_version=4;"); err != nil {
 		t.Fatal(err)
 	}
 	s.Close()

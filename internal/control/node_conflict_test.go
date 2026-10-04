@@ -12,7 +12,7 @@ import (
 func registeredTestNode(t *testing.T) (*Store, Actor, Actor, Node, ed25519.PrivateKey, cluster.NodeSession) {
 	t.Helper()
 	s, admin, member := nodeTestStore(t)
-	n, e, err := s.CreateNode(t.Context(), admin, "Relay", "relay.example.com")
+	n, e, err := s.CreateNode(t.Context(), admin, "Relay", "relay.example.com", 443, 3478)
 	if err != nil {
 		t.Fatal(err)
 	}

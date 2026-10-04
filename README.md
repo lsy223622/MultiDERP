@@ -99,7 +99,7 @@ server:
     cert_dir: /data/certs
 ```
 
-For example, publishing host TCP 3489 to container TCP 3377 exposes direct TLS on 3489. Set `DERPPort: 3489` in the manually installed Tailscale DERP map; the generated map uses 443 by default. The controller still verifies the node's public HTTPS domain on port 443, so keep that entry point reachable too. Open the published port in both the host and cloud firewall, and serve every advertised DNS address family. Let's Encrypt mode requires the configured DERP listener on 443 and its ACME entry points; changing a port alone does not adapt that mode.
+For example, publishing host TCP 3489 to container TCP 3377 exposes direct TLS on 3489. Set the node resource’s public DERP TCP port to 3489 in the management page. Its public STUN UDP port is configured separately. These ports default to 443/3478 and describe the host mapping or proxy entry points, not container listeners; map export and independent probes use the saved values. Owners and administrators can change them; sharers can read them. Re-export and update each tailnet’s map after a change. The controller still verifies the node's public HTTPS domain on port 443, so keep that entry point reachable too. Open the published port in both the host and cloud firewall, and serve every advertised DNS address family. Let's Encrypt mode requires the configured DERP listener on 443 and its ACME entry points; changing a port alone does not adapt that mode.
 
 Manual TLS requires SNI matching `server.hostname`. To check a loopback backend while preserving the hostname and normal certificate validation, use:
 

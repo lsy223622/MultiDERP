@@ -15,6 +15,111 @@ import (
 	"tailscale.com/net/stun"
 )
 
+type publicPortTestConn struct {
+	net.Conn
+	remote net.Addr
+}
+
+func (c publicPortTestConn) RemoteAddr() net.Addr { return c.remote }
+
+func TestNodeProbeUsesSeparatePublicPortsAndClearsOldObservation(t *testing.T) {
+	s, admin, _, n, _, _ := registeredTestNode(t)
+	var failed atomic.Bool
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.TLS.ServerName != "example.com" || r.Host != "example.com:3489" || r.URL.Path != "/derp/probe" {
+			t.Error("wrong TLS/SNI or probe endpoint", r.Host, r.TLS.ServerName, r.URL)
+		}
+		if failed.Load() {
+			w.WriteHeader(503)
+		}
+	}))
+	defer server.Close()
+	udp, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer udp.Close()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			b := make([]byte, 1500)
+			count, addr, err := udp.ReadFrom(b)
+			if err != nil {
+				return
+			}
+			id, err := stun.ParseBindingRequest(b[:count])
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			udp.WriteTo(stun.Response(id, netip.MustParseAddrPort("1.2.3.4:5678")), addr)
+		}
+	}()
+	defer func() { udp.Close(); <-done }()
+	v := newDomainVerifier(nil)
+	v.tlsRoots = x509.NewCertPool()
+	v.tlsRoots.AddCert(server.Certificate())
+	v.lookup = func(context.Context, string, string) ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("1.1.1.1")}, nil
+	}
+	var tcpCalls, udpCalls atomic.Int32
+	var wrongRemote atomic.Bool
+	v.dial = func(ctx context.Context, network, address string) (net.Conn, error) {
+		var target string
+		var remote net.Addr
+		switch {
+		case network == "tcp" && address == "1.1.1.1:3489":
+			tcpCalls.Add(1)
+			target = server.Listener.Addr().String()
+			remote = &net.TCPAddr{IP: net.ParseIP("1.1.1.1"), Port: 3489}
+		case network == "udp" && address == "1.1.1.1:3488":
+			udpCalls.Add(1)
+			target = udp.LocalAddr().String()
+			remote = &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 3488}
+		default:
+			t.Errorf("probe contacted default/old-service endpoint %s %s", network, address)
+			return nil, ErrInvalid
+		}
+		if wrongRemote.Load() {
+			remote = &net.TCPAddr{IP: net.ParseIP("1.1.1.1"), Port: 443}
+		}
+		conn, err := (&net.Dialer{}).DialContext(ctx, network, target)
+		if err != nil {
+			return nil, err
+		}
+		return publicPortTestConn{conn, remote}, nil
+	}
+	if _, err := s.db.Exec("UPDATE nodes SET domain='example.com' WHERE id=?", n.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetNodePorts(t.Context(), admin, n.ID, 3489, 3488); err != nil {
+		t.Fatal(err)
+	}
+	s.probeDomain = v.probe
+	result, err := s.ProbeNode(t.Context(), admin, n.ID)
+	if err != nil || result.DERP.State != "ok" || result.STUN.State != "ok" || tcpCalls.Load() != 1 || udpCalls.Load() != 1 {
+		t.Fatal("non-default services not probed", result, err, tcpCalls.Load(), udpCalls.Load())
+	}
+	failed.Store(true)
+	result, err = s.ProbeNode(t.Context(), admin, n.ID)
+	if err != nil || result.DERP.State != "failed" || result.STUN.State != "ok" {
+		t.Fatal("DERP failure hidden by another service", result, err)
+	}
+	wrongRemote.Store(true)
+	result, err = s.ProbeNode(t.Context(), admin, n.ID)
+	if err != nil || result.DERP.State != "failed" || result.STUN.State != "failed" {
+		t.Fatal("changed actual remote port accepted", result, err)
+	}
+	if err := s.SetNodePorts(t.Context(), admin, n.ID, 443, 3478); err != nil {
+		t.Fatal(err)
+	}
+	state, err := s.NodeStatus(t.Context(), admin, n.ID)
+	if err != nil || state.Probes != nil {
+		t.Fatal("old endpoint observation retained after port change", state.Probes, err)
+	}
+}
+
 func TestDERPProbeUsesTrustedTLSFixedPathAndRejectsRedirect(t *testing.T) {
 	var redirect atomic.Bool
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -39,16 +144,16 @@ func TestDERPProbeUsesTrustedTLSFixedPathAndRejectsRedirect(t *testing.T) {
 		conn, err := (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
 		return domainTestConn{conn}, err
 	}
-	if err := v.probeDERP(t.Context(), "example.com"); err == nil {
+	if err := v.probeDERP(t.Context(), "example.com", 443); err == nil {
 		t.Fatal("untrusted probe certificate accepted")
 	}
 	v.tlsRoots = x509.NewCertPool()
 	v.tlsRoots.AddCert(server.Certificate())
-	if err := v.probeDERP(t.Context(), "example.com"); err != nil {
+	if err := v.probeDERP(t.Context(), "example.com", 443); err != nil {
 		t.Fatal(err)
 	}
 	redirect.Store(true)
-	if err := v.probeDERP(t.Context(), "example.com"); err == nil {
+	if err := v.probeDERP(t.Context(), "example.com", 443); err == nil {
 		t.Fatal("redirect accepted")
 	}
 }
@@ -100,17 +205,17 @@ func TestSTUNProbeRequiresMatchingTransactionAndValidatedTarget(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
-	if err := v.probeSTUN(ctx, "example.com"); err != nil {
+	if err := v.probeSTUN(ctx, "example.com", 3478); err != nil {
 		t.Fatal(err)
 	}
 	mismatch.Store(true)
-	if err := v.probeSTUN(ctx, "example.com"); err == nil {
+	if err := v.probeSTUN(ctx, "example.com", 3478); err == nil {
 		t.Fatal("another transaction accepted")
 	}
 	v.lookup = func(context.Context, string, string) ([]netip.Addr, error) {
 		return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
 	}
-	if err := v.probeSTUN(ctx, "example.com"); err == nil {
+	if err := v.probeSTUN(ctx, "example.com", 3478); err == nil {
 		t.Fatal("restricted STUN target accepted")
 	}
 }
@@ -119,8 +224,8 @@ func TestNodeProbePersistsSourceTimesWithoutAdvancingPolicyACK(t *testing.T) {
 	s, admin, _, n, _, _ := registeredTestNode(t)
 	now := time.Now().UTC()
 	want := NodeProbes{DERP: Probe{State: "ok", ObservedAt: now}, STUN: Probe{State: "failed", ObservedAt: now.Add(time.Millisecond)}}
-	s.probeDomain = func(_ context.Context, domain string) NodeProbes {
-		if domain != n.Domain {
+	s.probeDomain = func(_ context.Context, domain string, derpPort, stunPort int) NodeProbes {
+		if domain != n.Domain || derpPort != 443 || stunPort != 3478 {
 			t.Fatal("probe changed domain")
 		}
 		return want
@@ -153,7 +258,7 @@ func TestIndependentNodeProbeRequiresResourceOwnerAndCSRF(t *testing.T) {
 		t.Fatal("probe bypassed CSRF", w.Code)
 	}
 	// A pending node has no verified domain to probe.
-	pending, _, err := s.CreateNode(t.Context(), Actor{ID: n.OwnerID, Role: "admin", Enabled: true}, "pending", "pending.example.com")
+	pending, _, err := s.CreateNode(t.Context(), Actor{ID: n.OwnerID, Role: "admin", Enabled: true}, "pending", "pending.example.com", 443, 3478)
 	if err != nil {
 		t.Fatal(err)
 	}

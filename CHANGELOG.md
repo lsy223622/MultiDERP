@@ -7,6 +7,8 @@
   enrollment using private-key and HTTPS domain proof.
 - Adds provider approval and applicant confirmation for shared tailnets,
   manual DERP map export, scoped management pages, events and audit.
+- Records public DERP TCP and STUN UDP ports per relay for map export and
+  independent endpoint probes, with owner/administrator configuration.
 - Enforces absolute identity/control/key deadlines and online connection
   revocation through a patched derper policy interface and persistent cache.
 - Schedules RX/TX payload bytes by owner/shared groups and tailnet weights,
@@ -14,8 +16,13 @@
 - Requires a separate version 2 configuration/data migration; preserve old
   data for rollback and re-enter OAuth credentials and resource grants.
 - Adds controller/member deployment examples and prerelease image tags that
-  leave stable `latest` unchanged. Real OAuth, stock-client and public-network
-  acceptance remain open; no v2 release has been published.
+  leave stable `latest` unchanged; no v2 release has been published.
+- Completes isolated acceptance on two independent real tailnets with dedicated
+  read-only OAuth, stock clients and normally distributed standard DERP maps:
+  public external/manual-TLS relay transfers and online revocation/recovery on
+  controller and member relays. The complete canonical Dockerfile build passed
+  with normal caching. Automatic certificate issuance remains unverified;
+  earlier builds without cached dependencies failed on download EOF errors.
 
 ## [1.0.3] - 2026-09-04
 

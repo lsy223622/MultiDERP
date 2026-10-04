@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strconv"
 	"time"
 
 	"tailscale.com/net/stun"
@@ -23,17 +24,17 @@ type NodeProbes struct {
 	STUN Probe `json:"stun"`
 }
 
-func (v *domainVerifier) probe(ctx context.Context, domain string) NodeProbes {
+func (v *domainVerifier) probe(ctx context.Context, domain string, derpPort, stunPort int) NodeProbes {
 	result := NodeProbes{}
 	derpCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	err := v.probeDERP(derpCtx, domain)
+	err := v.probeDERP(derpCtx, domain, derpPort)
 	cancel()
 	result.DERP = Probe{State: "failed", ObservedAt: time.Now().UTC()}
 	if err == nil {
 		result.DERP.State = "ok"
 	}
 	stunCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	err = v.probeSTUN(stunCtx, domain)
+	err = v.probeSTUN(stunCtx, domain, stunPort)
 	cancel()
 	result.STUN = Probe{State: "failed", ObservedAt: time.Now().UTC()}
 	if err == nil {
@@ -42,11 +43,14 @@ func (v *domainVerifier) probe(ctx context.Context, domain string) NodeProbes {
 	return result
 }
 
-func (v *domainVerifier) probeDERP(ctx context.Context, domain string) error {
-	transport := &http.Transport{DialContext: v.dialDomain, TLSClientConfig: &tls.Config{RootCAs: v.tlsRoots}}
+func (v *domainVerifier) probeDERP(ctx context.Context, domain string, port int) error {
+	expectedPort := strconv.Itoa(port)
+	transport := &http.Transport{DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+		return v.dialDomainPort(ctx, network, address, expectedPort)
+	}, TLSClientConfig: &tls.Config{RootCAs: v.tlsRoots}}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	r, err := http.NewRequestWithContext(ctx, "GET", "https://"+domain+"/derp/probe", nil)
+	r, err := http.NewRequestWithContext(ctx, "GET", "https://"+net.JoinHostPort(domain, expectedPort)+"/derp/probe", nil)
 	if err != nil {
 		return err
 	}
@@ -61,19 +65,20 @@ func (v *domainVerifier) probeDERP(ctx context.Context, domain string) error {
 	return nil
 }
 
-func (v *domainVerifier) probeSTUN(ctx context.Context, domain string) error {
+func (v *domainVerifier) probeSTUN(ctx context.Context, domain string, port int) error {
+	expectedPort := strconv.Itoa(port)
 	ips, err := v.resolve(ctx, domain)
 	if err != nil {
 		return err
 	}
 	for _, ip := range ips {
-		conn, err := v.dial(ctx, "udp", net.JoinHostPort(ip.String(), "3478"))
+		conn, err := v.dial(ctx, "udp", net.JoinHostPort(ip.String(), expectedPort))
 		if err != nil {
 			continue
 		}
-		host, port, splitErr := net.SplitHostPort(conn.RemoteAddr().String())
+		host, remotePort, splitErr := net.SplitHostPort(conn.RemoteAddr().String())
 		remote, parseErr := netip.ParseAddr(host)
-		if splitErr != nil || parseErr != nil || remote.Unmap() != ip.Unmap() || port != "3478" || !v.allowed(remote) {
+		if splitErr != nil || parseErr != nil || remote.Unmap() != ip.Unmap() || remotePort != expectedPort || !v.allowed(remote) {
 			conn.Close()
 			return errors.New("STUN target changed")
 		}
@@ -121,7 +126,7 @@ func (s *Store) ProbeNode(ctx context.Context, actor Actor, id string) (NodeProb
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	result := s.probeDomain(ctx, n.Domain)
+	result := s.probeDomain(ctx, n.Domain, n.DERPPort, n.STUNPort)
 	if ctx.Err() != nil {
 		return NodeProbes{}, ctx.Err()
 	}
@@ -134,13 +139,14 @@ func (s *Store) ProbeNode(ctx context.Context, actor Actor, id string) (NodeProb
 		return NodeProbes{}, err
 	}
 	var domain, owner, state string
-	if err := tx.QueryRowContext(ctx, "SELECT domain,owner_id,state FROM nodes WHERE id=?", id).Scan(&domain, &owner, &state); err != nil {
+	var derpPort, stunPort int
+	if err := tx.QueryRowContext(ctx, "SELECT domain,owner_id,state,derp_port,stun_port FROM nodes WHERE id=?", id).Scan(&domain, &owner, &state, &derpPort, &stunPort); err != nil {
 		return NodeProbes{}, err
 	}
 	if err := RequireOwner(actor, owner); err != nil {
 		return NodeProbes{}, err
 	}
-	if domain != n.Domain || (state != "registered" && state != "ready" && state != "offline") {
+	if domain != n.Domain || derpPort != n.DERPPort || stunPort != n.STUNPort || (state != "registered" && state != "ready" && state != "offline") {
 		return NodeProbes{}, ErrConflict
 	}
 	body, err := json.Marshal(result)

@@ -28,7 +28,7 @@ func nodeTestStore(t *testing.T) (*Store, Actor, Actor) {
 
 func TestEnrollmentExpiryAndDisabledOwnerCannotActivate(t *testing.T) {
 	s, admin, member := nodeTestStore(t)
-	_, e, err := s.CreateNode(t.Context(), member, "Relay", "relay.example.com")
+	_, e, err := s.CreateNode(t.Context(), member, "Relay", "relay.example.com", 443, 3478)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestEnrollmentExpiryAndDisabledOwnerCannotActivate(t *testing.T) {
 
 func TestEnrollmentRemainsBoundToIssuingOwner(t *testing.T) {
 	s, admin, member := nodeTestStore(t)
-	n, e, err := s.CreateNode(t.Context(), admin, "Relay", "relay.example.com")
+	n, e, err := s.CreateNode(t.Context(), admin, "Relay", "relay.example.com", 443, 3478)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,14 +75,14 @@ func TestEnrollmentRemainsBoundToIssuingOwner(t *testing.T) {
 
 func TestNodeOwnershipCanonicalDomainAndEnrollmentRotation(t *testing.T) {
 	s, admin, member := nodeTestStore(t)
-	node, enrollment, err := s.CreateNode(t.Context(), admin, "Relay", "Relay.Example.COM.")
+	node, enrollment, err := s.CreateNode(t.Context(), admin, "Relay", "Relay.Example.COM.", 443, 3478)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if node.Domain != "relay.example.com" || node.OwnerID != admin.ID || node.RegionID < 900 || node.RegionID > 999 || enrollment.Code == "" {
 		t.Fatal("node not bound")
 	}
-	if _, _, err := s.CreateNode(t.Context(), member, "Duplicate", "relay.example.com"); !errors.Is(err, ErrConflict) {
+	if _, _, err := s.CreateNode(t.Context(), member, "Duplicate", "relay.example.com", 443, 3478); !errors.Is(err, ErrConflict) {
 		t.Fatal("duplicate domain accepted")
 	}
 	if _, err := s.Node(t.Context(), member, node.ID); !errors.Is(err, ErrForbidden) {
@@ -111,7 +111,7 @@ func TestNodeOwnershipCanonicalDomainAndEnrollmentRotation(t *testing.T) {
 
 func TestEnrollProvesKeyBindsRequestAndRetriesIdempotently(t *testing.T) {
 	s, admin, _ := nodeTestStore(t)
-	node, e, err := s.CreateNode(t.Context(), admin, "Relay", "relay.example.com")
+	node, e, err := s.CreateNode(t.Context(), admin, "Relay", "relay.example.com", 443, 3478)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func TestEnrollProvesKeyBindsRequestAndRetriesIdempotently(t *testing.T) {
 
 func TestEnrollConcurrentDifferentIdentitiesOnlyOneWins(t *testing.T) {
 	s, admin, _ := nodeTestStore(t)
-	_, e, err := s.CreateNode(t.Context(), admin, "Relay", "relay.example.com")
+	_, e, err := s.CreateNode(t.Context(), admin, "Relay", "relay.example.com", 443, 3478)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestEnrollConcurrentDifferentIdentitiesOnlyOneWins(t *testing.T) {
 
 func TestNodeSessionChallengeRejectsReplayAndKeyChange(t *testing.T) {
 	s, admin, _ := nodeTestStore(t)
-	node, e, err := s.CreateNode(t.Context(), admin, "Relay", "relay.example.com")
+	node, e, err := s.CreateNode(t.Context(), admin, "Relay", "relay.example.com", 443, 3478)
 	if err != nil {
 		t.Fatal(err)
 	}
