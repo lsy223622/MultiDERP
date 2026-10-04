@@ -2,7 +2,13 @@ package derper
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"io"
+	"math/big"
 	"net"
 	"os"
 	"path/filepath"
@@ -16,6 +22,70 @@ import (
 	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
 )
+
+func TestProcessWaitReadyManualTLS(t *testing.T) {
+	binary := os.Getenv("UNIDERP_TEST_DERPER")
+	if binary == "" {
+		t.Skip("requires freshly built patched derper")
+	}
+	dir, err := os.MkdirTemp("", "ud-tls-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	server := testServer("passthrough")
+	server.DERP.CertDir = dir
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: server.Hostname}, DNSNames: []string{server.Hostname}, NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	der, err := x509.CreateCertificate(rand.Reader, certificate, certificate, public, private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyBytes, err := x509.MarshalPKCS8PrivateKey(private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, block := range map[string]*pem.Block{
+		server.Hostname + ".crt": {Type: "CERTIFICATE", Bytes: der},
+		server.Hostname + ".key": {Type: "PRIVATE KEY", Bytes: keyBytes},
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), pem.EncodeToMemory(block), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.DERP.Listen = listener.Addr().String()
+	listener.Close()
+	stun, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.DERP.STUNListen = stun.LocalAddr().String()
+	stun.Close()
+	process := NewProcess(binary, io.Discard)
+	process.Policy = PolicyClient{Path: filepath.Join(dir, "policy.json"), SocketPath: filepath.Join(dir, "policy.sock")}
+	ctx, cancel := context.WithTimeout(t.Context(), 12*time.Second)
+	defer cancel()
+	if err := process.Start(ctx, server, "127.0.0.1:9", filepath.Join(dir, "derper.key")); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		stop, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		if err := process.Stop(stop); err != nil {
+			t.Error(err)
+		}
+	}()
+	if err := process.WaitReady(ctx, server); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestPolicyApplicationOnPatchedDerper(t *testing.T) {
 	binary := os.Getenv("UNIDERP_TEST_DERPER")

@@ -105,7 +105,7 @@ func (p *Process) WaitReady(ctx context.Context, server config.ServerConfig) err
 	transport := http.DefaultTransport
 	if server.DERP.TLSMode == "passthrough" {
 		scheme = "https"
-		transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}} // child certificate is deployment-owned.
+		transport = &http.Transport{TLSClientConfig: &tls.Config{ServerName: server.Hostname, InsecureSkipVerify: true}} // child certificate is deployment-owned.
 	}
 	client := &http.Client{Transport: transport, Timeout: 500 * time.Millisecond}
 	url := scheme + "://" + net.JoinHostPort(host, portFromAddress(server.DERP.Listen)) + "/derp/probe"
