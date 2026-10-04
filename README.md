@@ -6,7 +6,7 @@ UniDERP shares self-hosted Tailscale DERP relays across independent tailnets. On
 
 The controller also runs a local relay, subject to the same registration and authorization rules as members. Members hold their node identity and effective policy, while OAuth credentials and the account database stay on the controller. Tailscale continues to manage peer identity, network policy and WireGuard encryption.
 
-This branch is v2 release preparation. The examples use a locally built image. Isolated acceptance has exercised real read-only OAuth, stock Tailscale applications, and public relays using external TLS and manual-certificate passthrough. A second independent real tailnet, automatic certificate issuance and a clean-network Docker build remain unverified.
+This branch is v2 release preparation. The examples use a locally built image. Isolated acceptance has exercised real read-only OAuth, stock Tailscale applications, and public relays using external TLS and manual-certificate passthrough. A complete standard Dockerfile build passed with normal build caching. A second independent real tailnet and automatic certificate issuance remain unverified; builds without cached dependencies failed on dependency download EOF errors.
 
 ## Build
 
