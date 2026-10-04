@@ -714,11 +714,15 @@
  )
  
  func (s *Server) recordDrop(packetBytes []byte, srcKey, dstKey key.NodePublic, reason dropReason) {
-@@ -1488,6 +1539,16 @@
+@@ -1487,7 +1538,20 @@
+ 
  func (c *sclient) sendPkt(dst *sclient, p pkt) error {
  	s := c.s
++	// Keep reservation and enqueue atomic with sender shutdown and policy revocation.
++	s.mu.Lock()
++	defer s.mu.Unlock()
  	dstKey := dst.key
-+	if !s.uniderpReservePacket(dst, &p) {
++	if !s.uniderpReservePacketLocked(dst, &p) {
 +		s.recordDrop(p.bs, c.key, dstKey, dropReasonUniDERPQueueBudget)
 +		return nil
 +	}
@@ -731,7 +735,7 @@
  
  	// Attempt to queue for sending up to 3 times. On each attempt, if
  	// the queue is full, try to drop from queue head to prioritize
-@@ -1506,6 +1567,7 @@
+@@ -1506,6 +1570,7 @@
  		}
  		select {
  		case sendQueue <- p:
@@ -739,7 +743,7 @@
  			dst.debugLogf("sendPkt attempt %d enqueued", attempt)
  			return nil
  		default:
-@@ -1513,6 +1575,7 @@
+@@ -1513,6 +1578,7 @@
  
  		select {
  		case pkt := <-sendQueue:
@@ -747,7 +751,7 @@
  			s.recordDrop(pkt.bs, c.key, dstKey, dropReasonQueueHead)
  			c.recordQueueTime(pkt.enqueuedAt)
  		default:
-@@ -1579,6 +1642,16 @@
+@@ -1579,6 +1645,16 @@
  // verifyClient checks whether the client is allowed to connect to the derper,
  // depending on how & whether the server's been configured to verify.
  func (s *Server) verifyClient(ctx context.Context, clientKey key.NodePublic, info *derp.ClientInfo, clientIP netip.Addr) error {
@@ -764,7 +768,7 @@
  	if s.isMeshPeer(info) {
  		// Trusted mesh peer. No need to verify further. In fact, verifying
  		// further wouldn't work: it's not part of the tailnet so tailscaled and
-@@ -1821,6 +1894,9 @@
+@@ -1821,6 +1897,9 @@
  //
  // (The "s" prefix is to more explicitly distinguish it from Client in derp_client.go)
  type sclient struct {
@@ -774,7 +778,17 @@
  	// Static after construction.
  	connNum        int64 // process-wide unique counter, incremented each Accept
  	s              *Server
-@@ -1908,6 +1984,8 @@
+@@ -1862,7 +1941,8 @@
+ 	// DERP servers) and contains records that need to be sent to
+ 	// the client for them to update their map of who's connected
+ 	// to this node.
+-	peerStateChange []peerConnState
++	peerStateChange   []peerConnState
++	uniderpSendClosed bool
+ 
+ 	// peerGoneLimiter limits how often the server will inform a
+ 	// client that it's trying to establish a direct connection
+@@ -1908,6 +1988,8 @@
  
  // pkt is a request to write a data frame to an sclient.
  type pkt struct {
@@ -783,7 +797,13 @@
  	// enqueuedAt is when a packet was put onto a queue before it was sent,
  	// and is used for reporting metrics on the duration of packets in the queue.
  	enqueuedAt time.Time
-@@ -1988,8 +2066,10 @@
+@@ -1985,11 +2067,16 @@
+ 	}
+ 
+ 	// Drain the send queue to count dropped packets
++	c.s.mu.Lock()
++	defer c.s.mu.Unlock()
++	c.uniderpSendClosed = true
  	for {
  		select {
  		case pkt := <-c.sendQueue:
@@ -794,7 +814,7 @@
  			c.s.recordDrop(pkt.bs, pkt.src, c.key, dropReasonGoneDisconnected)
  		default:
  			return
-@@ -2026,11 +2106,11 @@
+@@ -2026,11 +2113,11 @@
  			werr = c.sendMeshUpdates()
  			continue
  		case msg := <-c.sendQueue:
@@ -808,7 +828,7 @@
  			c.recordQueueTime(msg.enqueuedAt)
  			continue
  		case msg := <-c.sendPongCh:
-@@ -2060,10 +2140,10 @@
+@@ -2060,10 +2147,10 @@
  		case <-c.meshUpdate:
  			werr = c.sendMeshUpdates()
  		case msg := <-c.sendQueue:
@@ -821,7 +841,7 @@
  			c.recordQueueTime(msg.enqueuedAt)
  		case msg := <-c.sendPongCh:
  			werr = c.sendPong(msg)
-@@ -2207,6 +2287,14 @@
+@@ -2207,6 +2294,14 @@
  // returns, do not retain slices.
  // It does not flush its bufio.Writer.
  func (c *sclient) sendPacket(srcKey key.NodePublic, contents []byte) (err error) {
@@ -836,7 +856,7 @@
  	defer func() {
  		// Stats update.
  		if err != nil {
-@@ -2214,6 +2302,7 @@
+@@ -2214,6 +2309,7 @@
  		} else {
  			c.s.packetsSent.Add(1)
  			c.s.bytesSent.Add(int64(len(contents)))
@@ -2159,7 +2179,7 @@
 +}
 --- /dev/null
 +++ b/derp/derpserver/uniderp_queue_test.go
-@@ -0,0 +1,147 @@
+@@ -0,0 +1,163 @@
 +package derpserver
 +
 +import (
@@ -2259,6 +2279,22 @@
 +		if got := s.uniderpPolicy.traffic["a"].queued.Load(); got != 0 {
 +			t.Fatalf("concurrent close leaked %d bytes on iteration %d", got, i)
 +		}
++	}
++}
++
++func TestUniDERPSenderAfterCloseDoesNotReserveBudget(t *testing.T) {
++	s := New(key.NewNode(), logger.Discard)
++	defer s.Close()
++	source := &sclient{s: s, key: key.NewNode().Public()}
++	destKey := key.NewNode().Public()
++	installTestPolicy(t, s, testUniDERPPolicy(map[key.NodePublic]string{source.key: "a", destKey: "a"}, time.Now()))
++	conn, peer := net.Pipe()
++	defer peer.Close()
++	c := &sclient{s: s, nc: conn, key: destKey, ctx: t.Context(), uniderpTailnet: "a", uniderpGrant: "a", sendQueue: make(chan pkt, 32), discoSendQueue: make(chan pkt, 32)}
++	c.onSendLoopDone()
++	source.sendPkt(c, pkt{src: source.key, bs: make([]byte, 1024)})
++	if got := s.uniderpPolicy.traffic["a"].queued.Load(); got != 0 {
++		t.Fatal("closed sender retained payload budget", got)
 +	}
 +}
 +
@@ -2425,7 +2461,7 @@
 +}
 --- /dev/null
 +++ b/derp/derpserver/uniderp_traffic.go
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,87 @@
 +package derpserver
 +
 +import "sync/atomic"
@@ -2477,9 +2513,10 @@
 +	return result
 +}
 +
-+func (s *Server) uniderpReservePacket(dst *sclient, p *pkt) bool {
-+	s.mu.Lock()
-+	defer s.mu.Unlock()
++func (s *Server) uniderpReservePacketLocked(dst *sclient, p *pkt) bool {
++	if dst.uniderpSendClosed {
++		return false
++	}
 +	if s.uniderpPolicy == nil {
 +		return true
 +	}
