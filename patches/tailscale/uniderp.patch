@@ -1930,7 +1930,7 @@
 +}
 --- /dev/null
 +++ b/derp/derpserver/uniderp_qos_test.go
-@@ -0,0 +1,246 @@
+@@ -0,0 +1,275 @@
 +package derpserver
 +
 +import (
@@ -1948,26 +1948,55 @@
 +
 +func TestUniDERPQoSBytesGroupsAndConnections(t *testing.T) {
 +	s := newUniDERPScheduler(1000000, 8, 2, 0, []UniDERPTailnetQoS{{"owner", "owner", 1, 0}, {"a", "shared", 2, 0}, {"b", "shared", 1, 0}})
-+	defer s.close()
-+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
-+	defer cancel()
-+	var counts [3]atomic.Int64
-+	var wg sync.WaitGroup
++	s.close()
++	var counts [3]int64
++	type connection struct {
++		queue   *uniderpTailnetQueue
++		request *uniderpRequest
++		index   int
++	}
++	var connections []connection
 +	for _, flow := range []struct {
 +		id                       string
 +		index, size, connections int
 +	}{{"owner", 0, 1200, 1}, {"a", 1, 300, 1}, {"b", 2, 1200, 16}} {
-+		for range flow.connections {
-+			wg.Go(func() {
-+				for s.wait(ctx, flow.id, flow.size) == nil {
-+					counts[flow.index].Add(int64(flow.size))
++		for _, group := range s.groups {
++			for _, queue := range group.tailnets {
++				if queue.id != flow.id {
++					continue
 +				}
-+			})
++				for range flow.connections {
++					request := &uniderpRequest{ctx: t.Context(), size: flow.size, done: make(chan error, 1)}
++					queue.requests = append(queue.requests, request)
++					queue.queuedBytes += request.size
++					connections = append(connections, connection{queue, request, flow.index})
++				}
++			}
 +		}
 +	}
-+	wg.Wait()
-+	o, a, b := counts[0].Load(), counts[1].Load(), counts[2].Load()
++	// Keep every connection backlogged so OS scheduling cannot mimic idle demand.
++	start := time.Date(2026, 10, 3, 0, 0, 0, 0, time.UTC)
++	for elapsed := time.Duration(0); elapsed <= 2*time.Second; elapsed += 200 * time.Microsecond {
++		for s.step(start.Add(elapsed)) {
++			for _, c := range connections {
++				select {
++				case err := <-c.request.done:
++					if err != nil {
++						t.Fatal(err)
++					}
++					counts[c.index] += int64(c.request.size)
++					c.queue.requests = append(c.queue.requests, c.request)
++					c.queue.queuedBytes += c.request.size
++				default:
++				}
++			}
++		}
++	}
++	o, a, b := counts[0], counts[1], counts[2]
 +	t.Logf("served bytes owner=%d a=%d b=%d", o, a, b)
++	if o == 0 || a == 0 || b == 0 {
++		t.Fatal("backlogged tailnet received no service")
++	}
 +	if float64(o)/float64(a+b) < 3.5 || float64(o)/float64(a+b) > 4.5 {
 +		t.Fatal("group byte ratio incorrect")
 +	}
