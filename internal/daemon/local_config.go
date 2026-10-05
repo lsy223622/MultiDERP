@@ -49,6 +49,7 @@ func (d *Daemon) Status(ctx context.Context) (control.LocalStatus, error) {
 		if status.Joined {
 			if p, err := cluster.LoadCache(policy.Path, status.ClusterID, status.NodeID, time.Now()); err == nil {
 				status.PolicyBudgetBPS = p.QoS.BudgetBPS
+				status.QoS = &p.QoS
 			}
 		}
 	}
@@ -61,6 +62,9 @@ func (d *Daemon) Status(ctx context.Context) (control.LocalStatus, error) {
 			status.EffectiveBudgetBPS = applied.EffectiveBudgetBPS
 			status.Control.Usable = applied.Usable
 			status.Control.AppliedRevision = applied.Revision
+			status.Control.Traffic = applied.Traffic
+			status.Control.TrafficObservedAt = applied.TrafficObservedAt
+			status.Control.ActiveConnections = applied.ActiveConnections
 		}
 	}
 	return status, nil
@@ -196,6 +200,16 @@ func (d *Daemon) applyLocalConfig(ctx context.Context, cfg config.Config) error 
 	d.mu.Unlock()
 	if err := d.syncDerperConfig(ctx, cfg); err != nil {
 		return err
+	}
+	if d.nodeClient != nil && !active.SetupRequired && (active.Node.DERPPort != cfg.Node.DERPPort || active.Node.STUNPort != cfg.Node.STUNPort || active.Node.ControllerURL != cfg.Node.ControllerURL) {
+		if _, id := d.nodeClient.PolicyBinding(); id != "" {
+			portsCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			err := d.nodeClient.SetPorts(portsCtx, cfg.Node.DERPPort, cfg.Node.STUNPort)
+			cancel()
+			if err != nil {
+				return err
+			}
+		}
 	}
 	d.logFilter.SetLevel(cfg.Logging.Level)
 	d.mu.Lock()

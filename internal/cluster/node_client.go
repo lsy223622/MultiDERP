@@ -64,16 +64,18 @@ type nodeRegistration struct {
 }
 
 type EnrollmentClient struct {
-	mu                 sync.Mutex
-	privateKey         ed25519.PrivateKey
-	instanceID         string
-	statePath          string
-	state              nodeRegistration
-	responder          *DomainResponder
-	httpClient         *http.Client
-	controlStatus      ControlStatus
-	derpPort, stunPort int
+	mu            sync.Mutex
+	privateKey    ed25519.PrivateKey
+	instanceID    string
+	statePath     string
+	state         nodeRegistration
+	responder     *DomainResponder
+	httpClient    *http.Client
+	controlStatus ControlStatus
 }
+
+var ErrEnrollmentCodeRejected = errors.New("enrollment code rejected")
+var errEnrollmentProofRejected = errors.New("enrollment proof rejected")
 
 func (c *EnrollmentClient) PolicyBinding() (clusterID, nodeID string) {
 	c.mu.Lock()
@@ -174,7 +176,6 @@ func (c *EnrollmentClient) SetPorts(ctx context.Context, derpPort, stunPort int)
 	if derpPort < 1 || derpPort > 65535 || stunPort < 1 || stunPort > 65535 {
 		return errors.New("invalid public ports")
 	}
-	c.derpPort, c.stunPort = derpPort, stunPort
 	var result struct {
 		OK bool `json:"ok"`
 	}
@@ -243,6 +244,14 @@ func (c *EnrollmentClient) post(ctx context.Context, path string, body, dst any,
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
+		if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+			if path == "/cluster/v1/enroll/challenge" {
+				return ErrEnrollmentCodeRejected
+			}
+			if path == "/cluster/v1/enroll" {
+				return errEnrollmentProofRejected
+			}
+		}
 		if token != "" && response.StatusCode == http.StatusUnauthorized {
 			return errNodeSessionRejected
 		}
@@ -309,32 +318,46 @@ func (c *EnrollmentClient) Enroll(ctx context.Context, code string) (NodeSession
 	if c.state.Session.NodeID != "" {
 		return NodeSession{}, errors.New("node is already registered")
 	}
-	if c.state.Pending == nil || c.state.Pending.Code != code {
-		var ch NodeChallenge
-		if err := c.post(ctx, "/cluster/v1/enroll/challenge", struct {
-			Code       string `json:"code"`
-			PublicKey  []byte `json:"public_key"`
-			InstanceID string `json:"instance_id"`
-		}{code, c.privateKey.Public().(ed25519.PublicKey), c.instanceID}, &ch, ""); err != nil {
+	for attempt := 0; attempt < 2; attempt++ {
+		if c.state.Pending == nil || c.state.Pending.Code != code {
+			var ch NodeChallenge
+			if err := c.post(ctx, "/cluster/v1/enroll/challenge", struct {
+				Code       string `json:"code"`
+				PublicKey  []byte `json:"public_key"`
+				InstanceID string `json:"instance_id"`
+			}{code, c.privateKey.Public().(ed25519.PublicKey), c.instanceID}, &ch, ""); err != nil {
+				return NodeSession{}, err
+			}
+			if !c.validChallenge(ch, "enroll") {
+				return NodeSession{}, errors.New("invalid enrollment challenge")
+			}
+			previous := c.state.Pending
+			c.state.Pending = &EnrollmentRequest{Code: code, Challenge: ch, Signature: ed25519.Sign(c.privateKey, ch.SigningBytes())}
+			if err := c.saveRegistration(); err != nil {
+				c.state.Pending = previous
+				return NodeSession{}, err
+			}
+		}
+		c.responder.SetChallenge(c.state.Pending.Challenge)
+		var session NodeSession
+		if err := c.post(ctx, "/cluster/v1/enroll", c.state.Pending, &session, ""); err != nil {
+			if attempt == 0 && errors.Is(err, errEnrollmentProofRejected) && !time.Now().Before(c.state.Pending.Challenge.ExpiresAt) {
+				previous := c.state.Pending
+				c.state.Pending = nil
+				if err := c.saveRegistration(); err != nil {
+					c.state.Pending = previous
+					return NodeSession{}, err
+				}
+				continue
+			}
 			return NodeSession{}, err
 		}
-		if !c.validChallenge(ch, "enroll") {
-			return NodeSession{}, errors.New("invalid enrollment challenge")
-		}
-		c.state.Pending = &EnrollmentRequest{Code: code, Challenge: ch, Signature: ed25519.Sign(c.privateKey, ch.SigningBytes())}
-		if err := c.saveRegistration(); err != nil {
+		if err := c.acceptSession(session, c.state.Pending.Challenge); err != nil {
 			return NodeSession{}, err
 		}
+		return session, nil
 	}
-	c.responder.SetChallenge(c.state.Pending.Challenge)
-	var session NodeSession
-	if err := c.post(ctx, "/cluster/v1/enroll", c.state.Pending, &session, ""); err != nil {
-		return NodeSession{}, err
-	}
-	if err := c.acceptSession(session, c.state.Pending.Challenge); err != nil {
-		return NodeSession{}, err
-	}
-	return session, nil
+	return NodeSession{}, errEnrollmentProofRejected
 }
 
 func (c *EnrollmentClient) RenewSession(ctx context.Context) (NodeSession, error) {

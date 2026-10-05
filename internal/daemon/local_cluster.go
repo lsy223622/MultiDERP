@@ -111,6 +111,10 @@ func (d *Daemon) RegisterLocal(ctx context.Context, actor control.Actor, name st
 				return control.Node{}, err
 			}
 			return d.controllerStore.Node(ctx, actor, session.NodeID)
+		} else if errors.Is(err, cluster.ErrEnrollmentCodeRejected) {
+			if _, err := d.nodeClient.ClearRegistration(); err != nil {
+				return control.Node{}, err
+			}
 		} else {
 			return control.Node{}, err
 		}

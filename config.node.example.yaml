@@ -9,6 +9,8 @@ node:
 
 server:
   hostname: relay.example.com
+  management:
+    listen: ":3378"
   derp:
     listen: ":3377"
     stun_listen: ":3478"

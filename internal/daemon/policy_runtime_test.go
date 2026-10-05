@@ -315,7 +315,7 @@ func TestDaemonControlAppliesAndExpiresCachedPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	local, _ := d.Status(t.Context())
-	if local.EffectiveBudgetBPS != 80000000 {
+	if local.EffectiveBudgetBPS != 80000000 || local.QoS == nil || local.QoS.BudgetBPS != p.QoS.BudgetBPS || len(local.Control.Traffic) != 1 || local.Control.TrafficObservedAt.IsZero() {
 		t.Fatal(local)
 	}
 	settings := local.Saved

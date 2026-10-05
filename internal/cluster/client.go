@@ -108,12 +108,6 @@ func (c *EnrollmentClient) RunControl(ctx context.Context, path string, apply fu
 			}
 			renewRequired = false
 		}
-		c.mu.Lock()
-		derpPort, stunPort := c.derpPort, c.stunPort
-		c.mu.Unlock()
-		if derpPort != 0 {
-			_ = c.SetPorts(ctx, derpPort, stunPort)
-		}
 		err := c.controlConnection(ctx, path, session, apply, status)
 		if ctx.Err() != nil {
 			return ctx.Err()

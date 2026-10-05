@@ -33,6 +33,7 @@ type LocalStatus struct {
 	Control            cluster.ControlStatus `json:"control"`
 	PolicyBudgetBPS    uint64                `json:"policy_budget_bps"`
 	EffectiveBudgetBPS uint64                `json:"effective_budget_bps"`
+	QoS                *cluster.QoSPolicy    `json:"qos,omitempty"`
 }
 
 type LocalBackend interface {

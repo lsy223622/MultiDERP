@@ -50,7 +50,7 @@ async function nodes(){
 	}
   table(card('服务器'),['名称','域名 / 公开端口','状态','最近心跳','操作'],items.map(n=>[
     n.display_name,el('code',n.domain+' · DERP TCP '+n.derp_port+' / STUN UDP '+n.stun_port),actions(status(n.state),...(!n.enabled?[status('paused')]:[])),time(n.last_heartbeat),
-    actions(button('状态',()=>nodeState(n)),button('公开端口',()=>nodePorts(n)),...(n.state!=='pending'?[button('规则',()=>qos(n,true))]:[button('注册码',()=>enrollment(n))]),button(n.enabled?'暂停':'启用',async()=>{await api('/nodes/'+n.id+'/enabled','POST',{enabled:!n.enabled});await render();}),...(n.state!=='pending'?[button('域名',()=>changeDomain(n))]:[]),button('删除',()=>deleteNode(n),'danger'))
+    actions(button('状态',()=>nodeState(n)),button('公开端口',()=>nodePorts(n)),...(n.state!=='pending'?[button('规则',()=>qos(n,true))]:[]),button(n.state==='pending'?'注册码':'重新签发注册码',()=>enrollment(n)),button(n.enabled?'暂停':'启用',async()=>{await api('/nodes/'+n.id+'/enabled','POST',{enabled:!n.enabled});await render();}),...(n.state!=='pending'?[button('域名',()=>changeDomain(n))]:[]),button('删除',()=>deleteNode(n),'danger'))
   ]));
   const f=form(card('添加服务器'),'创建并签发注册码',async data=>{const result=await api('/nodes','POST',{display_name:data.get('name'),domain:data.get('domain'),derp_port:Number(data.get('derp_port')),stun_port:Number(data.get('stun_port'))});return()=>showEnrollment(result.enrollment);});field(f,'name','显示名称');field(f,'domain','公共 DERP 域名');publicPortFields(f,{derp_port:443,stun_port:3478});done(f);
 }
@@ -83,7 +83,7 @@ async function deleteNode(n){
   await api('/nodes/'+n.id,'DELETE');await render();
 }
 function showEnrollment(e){const c=card('一次性注册码');c.append(el('p','有效至 '+time(e.expires_at)),el('pre',e.code));c.append(button('关闭并清除',()=>c.remove()));c.scrollIntoView({behavior:'smooth'});}
-async function enrollment(n){const e=await api('/nodes/'+n.id+'/enrollment','POST',{});showEnrollment(e);}
+async function enrollment(n){if(n.state!=='pending'&&!confirm('重新签发会释放当前节点实例、关闭控制连接并撤销已有共享授权。重新加入后需要重新授权。确认继续？'))return;const e=await api('/nodes/'+n.id+'/enrollment','POST',{});await render();showEnrollment(e);}
 function probeTable(parent,probes,node) {
   table(parent,['主控独立探测','结果','检查时间'],['derp','stun'].map(name=>[name==='derp'?'HTTPS DERP '+node.domain+':'+node.derp_port:'UDP STUN '+node.domain+':'+node.stun_port,probes?.[name]?.state==='ok'?'成功':probes?.[name]?.state==='failed'?'失败':'尚未检查',time(probes?.[name]?.observed_at)]));
   parent.append(el('p','探测仅表示主控当次能访问该端点。客户端是否能从所在网络连接，需要实际验证。','muted'));
@@ -151,6 +151,11 @@ function localState(s) {
  const c=card('本机运行状态');
  table(c,['项目','状态'],[['角色',s.role==='setup'?'等待初始设置':s.role==='controller'?'主控':'成员节点'],['集群连接',s.joined?(s.control.connected?'已连接主控':'已注册，主控连接中断'):'尚未加入'],['中继许可',s.control.usable?'当前有有效许可':'当前没有有效许可'],['已接收 / 已应用策略',s.control.received_revision+' / '+s.control.applied_revision],['主控下发总预算',s.policy_budget_bps?s.policy_budget_bps/1000000+' Mbps':'尚无策略'],['本地总限速',s.active.max_budget_bps?s.active.max_budget_bps/1000000+' Mbps':'不另设上限'],['当前有效调度预算',s.effective_budget_bps?s.effective_budget_bps/1000000+' Mbps':'尚未应用'],['配置应用',s.pending_apply?'已保存，待应用':'已应用']]);
  if(s.apply_error)c.append(el('p','最近应用失败：'+s.apply_error,'error'));
+ const fields=[['role','角色'],['hostname','公共 DERP 域名'],['derp_listen','DERP TCP 监听'],['stun_listen','STUN UDP 监听'],['tls_mode','TLS 模式'],['cert_mode','证书方式'],['derp_port','公开 DERP TCP 端口'],['stun_port','公开 STUN UDP 端口'],['max_budget_bps','本地总限速（bps）'],['logging_level','日志级别']];
+ const differences=fields.filter(([key])=>s.saved[key]!==s.active[key]);
+ if(differences.length)table(c,['待应用项目','运行中配置','已保存配置'],differences.map(([key,label])=>[label,String(s.active[key]),String(s.saved[key])]));
+ table(c,['最后联系主控','流量采样时间','活动 DERP 连接'],[[time(s.control.last_contact),time(s.control.traffic_observed_at),s.control.active_connections]]);
+ if(s.control.traffic?.length)table(c,['Tailnet','累计 RX / TX 载荷（字节）','排队载荷（字节）'],s.control.traffic.map(t=>[t.tailnet_id,t.rx_payload_bytes+' / '+t.tx_payload_bytes,t.queued_payload_bytes]));
  return c;
 }
 
@@ -192,6 +197,7 @@ async function localSettings(){const s=await api('/local/status');page('本机�
 async function member(){
  const s=await api('/local/status');page('集群连接','本机管理员管理加入和退出。共享授权、分组权重及 Tailnet 优先级由资源所有者在主控面板配置。');
  const c=localState(s);
+ if(s.qos){const rules=card('主控下发规则');ruleSummary(rules,s.qos);table(rules,['Tailnet','分组','权重','硬上限'],s.qos.tailnets.map(t=>[t.tailnet_id,t.group,t.weight,t.max_bps?t.max_bps/1000000+' Mbps':'未另设上限']));}
  if(s.joined){table(c,['主控地址','集群 ID','节点 ID'],[[s.controller_url,s.cluster_id,s.node_id]]);c.append(button('退出集群',async()=>{if(!confirm('退出会立即关闭本机 DERP 连接并清除许可。重新加入需要主控签发新注册码及重新授权。确认继续？'))return;const result=await api('/local/leave','POST',{});await render();notice(result.released?'本机已退出，主控已释放节点。':'本机已退出；主控暂未确认释放，请在主控重新签发注册码。');},'danger'));}
  else {const f=form(card('加入已有集群'),'验证并加入',async(data,f)=>{const body={controller_url:data.get('controller_url'),enrollment_code:data.get('enrollment_code')};f.elements.enrollment_code.value='';await api('/local/join','POST',body);});field(f,'controller_url','主控 HTTPS 地址','url',true,s.saved.controller_url||s.controller_url);const code=field(f,'enrollment_code','一次性注册码','password');code.autocomplete='off';done(f);}
 }

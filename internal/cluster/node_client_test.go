@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,6 +29,72 @@ func TestNodeIdentityPersistsAndRejectsCorruption(t *testing.T) {
 	}
 	if _, err := LoadNodeIdentity(p); err == nil {
 		t.Fatal("replaced corrupt identity")
+	}
+}
+
+func TestExpiredPendingProofObtainsFreshChallenge(t *testing.T) {
+	var challenge NodeChallenge
+	var calls int
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/cluster/v1/enroll/challenge":
+			var req struct {
+				PublicKey  []byte `json:"public_key"`
+				InstanceID string `json:"instance_id"`
+			}
+			json.NewDecoder(r.Body).Decode(&req)
+			calls++
+			challenge = NodeChallenge{Purpose: "enroll", ClusterID: strings.Repeat("a", 64), NodeID: strings.Repeat("b", 64), Domain: "relay.example.com", PublicKey: req.PublicKey, InstanceID: req.InstanceID, Nonce: strings.Repeat("c", 64), ExpiresAt: time.Now().Add(time.Minute)}
+			json.NewEncoder(w).Encode(challenge)
+		case "/cluster/v1/enroll":
+			var req EnrollmentRequest
+			json.NewDecoder(r.Body).Decode(&req)
+			if time.Now().After(req.Challenge.ExpiresAt) {
+				w.WriteHeader(401)
+				return
+			}
+			if calls == 1 {
+				w.WriteHeader(503)
+				return
+			}
+			json.NewEncoder(w).Encode(NodeSession{ClusterID: challenge.ClusterID, NodeID: challenge.NodeID, InstanceID: challenge.InstanceID, Token: strings.Repeat("d", 64), ExpiresAt: time.Now().Add(time.Hour), LeaseUntil: time.Now().Add(time.Minute)})
+		}
+	}))
+	defer server.Close()
+	c, err := NewEnrollmentClient(server.URL, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.httpClient.Transport = server.Client().Transport
+	code := strings.Repeat("e", 64)
+	if _, err := c.Enroll(t.Context(), code); err == nil {
+		t.Fatal("failed response")
+	}
+	c.state.Pending.Challenge.ExpiresAt = time.Now().Add(-time.Minute)
+	c.state.Pending.Signature = ed25519.Sign(c.privateKey, c.state.Pending.Challenge.SigningBytes())
+	if err := c.saveRegistration(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Enroll(t.Context(), code); err != nil || calls != 2 {
+		t.Fatal("expired proof pinned", err, calls)
+	}
+}
+
+func TestEnrollmentCodeRejectionIsDistinguishedFromUnavailableController(t *testing.T) {
+	response := http.StatusUnauthorized
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(response) }))
+	defer server.Close()
+	c, err := NewEnrollmentClient(server.URL, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.httpClient.Transport = server.Client().Transport
+	if _, err := c.Enroll(t.Context(), strings.Repeat("e", 64)); !errors.Is(err, ErrEnrollmentCodeRejected) {
+		t.Fatal(err)
+	}
+	response = http.StatusServiceUnavailable
+	if _, err := c.Enroll(t.Context(), strings.Repeat("e", 64)); err == nil || errors.Is(err, ErrEnrollmentCodeRejected) {
+		t.Fatal(err)
 	}
 }
 
