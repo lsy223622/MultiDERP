@@ -8,6 +8,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +24,7 @@ type httpHandler struct {
 	attempts     map[string]loginAttempt
 	clusterMux   *http.ServeMux
 	nodeAttempts map[string]loginAttempt
+	local        LocalBackend
 }
 type loginAttempt struct {
 	count int
@@ -30,6 +32,10 @@ type loginAttempt struct {
 }
 
 func NewHTTPHandler(s *Store) http.Handler {
+	return newHTTPHandler(s)
+}
+
+func newHTTPHandler(s *Store) *httpHandler {
 	h := &httpHandler{store: s, mux: http.NewServeMux(), clusterMux: http.NewServeMux(), attempts: make(map[string]loginAttempt), nodeAttempts: make(map[string]loginAttempt)}
 	h.mountTailnets()
 	h.mountNodes()
@@ -64,9 +70,10 @@ func NewHTTPHandler(s *Store) http.Handler {
 			return
 		}
 		writeJSON(w, struct {
-			Actor Actor  `json:"actor"`
-			CSRF  string `json:"csrf_token"`
-		}{actor, hex.EncodeToString(tokenHash("uniderp-csrf:" + cookie.Value))})
+			Actor      Actor  `json:"actor"`
+			CSRF       string `json:"csrf_token"`
+			ServerRole string `json:"server_role"`
+		}{actor, hex.EncodeToString(tokenHash("uniderp-csrf:" + cookie.Value)), h.serverRole()})
 	})
 	h.mux.HandleFunc("POST /api/v1/users", func(w http.ResponseWriter, r *http.Request) {
 		actor := h.actor(r)
@@ -170,6 +177,10 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if serveManagement(w, r) {
 		return
 	}
+	if h.serverRole() != "controller" && strings.HasPrefix(r.URL.Path, "/cluster/v1/") {
+		http.NotFound(w, r)
+		return
+	}
 	if r.URL.Path == "/cluster/v1/control" || r.URL.Path == "/cluster/v1/heartbeat" || r.URL.Path == "/cluster/v1/ack" {
 		h.clusterMux.ServeHTTP(w, r)
 		return
@@ -188,8 +199,13 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			httpError(w, ErrUnauthorized)
 			return
 		}
-		if _, err := h.store.Authenticate(r.Context(), cookie.Value); err != nil {
+		actor, err := h.store.Authenticate(r.Context(), cookie.Value)
+		if err != nil {
 			httpError(w, err)
+			return
+		}
+		if h.serverRole() != "controller" && r.URL.Path != "/api/v1/session" && r.URL.Path != "/api/v1/logout" && !strings.HasPrefix(r.URL.Path, "/api/v1/local/") && r.URL.Path != "/api/v1/users/"+actor.ID+"/password" {
+			http.NotFound(w, r)
 			return
 		}
 		if r.Method != "GET" && r.Method != "HEAD" {
