@@ -133,6 +133,13 @@ func (s *Store) openCredential(id string, data []byte) (OAuthCredential, error) 
 }
 
 func (s *Store) fetchIdentity(ctx context.Context, apiID string, c OAuthCredential) ([]identityKey, error) {
+	if c.ClientID == "" {
+		parts := strings.SplitN(c.ClientSecret, "-", 4)
+		if len(parts) != 4 || parts[0] != "tskey" || parts[1] != "client" || parts[2] == "" || parts[3] == "" {
+			return nil, ErrInvalid
+		}
+		c.ClientID = parts[2]
+	}
 	if s.apiClient == nil || len(c.ClientID) == 0 || len(c.ClientID) > 256 || len(c.ClientSecret) == 0 || len(c.ClientSecret) > 4096 {
 		return nil, ErrInvalid
 	}

@@ -16,10 +16,11 @@ import (
 )
 
 type identityAPIStub struct {
-	mu     sync.Mutex
-	status int
-	body   string
-	scopes []string
+	mu        sync.Mutex
+	status    int
+	body      string
+	scopes    []string
+	clientIDs []string
 }
 
 func TestCredentialHTTPAccessAndDeletion(t *testing.T) {
@@ -258,6 +259,7 @@ func credentialTestStore(t *testing.T) (*Store, *identityAPIStub, Actor) {
 			}
 			stub.mu.Lock()
 			stub.scopes = append(stub.scopes, r.Form.Get("scope"))
+			stub.clientIDs = append(stub.clientIDs, r.Form.Get("client_id"))
 			stub.mu.Unlock()
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"access_token":"test-access-secret","token_type":"Bearer","expires_in":3600,"scope":"devices:core:read"}`)
@@ -279,6 +281,51 @@ func credentialTestStore(t *testing.T) (*Store, *identityAPIStub, Actor) {
 	s.apiClient = server.Client()
 	s.now = func() time.Time { return time.Date(2026, 10, 3, 0, 0, 0, 0, time.UTC) }
 	return s, stub, admin
+}
+
+func TestCredentialSecretOnlyBindingReplacementAndRefresh(t *testing.T) {
+	s, stub, _ := credentialTestStore(t)
+	h := NewHTTPHandler(s)
+	cookie, csrf := loginTest(t, h, "admin")
+	w := accountRequest(h, cookie, csrf, "POST", "/api/v1/tailnets", map[string]any{
+		"display_name": "Secret-only Tailnet", "api_id": "Tsecret123",
+		"credential": map[string]string{"client_secret": "tskey-client-firstCNTRL-secret"},
+	})
+	if w.Code != 200 {
+		t.Fatalf("bind with secret only: %d %s", w.Code, w.Body.String())
+	}
+	var tn Tailnet
+	if err := json.Unmarshal(w.Body.Bytes(), &tn); err != nil {
+		t.Fatal(err)
+	}
+	w = accountRequest(h, cookie, csrf, "POST", "/api/v1/tailnets/"+tn.ID+"/credential", map[string]string{
+		"client_secret": "tskey-client-replacementCNTRL-newsecret",
+	})
+	if w.Code != 200 {
+		t.Fatalf("replace with secret only: %d %s", w.Code, w.Body.String())
+	}
+	if err := s.RefreshIdentity(t.Context(), tn.ID); err != nil {
+		t.Fatalf("refresh secret-only credential: %v", err)
+	}
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if strings.Join(stub.clientIDs, ",") != "firstCNTRL,replacementCNTRL,replacementCNTRL" {
+		t.Fatalf("OAuth exchanges used incorrect client IDs: %v", stub.clientIDs)
+	}
+}
+
+func TestCredentialSecretOnlyRejectsMalformedSecrets(t *testing.T) {
+	s, stub, admin := credentialTestStore(t)
+	for _, secret := range []string{"", "secret", "tskey-auth-client-secret", "tskey-client--secret", "tskey-client-client-", "tskey-client-client"} {
+		if _, err := s.AddTailnet(t.Context(), admin, "Invalid", "Tinvalid", OAuthCredential{ClientSecret: secret}); err != ErrInvalid {
+			t.Fatalf("malformed secret returned %v", err)
+		}
+	}
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if len(stub.scopes) != 0 {
+		t.Fatal("malformed secret triggered an OAuth exchange")
+	}
 }
 
 func TestCredentialValidatedEncryptedAndTailnetUnique(t *testing.T) {

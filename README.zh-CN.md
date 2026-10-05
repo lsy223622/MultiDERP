@@ -138,7 +138,7 @@ docker exec uniderp-node uniderp node enroll \
 
 ## 绑定尾网与共享授权
 
-1. 在“我的 tailnet”输入 Tailscale General 设置中的规范 `T...` Tailnet ID，以及只配置 `devices:core:read` 的 OAuth client ID/secret。UniDERP 请求该只读 scope 并同步设备公钥。成功读取不能证明原始 OAuth client 没有其他权限，所有者需检查原始配置。参见 [Tailscale OAuth clients](https://tailscale.com/docs/features/oauth-clients) 和 [trust credential scopes](https://tailscale.com/docs/reference/trust-credentials)。
+1. 在“我的 Tailnet”输入 Tailscale General 设置中的规范 `T...` Tailnet ID，以及只配置 `devices:core:read` 的 OAuth client secret。UniDERP 从 secret 自动提取 client ID，请求该只读 scope 并同步设备公钥。成功读取不能证明原始 OAuth client 没有其他权限，所有者需检查原始配置。参见 [Tailscale OAuth clients](https://tailscale.com/docs/features/oauth-clients) 和 [trust credential scopes](https://tailscale.com/docs/reference/trust-credentials)。
 2. 在服务器目录为自己的 tailnet 申请使用中继。提供者批准后，申请人还需确认生效；未确认不能放行设备。提供者自己的尾网直接生效。
 3. 导出该尾网 DERP map，将 `Regions` 合并到现有 Tailscale policy 的 `derpMap.Regions`。保留原有 ACL/grants、其他区域和默认 DERP 设置，并检查 900–999 的区域 ID 是否冲突。UniDERP 不自动修改 policy 或分发客户端配置。参见 [自定义 DERP 服务器](https://tailscale.com/docs/reference/derp-servers)。
 
