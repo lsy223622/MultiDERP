@@ -4,8 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
-	"net/http"
+
 	"os"
 	"path/filepath"
 	"time"
@@ -24,25 +23,30 @@ func nodeControllerURL(cfg config.Config) string {
 }
 
 func (d *Daemon) prepareNodePolicy(cfg config.NodeConfig) error {
-	d.policyClient = derper.PolicyClient{Path: filepath.Join(cfg.StateDir, "policy.json"), SocketPath: filepath.Join(cfg.StateDir, "policy.sock"), MaxBudgetBPS: cfg.MaxBudgetBPS}
+	policy := derper.PolicyClient{Path: filepath.Join(cfg.StateDir, "policy.json"), SocketPath: filepath.Join(cfg.StateDir, "policy.sock"), MaxBudgetBPS: cfg.MaxBudgetBPS}
 	clusterID, nodeID := d.nodeClient.PolicyBinding()
-	if _, err := cluster.LoadCache(d.policyClient.Path, clusterID, nodeID, time.Now()); err != nil {
-		if err := os.Remove(d.policyClient.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if _, err := cluster.LoadCache(policy.Path, clusterID, nodeID, time.Now()); err != nil {
+		if err := os.Remove(policy.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("discard invalid node policy: %w", err)
 		}
 	}
+	d.mu.Lock()
+	d.policyClient = policy
+	d.mu.Unlock()
 	if process, ok := d.derper.(*derper.Process); ok {
-		process.Policy = d.policyClient
+		process.Policy = policy
 	}
 	return nil
 }
 
 func (d *Daemon) startNodeControl(ctx context.Context) {
 	ctx, d.nodeCancel = context.WithCancel(ctx)
-	d.nodeDone = make(chan struct{})
+	done := make(chan struct{})
+	d.nodeDone = done
+	client, policy := d.nodeClient, d.policyClient
 	go func() {
-		defer close(d.nodeDone)
-		err := d.nodeClient.RunControl(ctx, d.policyClient.Path, d.policyClient.ApplyPolicy, d.policyClient.Status)
+		defer close(done)
+		err := client.RunControl(ctx, policy.Path, policy.ApplyPolicy, policy.Status)
 		if errors.Is(err, cluster.ErrIdentityConflict) {
 			d.derperMu.Lock()
 			defer d.derperMu.Unlock()
@@ -54,36 +58,18 @@ func (d *Daemon) startNodeControl(ctx context.Context) {
 			stopCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 			defer cancel()
 			if err := d.derper.Stop(stopCtx); err != nil {
-				d.reportFatal(err)
+				d.setApplyError(err)
 			}
 			d.logf("ERROR node identity conflict; relay stopped")
 		} else if err != nil && ctx.Err() == nil {
-			d.reportFatal(fmt.Errorf("node control: %w", err))
+			d.setApplyError(fmt.Errorf("node control: %w", err))
 		}
 	}()
-}
-
-func (d *Daemon) startNode(ctx context.Context, cfg config.NodeConfig, listen string) error {
-	c, err := cluster.NewEnrollmentClient(cfg.ControllerURL, cfg.StateDir)
-	if err != nil {
-		return fmt.Errorf("load node identity: %w", err)
-	}
-	d.nodeClient = c
-	l, err := net.Listen("tcp", listen)
-	if err != nil {
-		return fmt.Errorf("listen node management: %w", err)
-	}
-	d.controllerListener = l
-	d.controllerServer = &http.Server{Handler: c.DomainHandler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: time.Minute, MaxHeaderBytes: 64 << 10}
-	go func() {
-		if err := d.controllerServer.Serve(l); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			d.reportFatal(fmt.Errorf("node management server: %w", err))
-		}
-	}()
-	return nil
 }
 
 func (d *Daemon) nodeAdmin(ctx context.Context, r admin.Request) admin.Response {
+	d.opMu.Lock()
+	defer d.opMu.Unlock()
 	if d.nodeClient == nil {
 		return admin.Failure("node identity is not configured")
 	}

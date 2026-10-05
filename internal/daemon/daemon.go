@@ -61,6 +61,8 @@ type Daemon struct {
 	current        config.Config
 	desired        config.Config
 	pendingRestart bool
+	applyError     string
+	runCtx         context.Context
 	derper         derperProcess
 
 	adminServer          *admin.Server
@@ -70,6 +72,8 @@ type Daemon struct {
 	controllerStore      *control.Store
 	controllerServer     *http.Server
 	controllerListener   net.Listener
+	managementServer     *http.Server
+	managementListener   net.Listener
 	controllerCancel     context.CancelFunc
 	controllerDone       chan struct{}
 	nodeClient           *cluster.EnrollmentClient
@@ -143,17 +147,12 @@ func (d *Daemon) Start(ctx context.Context) error {
 	d.desired = parsed.Config.Clone()
 	d.pendingRestart = false
 	d.mu.Unlock()
-	if parsed.Config.Controller.Enabled {
-		if err := d.startController(ctx, *parsed.Config.Controller); err != nil {
-			return d.abortStart(err)
-		}
-	} else if err := d.startNode(ctx, parsed.Config.Node, "127.0.0.1:3341"); err != nil {
+	d.runCtx = ctx
+	if err := d.startManagement(parsed.Config); err != nil {
 		return d.abortStart(err)
 	}
-	if d.nodeClient != nil {
-		if err := d.prepareNodePolicy(parsed.Config.Node); err != nil {
-			return d.abortStart(err)
-		}
+	if err := d.prepareRole(ctx, parsed.Config); err != nil {
+		d.setApplyError(err)
 	}
 	if err := d.startAdminServer(parsed.Config.Server.Admin.Socket); err != nil {
 		return d.abortStart(err)
@@ -161,8 +160,10 @@ func (d *Daemon) Start(ctx context.Context) error {
 	if err := d.startHealthServer(parsed.Config.Server.Health.Listen); err != nil {
 		return d.abortStart(err)
 	}
-	if err := d.syncDerper(ctx); err != nil {
-		return d.abortStart(err)
+	if d.applyError == "" {
+		if err := d.syncDerper(ctx); err != nil {
+			d.setApplyError(err)
+		}
 	}
 	d.mu.Lock()
 	d.started = true
@@ -197,6 +198,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 }
 
 func (d *Daemon) syncDerper(ctx context.Context) error {
+	return d.syncDerperConfig(ctx, d.activeConfig())
+}
+
+func (d *Daemon) syncDerperConfig(ctx context.Context, cfg config.Config) error {
 	d.derperMu.Lock()
 	defer d.derperMu.Unlock()
 	d.mu.RLock()
@@ -204,10 +209,9 @@ func (d *Daemon) syncDerper(ctx context.Context) error {
 		d.mu.RUnlock()
 		return errors.New("daemon is stopping")
 	}
-	cfg := d.current.Clone()
 	nodeConflict := d.nodeConflict
 	d.mu.RUnlock()
-	if cfg.Server.Hostname == "" || nodeConflict {
+	if cfg.SetupRequired || cfg.Server.Hostname == "" || nodeConflict {
 		return nil
 	}
 	if d.derper.Running() {
@@ -281,7 +285,7 @@ func (d *Daemon) monitorDerper(generation uint64) {
 				err = errors.New("derper exited unexpectedly")
 			}
 			d.logf("ERROR derper child exited: %v", err)
-			d.reportFatal(fmt.Errorf("derper child failed: %w", err))
+			d.setApplyError(fmt.Errorf("derper child failed: %w", err))
 		} else {
 			d.logf("INFO derper child stopped")
 		}
@@ -553,6 +557,13 @@ func (d *Daemon) closeListeners() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		if err := d.controllerServer.Shutdown(ctx); err != nil {
 			_ = d.controllerServer.Close()
+		}
+		cancel()
+	}
+	if d.managementServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		if err := d.managementServer.Shutdown(ctx); err != nil {
+			_ = d.managementServer.Close()
 		}
 		cancel()
 	}

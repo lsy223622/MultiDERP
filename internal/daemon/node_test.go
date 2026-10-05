@@ -18,9 +18,14 @@ func TestMemberNodeRegistrationBoundary(t *testing.T) {
 	cfg.Controller = &config.ControllerConfig{Enabled: false}
 	cfg.Node.ControllerURL = "https://controller.example.com"
 	cfg.Node.StateDir = t.TempDir()
+	cfg.Storage.StateDir = cfg.Node.StateDir
+	cfg.Server.Management.Listen = freeLoopbackAddress(t)
 	d := New(t.Context(), Options{Logger: log.New(io.Discard, "", 0)})
 	d.current = cfg
-	if err := d.startNode(t.Context(), cfg.Node, freeLoopbackAddress(t)); err != nil {
+	if err := d.startManagement(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.prepareRole(t.Context(), cfg); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { d.Shutdown() })
@@ -41,7 +46,11 @@ func TestMemberNodeRegistrationBoundary(t *testing.T) {
 		}
 		io.Copy(io.Discard, r.Body)
 		r.Body.Close()
-		if r.StatusCode != 404 {
+		want := 404
+		if path == "/api/v1/users" {
+			want = 401
+		}
+		if r.StatusCode != want {
 			t.Fatal("member exposed controller endpoint", path, r.StatusCode)
 		}
 	}

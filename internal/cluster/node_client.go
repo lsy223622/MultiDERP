@@ -274,6 +274,15 @@ func (c *EnrollmentClient) acceptSession(session NodeSession, ch NodeChallenge) 
 
 func (c *EnrollmentClient) DomainHandler() http.Handler { return c.responder }
 
+func (c *EnrollmentClient) PendingEnrollmentCode() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.state.Pending != nil {
+		return c.state.Pending.Code
+	}
+	return ""
+}
+
 func (c *EnrollmentClient) Enroll(ctx context.Context, code string) (NodeSession, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
