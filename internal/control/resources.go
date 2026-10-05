@@ -24,19 +24,29 @@ func (s *Store) SetNodePorts(ctx context.Context, actor Actor, id string, derpPo
 	if err := RequireOwner(actor, n.OwnerID); err != nil {
 		return err
 	}
-	if derpPort == n.DERPPort && stunPort == n.STUNPort {
-		return nil
-	}
-	if _, err := tx.ExecContext(ctx, "UPDATE nodes SET derp_port=?,stun_port=? WHERE id=?", derpPort, stunPort, id); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, "UPDATE node_observations SET probes_json=NULL WHERE node_id=?", id); err != nil {
-		return err
-	}
-	if err := writeAudit(ctx, tx, actor.ID, n.OwnerID, "node", id, "node.ports.change"); err != nil {
+	if err := s.setNodePorts(ctx, tx, n, actor.ID, derpPort, stunPort); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+func (s *Store) setNodePorts(ctx context.Context, tx *sql.Tx, n Node, actorID string, derpPort, stunPort int) error {
+	if derpPort < 1 || derpPort > 65535 || stunPort < 1 || stunPort > 65535 {
+		return ErrInvalid
+	}
+	if derpPort == n.DERPPort && stunPort == n.STUNPort {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE nodes SET derp_port=?,stun_port=? WHERE id=?", derpPort, stunPort, n.ID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE node_observations SET probes_json=NULL WHERE node_id=?", n.ID); err != nil {
+		return err
+	}
+	if err := writeAudit(ctx, tx, actorID, n.OwnerID, "node", n.ID, "node.ports.change"); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *Store) SetTailnetEnabled(ctx context.Context, actor Actor, id string, enabled bool) error {

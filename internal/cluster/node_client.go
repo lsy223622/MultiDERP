@@ -64,14 +64,15 @@ type nodeRegistration struct {
 }
 
 type EnrollmentClient struct {
-	mu            sync.Mutex
-	privateKey    ed25519.PrivateKey
-	instanceID    string
-	statePath     string
-	state         nodeRegistration
-	responder     *DomainResponder
-	httpClient    *http.Client
-	controlStatus ControlStatus
+	mu                 sync.Mutex
+	privateKey         ed25519.PrivateKey
+	instanceID         string
+	statePath          string
+	state              nodeRegistration
+	responder          *DomainResponder
+	httpClient         *http.Client
+	controlStatus      ControlStatus
+	derpPort, stunPort int
 }
 
 func (c *EnrollmentClient) PolicyBinding() (clusterID, nodeID string) {
@@ -165,6 +166,22 @@ func (c *EnrollmentClient) Release(ctx context.Context, previous NodeSession) er
 		OK bool `json:"ok"`
 	}
 	return c.post(ctx, "/cluster/v1/node/leave", struct{}{}, &result, previous.Token)
+}
+
+func (c *EnrollmentClient) SetPorts(ctx context.Context, derpPort, stunPort int) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if derpPort < 1 || derpPort > 65535 || stunPort < 1 || stunPort > 65535 {
+		return errors.New("invalid public ports")
+	}
+	c.derpPort, c.stunPort = derpPort, stunPort
+	var result struct {
+		OK bool `json:"ok"`
+	}
+	return c.post(ctx, "/cluster/v1/node/ports", struct {
+		DERPPort int `json:"derp_port"`
+		STUNPort int `json:"stun_port"`
+	}{derpPort, stunPort}, &result, c.state.Session.Token)
 }
 
 func decodeNodeJSON(b []byte, dst any) error {

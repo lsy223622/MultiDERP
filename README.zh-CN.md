@@ -4,7 +4,7 @@
 
 UniDERP 让自建 Tailscale DERP 中继服务多个独立 tailnet。单个主控管理平台账号、只读设备身份、服务器资源和共享授权；每个中继运行 patched `derper`，根据有期限的本地策略缓存核验设备公钥，并按 tailnet 调度流量。客户端使用标准 DERP 协议，尾网管理员手动配置 DERP map。
 
-主控本机也可提供中继，注册和授权规则与成员节点相同。成员只保存节点身份及有效策略；OAuth 凭据和账号数据库留在主控。Tailscale 继续负责对端身份、网络策略和 WireGuard 加密。
+主控本机也可提供中继，注册和授权规则与成员节点相同。成员保存节点身份、策略和独立的本机管理员账号；Tailnet OAuth 凭据和共享资源账号留在主控。Tailscale 继续负责对端身份、网络策略和 WireGuard 加密。
 
 当前分支处于 v2 发布准备阶段，示例使用本地构建镜像。两个独立真实 tailnet 的只读 OAuth 和原版 Tailscale 应用已有隔离验收结果，包括共享确认前拒绝连接，以及通过主控和成员中继的公网 external 与手动证书 passthrough 文件传输；标准 Dockerfile 使用正常构建缓存的完整构建已通过。自动证书签发仍未验证；不使用依赖缓存的构建在依赖下载时遇到 EOF 错误。
 
@@ -29,17 +29,18 @@ docker build --build-arg UNIDERP_VERSION=v2-local \
 
 ```sh
 mkdir -p data
-cp config.example.yaml data/config.yaml
-# 启动前修改 server.hostname 和部署配置。
 sudo chown -R 10001:10001 data
 sudo chmod 700 data
-sudo chmod 600 data/config.yaml
 docker compose -f docker-compose.example.yaml up -d
 ```
 
 [config.example.yaml](config.example.yaml) 启用主控，使用 `/data/controller.sqlite`、`/data/controller.key` 和 `/data/node`。镜像以 UID/GID 10001 运行，根文件系统只读，`/run/uniderp` 为私有 tmpfs。将整个 `/data` 持久化并允许该 UID 写入，保证密钥、SQLite WAL 和节点状态一起保留。admin socket 和 health 监听保持本地访问。
 
 打开 `https://你的主控域名/manage/`。尚未配置管理员时，页面会让你设置首个管理员的用户名、密码（12–72 字节）及确认密码，提交后自动登录。之后访问显示正常登录页。
+
+空数据目录会自动生成首次设置配置，先开放管理服务，再由网页选择“配置为主控”或“加入已有集群”。填写本机域名、实际监听地址、公开端口和 TLS 模式，保存并应用；成员在“集群连接”页输入主控 HTTPS 地址和一次性注册码。主控管理员可在“我的服务器”页注册本机中继，仍需真实私钥和 HTTPS 域名证明，注册本身不会自动授予设备访问许可。预先配置的 YAML 按原角色启动。
+
+“本机设置”由该服务器自己的管理员操作：保存会持久化配置，应用会重启本机中继，管理服务和账号保持可用。成员与主控失联时仍能登录和退出；退出立即关闭本机中继连接、清除注册和许可缓存，保留节点私钥和本地限速。在线退出同时撤销主控上的旧授权；重新加入需新注册码、原私钥和新的共享同意。共享授权、主控总预算、owner/shared 权重和 Tailnet 规则在主控面板配置。本地总限速独立保存，RX/TX 各取它与主控预算中的较小值；0 表示不另设本地上限。高于本地限制的策略正常应用，不覆写本地配置或改写原始策略缓存；页面分别显示已接收预算与实际调度预算。
 
 自动化部署也可以通过本地 admin socket 初始化：用受保护的编辑器或 secret 工具创建 `/data/admin-password`，写入 12–72 字节密码，仅允许 UID 10001 读取。不要把内容写进命令参数或日志。初始化后删除临时文件：
 
@@ -54,9 +55,17 @@ docker exec uniderp uniderp controller init \
 
 `tls_mode: external` 由反向代理终止 TLS，derper 接收 HTTP。`tls_mode: passthrough` 由 derper 自己终止 TLS 并加载证书，客户端可直连，或通过透传 TLS 的 TCP 代理连接。这里的 passthrough 指上游代理将 TLS 传给 derper。
 
-external 示例只把明文后端暴露在 `127.0.0.1:3377`。主机反向代理负责 TLS、HTTP/1.1 upgrade 和主控长连接响应。所有路径转发到后端，patched derper 将 `/manage/`、`/api/v1/`、`/cluster/v1/` 路由到内部管理服务。已有 Nginx TLS server 可采用以下 location 设置：
+external 示例将 DERP HTTP 发布到 `127.0.0.1:3377`，独立管理 HTTP 发布到 `127.0.0.1:3378`。已有配置需加上 `server.management.listen: ":3378"`；首次设置配置已启用它。主机反代负责 HTTPS、HTTP/1.1 upgrade 和控制长连接。管理路径直接转发到 3378，保证初始设置以及中继停止时网页仍可使用。已有 Nginx TLS server 可采用：
 
 ```nginx
+location ~ ^/(manage|api/v1|cluster/v1)/ {
+    proxy_pass http://127.0.0.1:3378;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_buffering off;
+    proxy_request_buffering off;
+    proxy_read_timeout 3600s;
+}
 location / {
     proxy_pass http://127.0.0.1:3377;
     proxy_http_version 1.1;
@@ -70,6 +79,8 @@ location / {
 ```
 
 代理仍需有效证书与 DNS。代理若运行在另一容器，应建立私有后端网络；另一容器的 loopback 不等于主机地址。STUN 直接使用 UDP 3478，不走 HTTP 代理。
+
+直连 TLS 或 TCP passthrough 部署也应另外准备转发到 3378 的 HTTPS 管理入口；只依赖中继 TLS 端口会在中继停止时无法修复。节点公共域名的 `/cluster/v1/domain-challenge/` 仍需从 HTTPS 443 可达。管理监听为 HTTP，仅通过可信 HTTPS 反代或私有后端网络暴露。网页可校验并上传手动 PEM 证书链和私钥，完整保存到数据目录，应用配置后由中继加载；宿主机 DNS、端口发布和反代证书仍由部署者配置。
 
 直接使用 Let's Encrypt TLS 时，采用 [docker-compose.letsencrypt.example.yaml](docker-compose.letsencrypt.example.yaml)，并设置：
 

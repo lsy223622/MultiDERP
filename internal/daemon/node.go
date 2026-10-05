@@ -44,8 +44,14 @@ func (d *Daemon) startNodeControl(ctx context.Context) {
 	done := make(chan struct{})
 	d.nodeDone = done
 	client, policy := d.nodeClient, d.policyClient
+	cfg := d.activeConfig()
 	go func() {
 		defer close(done)
+		if _, id := client.PolicyBinding(); id != "" {
+			portsCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			_ = client.SetPorts(portsCtx, cfg.Node.DERPPort, cfg.Node.STUNPort)
+			cancel()
+		}
 		err := client.RunControl(ctx, policy.Path, policy.ApplyPolicy, policy.Status)
 		if errors.Is(err, cluster.ErrIdentityConflict) {
 			d.derperMu.Lock()

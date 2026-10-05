@@ -4,7 +4,7 @@ English | [简体中文](README.zh-CN.md)
 
 UniDERP shares self-hosted Tailscale DERP relays across independent tailnets. One controller manages platform accounts, read-only device identities, relay resources and sharing grants. Each relay runs a patched `derper` that admits device keys from its own bounded policy cache and schedules traffic by tailnet. Clients use the standard DERP protocol and a manually configured DERP map.
 
-The controller also runs a local relay, subject to the same registration and authorization rules as members. Members hold their node identity and effective policy, while OAuth credentials and the account database stay on the controller. Tailscale continues to manage peer identity, network policy and WireGuard encryption.
+The controller also runs a local relay, subject to the same registration and authorization rules as members. Members hold their node identity, policy and independent local administrator account; Tailnet OAuth credentials and shared resource accounts stay on the controller. Tailscale continues to manage peer identity, network policy and WireGuard encryption.
 
 This branch is v2 release preparation. The examples use a locally built image. Isolated acceptance has exercised two independent real tailnets with read-only OAuth and stock Tailscale applications, including denial before sharing confirmation and transfers through both the controller relay and a member relay using external TLS and manual-certificate passthrough. A complete standard Dockerfile build passed with normal build caching. Automatic certificate issuance remains unverified; builds without cached dependencies failed on dependency download EOF errors.
 
@@ -29,17 +29,18 @@ The following commands target a Linux Docker host. Set a public DNS name with tr
 
 ```sh
 mkdir -p data
-cp config.example.yaml data/config.yaml
-# Edit server.hostname and the deployment settings before starting.
 sudo chown -R 10001:10001 data
 sudo chmod 700 data
-sudo chmod 600 data/config.yaml
 docker compose -f docker-compose.example.yaml up -d
 ```
 
 [config.example.yaml](config.example.yaml) enables the controller, using `/data/controller.sqlite`, `/data/controller.key` and `/data/node`. The image runs as UID/GID 10001, with a read-only root filesystem and a private `/run/uniderp` tmpfs. Keep `/data` writable by that UID; mount the whole directory so keys, SQLite WAL files and node state persist together. Admin and health listeners remain local.
 
 Open `https://YOUR-CONTROLLER-DOMAIN/manage/`. When no administrator is configured, the page asks you to choose the first administrator's username, password (12–72 bytes) and password confirmation, then signs you in. Later visits use the normal login page.
+
+With no existing configuration, the daemon writes a bootstrap configuration and opens the management service before starting any relay or controller business. After creating the local administrator, choose **Configure as controller** or **Join an existing cluster**, save the public domain, listeners, public ports and TLS mode, then apply. A member's Cluster connection page accepts the controller HTTPS origin and one-time enrollment code. The controller administrator can register its local relay from My servers; this still proves the node key and public HTTPS domain and does not grant device access automatically. Explicit YAML configurations keep their existing role.
+
+Local settings belong to that server's administrator. Saving persists them; applying restarts the local relay while keeping the management service and accounts available. A member can log in and leave while the controller is unavailable. Leaving closes existing relay connections, clears registration and cached permissions, and keeps the node key and local bandwidth limit. Online release also revokes existing grants; re-enrollment needs a new code, the original key and new sharing consent. Use the controller console for sharing grants, total policy budget, owner/shared weights and Tailnet rules. The local total limit is independent: each RX/TX scheduler uses the smaller of the controller budget and the local limit; zero adds no local limit. Higher controller budgets apply successfully and do not change the local setting or original cached policy. Status shows the received policy budget and actual scheduler budget separately.
 
 For automated deployment, create a temporary `/data/admin-password` file containing a 12–72 byte password, readable only by UID 10001. Write it with a protected editor or secret provisioning tool; keep its contents out of command arguments and logs. Initialize through the local admin socket, then delete the temporary file:
 
@@ -54,9 +55,17 @@ The administrator creates member accounts and configures identity/control retent
 
 `tls_mode: external` means the reverse proxy terminates TLS and derper receives HTTP. `tls_mode: passthrough` means derper terminates TLS and loads its own certificate; clients may connect directly or through a TCP proxy that forwards TLS unchanged. The name refers to passing TLS through an upstream proxy to derper.
 
-The external profile publishes the plaintext backend only at `127.0.0.1:3377`. A compatible host reverse proxy terminates TLS, preserves HTTP/1.1 upgrades, and streams long-lived controller responses. Forward all paths to the backend; patched derper routes `/manage/`, `/api/v1/` and `/cluster/v1/` to the internal management service. For an existing Nginx TLS server, the relevant location settings are:
+The external profile publishes DERP HTTP at `127.0.0.1:3377` and independent management HTTP at `127.0.0.1:3378`. Set `server.management.listen: ":3378"` in existing configurations to enable this second listener; new bootstrap configurations already enable it. A host reverse proxy terminates HTTPS, preserves HTTP/1.1 upgrades, and streams long-lived control responses. Route management paths directly to 3378 so the console works before relay setup and while the relay is stopped. In an existing Nginx TLS server:
 
 ```nginx
+location ~ ^/(manage|api/v1|cluster/v1)/ {
+    proxy_pass http://127.0.0.1:3378;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_buffering off;
+    proxy_request_buffering off;
+    proxy_read_timeout 3600s;
+}
 location / {
     proxy_pass http://127.0.0.1:3377;
     proxy_http_version 1.1;
@@ -70,6 +79,8 @@ location / {
 ```
 
 The proxy needs a valid certificate and DNS configuration. If it runs in a different container, arrange a private backend network instead of treating that container's loopback as the host. STUN uses UDP 3478 directly and is not an HTTP proxy route.
+
+Direct TLS or TCP passthrough deployments also need an independently reachable HTTPS management endpoint forwarding to 3378. Serving the console only through derper's TLS listener prevents recovery while that listener is stopped. Keep the public node domain's `/cluster/v1/domain-challenge/` reachable over HTTPS 443. The management listener is HTTP and should only be exposed through a trusted HTTPS proxy or private backend network. The Web console uploads and validates manual PEM certificates and keys, saves a complete pair under `/data`, then applies it on relay restart. It does not configure host DNS, port publishing or proxy certificates.
 
 For direct Let's Encrypt TLS, use [docker-compose.letsencrypt.example.yaml](docker-compose.letsencrypt.example.yaml) and set:
 

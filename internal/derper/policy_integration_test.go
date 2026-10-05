@@ -112,7 +112,7 @@ func TestPolicyApplicationOnPatchedDerper(t *testing.T) {
 	server := testServer("external")
 	server.DERP.Listen, server.DERP.STUNListen = address, stunAddress
 	process := NewProcess(binary, io.Discard)
-	process.Policy = PolicyClient{Path: filepath.Join(dir, "policy.json"), SocketPath: filepath.Join(dir, "policy.sock"), MaxBudgetBPS: 100000000}
+	process.Policy = PolicyClient{Path: filepath.Join(dir, "policy.json"), SocketPath: filepath.Join(dir, "policy.sock"), MaxBudgetBPS: 80000000}
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
 	if err := process.Start(ctx, server, "127.0.0.1:9", filepath.Join(dir, "derper.key")); err != nil {
@@ -136,7 +136,7 @@ func TestPolicyApplicationOnPatchedDerper(t *testing.T) {
 	p := applicationPolicy(t)
 	p.Grants[0].Keys = []cluster.DeviceKey{{NodePublic: a.Public().String()}, {NodePublic: b.Public().String()}}
 	applied, err := process.Policy.ApplyPolicy(ctx, p)
-	if err != nil || applied.Revision != p.Revision || !applied.Usable {
+	if err != nil || applied.Revision != p.Revision || !applied.Usable || applied.EffectiveBudgetBPS != 80000000 {
 		t.Fatal("real child did not acknowledge application", applied, err)
 	}
 	ca, err := derphttp.NewClient(a, "http://"+address+"/derp", logger.Discard, netmon.NewStatic())
@@ -174,8 +174,9 @@ func TestPolicyApplicationOnPatchedDerper(t *testing.T) {
 	}
 	p.Revision++
 	p.QoS.OwnerWeight = 9
-	if _, err := process.Policy.ApplyPolicy(ctx, p); err != nil {
-		t.Fatal(err)
+	p.QoS.BudgetBPS = 200000000
+	if result, err := process.Policy.ApplyPolicy(ctx, p); err != nil || result.EffectiveBudgetBPS != 80000000 {
+		t.Fatal(result, err)
 	}
 	if err := ca.Send(b.Public(), []byte("hot policy")); err != nil {
 		t.Fatal(err)
@@ -200,6 +201,11 @@ func TestPolicyApplicationOnPatchedDerper(t *testing.T) {
 	bytes := uint64(len("actual patched relay") + len("hot policy"))
 	if traffic.CounterID == 0 || traffic.TailnetID != p.Grants[0].TailnetID || traffic.RXPayloadBytes != bytes || traffic.TXPayloadBytes != bytes || traffic.RelayedPayloadBytes != bytes || traffic.QueuedPayloadBytes != 0 {
 		t.Fatal("actual child payload counters have wrong scope", traffic)
+	}
+	p.Revision++
+	p.QoS.BudgetBPS = 40000000
+	if result, err := process.Policy.ApplyPolicy(ctx, p); err != nil || result.EffectiveBudgetBPS != 40000000 {
+		t.Fatal(result, err)
 	}
 	p.Revision++
 	p.Grants[0].ControlUntil = time.Now().Add(300 * time.Millisecond)

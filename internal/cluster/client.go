@@ -108,6 +108,12 @@ func (c *EnrollmentClient) RunControl(ctx context.Context, path string, apply fu
 			}
 			renewRequired = false
 		}
+		c.mu.Lock()
+		derpPort, stunPort := c.derpPort, c.stunPort
+		c.mu.Unlock()
+		if derpPort != 0 {
+			_ = c.SetPorts(ctx, derpPort, stunPort)
+		}
 		err := c.controlConnection(ctx, path, session, apply, status)
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -227,9 +233,6 @@ func (c *EnrollmentClient) controlConnection(ctx context.Context, path string, s
 		result, err := apply(applicationContext, p)
 		if err != nil || result.Revision != p.Revision {
 			ack.Error = "apply_failed"
-			if errors.Is(err, ErrHostBudget) {
-				ack.Error = "host_budget"
-			}
 			c.mu.Lock()
 			c.controlStatus.Error = ack.Error
 			c.mu.Unlock()

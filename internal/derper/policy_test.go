@@ -81,15 +81,13 @@ func TestApplyPolicyRequiresActualMatchingChildACK(t *testing.T) {
 	}
 }
 
-func TestApplyPolicyRespectsHostBudgetAndCancellation(t *testing.T) {
+func TestApplyPolicyPersistsControllerBudgetAndRespectsCancellation(t *testing.T) {
 	p := applicationPolicy(t)
 	dir := t.TempDir()
 	c := PolicyClient{Path: filepath.Join(dir, "policy.json"), SocketPath: filepath.Join(dir, "policy.sock"), MaxBudgetBPS: 80000000}
-	if _, err := c.ApplyPolicy(t.Context(), p); !errors.Is(err, cluster.ErrHostBudget) {
-		t.Fatal("host budget overridden", err)
-	}
-	if _, err := os.Stat(c.Path); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("host-rejected policy persisted")
+	_, _ = c.ApplyPolicy(t.Context(), p)
+	if cached, err := cluster.LoadCache(c.Path, p.ClusterID, p.NodeID, time.Now()); err != nil || cached.QoS.BudgetBPS != p.QoS.BudgetBPS {
+		t.Fatal("controller policy not preserved", err)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()

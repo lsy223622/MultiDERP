@@ -8,8 +8,13 @@ controller:
 
 node:
   state_dir: /data/node
+  derp_port: 443
+  stun_port: 3478
+  max_budget_bps: 0
 
 server:
+  management:
+    listen: ":3378"
   # Replace this with the public DNS name used by your DERP map.
   hostname: derp.example.com
 

@@ -38,7 +38,7 @@ func (d *Daemon) Status(ctx context.Context) (control.LocalStatus, error) {
 	status := control.LocalStatus{Role: configRole(active), Saved: localSettings(saved), Active: localSettings(active), PendingApply: d.pendingRestart, ApplyError: d.applyError}
 	childOK := d.childOK
 	d.mu.RUnlock()
-	status.ControllerURL = active.Node.ControllerURL
+	status.ControllerURL = saved.Node.ControllerURL
 	if active.Controller.Enabled && active.Server.Hostname != "" {
 		status.ControllerURL = nodeControllerURL(active)
 	}
@@ -58,6 +58,7 @@ func (d *Daemon) Status(ctx context.Context) (control.LocalStatus, error) {
 		applied, err := policy.Status(probeCtx)
 		cancel()
 		if err == nil {
+			status.EffectiveBudgetBPS = applied.EffectiveBudgetBPS
 			status.Control.Usable = applied.Usable
 			status.Control.AppliedRevision = applied.Revision
 		}
@@ -170,6 +171,16 @@ func (d *Daemon) ApplySettings(ctx context.Context) error {
 }
 
 func (d *Daemon) applyLocalConfig(ctx context.Context, cfg config.Config) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	active := d.activeConfig()
+	if !active.SetupRequired && configRole(active) != configRole(cfg) {
+		return control.ErrConflict
+	}
+	if active.Storage != cfg.Storage || active.Server.Management != cfg.Server.Management || active.Server.Admin != cfg.Server.Admin || active.Server.Health != cfg.Server.Health || active.Node.StateDir != cfg.Node.StateDir {
+		return errors.New("部署路径与管理监听变更需要重启服务")
+	}
 	if err := cfg.Validate(); err != nil {
 		return err
 	}

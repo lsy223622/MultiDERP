@@ -27,12 +27,13 @@ type policyNotice struct {
 }
 
 type policyReply struct {
-	Revision          uint64                   `json:"revision"`
-	Usable            bool                     `json:"usable"`
-	Error             string                   `json:"error"`
-	Traffic           []cluster.TailnetTraffic `json:"traffic,omitempty"`
-	TrafficObservedAt time.Time                `json:"traffic_observed_at"`
-	ActiveConnections uint64                   `json:"active_connections"`
+	EffectiveBudgetBPS uint64                   `json:"effective_budget_bps"`
+	Revision           uint64                   `json:"revision"`
+	Usable             bool                     `json:"usable"`
+	Error              string                   `json:"error"`
+	Traffic            []cluster.TailnetTraffic `json:"traffic,omitempty"`
+	TrafficObservedAt  time.Time                `json:"traffic_observed_at"`
+	ActiveConnections  uint64                   `json:"active_connections"`
 }
 
 func (c PolicyClient) exchange(ctx context.Context, request policyNotice) (cluster.PolicyApplication, error) {
@@ -76,7 +77,7 @@ func (c PolicyClient) exchange(ctx context.Context, request policyNotice) (clust
 	if d.Decode(&reply) != nil || d.Decode(new(any)) != io.EOF {
 		return cluster.PolicyApplication{}, errors.New("invalid derper policy response")
 	}
-	result := cluster.PolicyApplication{Revision: reply.Revision, Usable: reply.Usable, Traffic: reply.Traffic, TrafficObservedAt: reply.TrafficObservedAt, ActiveConnections: reply.ActiveConnections}
+	result := cluster.PolicyApplication{EffectiveBudgetBPS: reply.EffectiveBudgetBPS, Revision: reply.Revision, Usable: reply.Usable, Traffic: reply.Traffic, TrafficObservedAt: reply.TrafficObservedAt, ActiveConnections: reply.ActiveConnections}
 	if reply.Error != "" {
 		return result, errors.New("derper policy application failed")
 	}
@@ -92,9 +93,6 @@ func (c PolicyClient) ApplyPolicy(ctx context.Context, p cluster.Policy) (cluste
 	}
 	if err := cluster.ValidatePolicy(p, p.ClusterID, p.NodeID); err != nil {
 		return cluster.PolicyApplication{}, err
-	}
-	if c.MaxBudgetBPS != 0 && p.QoS.BudgetBPS > c.MaxBudgetBPS {
-		return cluster.PolicyApplication{}, cluster.ErrHostBudget
 	}
 	if err := cluster.SaveCache(c.Path, p); err != nil {
 		return cluster.PolicyApplication{}, err

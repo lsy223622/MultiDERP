@@ -15,12 +15,12 @@
 <form id="setup-form"><label>管理员用户名<input name="username" autocomplete="username" maxlength="80" required></label><label>密码（12–72 字节）<input name="password" type="password" autocomplete="new-password" required></label><label>确认密码<input name="password_confirm" type="password" autocomplete="new-password" required></label><button type="submit">创建管理员并登录</button></form>
 </section>
 <section id="login" class="login card" hidden>
-<p class="eyebrow">UNIDERP CONTROL</p><h1>登录集群</h1><p class="muted">使用管理员分配的账号管理你的 Tailnet 与中继。</p>
+<p class="eyebrow">UNIDERP</p><h1>登录管理面板</h1><p class="muted">主控账号用于管理 Tailnet 和共享策略；成员节点使用本机管理员账号。</p>
 <form id="login-form"><label>用户名<input name="username" autocomplete="username" maxlength="80" required></label><label>密码<input name="password" type="password" autocomplete="current-password" required></label><button type="submit">登录</button></form>
 </section>
 <div id="workspace" class="workspace" hidden>
 <nav aria-label="集群导航">
-<a href="#tailnets">我的 Tailnet</a><a href="#directory">服务器目录</a><a href="#nodes">我的服务器</a><a href="#grants">申请与授权</a><a href="#map">DERP map</a><a href="#events">事件与审计</a><a href="#account">我的账号</a><a href="#users" data-admin>账号管理</a><a href="#settings" data-admin>集群设置</a>
+<a href="#bootstrap" data-local>初始设置</a><a href="#member" data-local>集群连接</a><a href="#local" data-local>本机设置</a><a href="#tailnets" data-controller>我的 Tailnet</a><a href="#directory" data-controller>服务器目录</a><a href="#nodes" data-controller>我的服务器</a><a href="#grants" data-controller>申请与授权</a><a href="#map" data-controller>DERP map</a><a href="#events" data-controller>事件与审计</a><a href="#account">我的账号</a><a href="#users" data-controller data-admin>账号管理</a><a href="#settings" data-controller data-admin>集群设置</a>
 </nav>
 <main id="content" aria-live="polite"></main>
 </div>

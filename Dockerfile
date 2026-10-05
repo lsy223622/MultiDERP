@@ -22,5 +22,5 @@ COPY THIRD_PARTY_NOTICES.md /usr/share/licenses/uniderp/THIRD_PARTY_NOTICES.md
 COPY licenses /usr/share/licenses/uniderp/licenses
 
 USER 10001:10001
-EXPOSE 80/tcp 443/tcp 3377/tcp 3478/udp
+EXPOSE 80/tcp 443/tcp 3377/tcp 3378/tcp 3478/udp
 ENTRYPOINT ["/usr/local/bin/uniderp", "serve", "--config", "/data/config.yaml", "--derper", "/usr/local/bin/derper"]

@@ -515,10 +515,6 @@ func (d *Daemon) shutdownInternal() error {
 	d.startup = false
 	d.childOK = false
 	d.mu.Unlock()
-	if d.nodeCancel != nil {
-		d.nodeCancel()
-		<-d.nodeDone
-	}
 	if d.adminServer != nil {
 		if adminErr := d.adminServer.StopAccepting(); adminErr != nil {
 			err = errors.Join(err, adminErr)
@@ -527,6 +523,10 @@ func (d *Daemon) shutdownInternal() error {
 	if d.adminServer != nil {
 		d.adminServer.Wait()
 	}
+	d.closeListeners()
+	d.opMu.Lock()
+	defer d.opMu.Unlock()
+	d.stopNodeControl()
 	stopCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	if d.derper != nil {
@@ -541,7 +541,6 @@ func (d *Daemon) shutdownInternal() error {
 			err = errors.Join(err, adminErr)
 		}
 	}
-	d.closeListeners()
 	if d.controllerCancel != nil {
 		d.controllerCancel()
 		<-d.controllerDone

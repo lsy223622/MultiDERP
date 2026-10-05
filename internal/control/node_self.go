@@ -5,6 +5,26 @@ import (
 	"database/sql"
 )
 
+func (s *Store) SetNodeSessionPorts(ctx context.Context, token string, derpPort, stunPort int) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	session, err := s.nodeSession(ctx, tx, token)
+	if err != nil {
+		return err
+	}
+	n, err := scanNode(tx.QueryRowContext(ctx, "SELECT "+nodeColumns+" FROM nodes WHERE id=?", session.NodeID))
+	if err != nil {
+		return err
+	}
+	if err := s.setNodePorts(ctx, tx, n, "node:"+n.ID, derpPort, stunPort); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) releaseNode(ctx context.Context, tx *sql.Tx, id string) error {
 	for _, table := range []string{"node_sessions", "node_challenges", "enrollments", "node_observations"} {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE node_id=?", id); err != nil {

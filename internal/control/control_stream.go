@@ -261,7 +261,7 @@ func (s *Store) AcknowledgePolicy(ctx context.Context, token string, ack cluster
 			return ErrInvalid
 		}
 		switch ack.Error {
-		case "host_budget", "invalid_policy", "persist_failed", "apply_failed", "clock_rollback":
+		case "invalid_policy", "persist_failed", "apply_failed", "clock_rollback":
 		default:
 			return ErrInvalid
 		}

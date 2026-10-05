@@ -11,6 +11,7 @@ services:
     # STUN is UDP; publish it explicitly on both IPv4 and IPv6.
     ports:
       - "127.0.0.1:3377:3377/tcp"
+      - "127.0.0.1:3378:3378/tcp"
       - "0.0.0.0:3478:3478/udp"
       - "[::]:3478:3478/udp"
 

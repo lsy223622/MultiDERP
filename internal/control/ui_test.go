@@ -35,3 +35,26 @@ func TestManagementShellLoadsBeforeLoginWithoutOpeningAPIs(t *testing.T) {
 		}
 	}
 }
+
+func TestManagementRolesUseSharedShellAndLocalAuthority(t *testing.T) {
+	s, _, _ := nodeTestStore(t)
+	for _, role := range []string{"setup", "member", "controller"} {
+		h := NewLocalHTTPHandler(s, &localTestBackend{role: role})
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("GET", "https://relay.example.com/manage/", nil))
+		if w.Code != 200 {
+			t.Fatal(role, w.Code)
+		}
+		cookie, csrf := loginTest(t, h, "admin")
+		if w := accountRequest(h, cookie, csrf, "GET", "/api/v1/local/status", nil); w.Code != 200 {
+			t.Fatal(role, w.Code)
+		}
+		if w := accountRequest(h, cookie, csrf, "GET", "/api/v1/tailnets", nil); (role == "controller" && w.Code != 200) || (role != "controller" && w.Code != 404) {
+			t.Fatal(role, w.Code)
+		}
+		ordinary, token := loginTest(t, h, "alice")
+		if w := accountRequest(h, ordinary, token, "POST", "/api/v1/local/apply", map[string]bool{}); w.Code != 403 {
+			t.Fatal(role, w.Code)
+		}
+	}
+}

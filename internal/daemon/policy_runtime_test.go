@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/json"
 	"io"
@@ -17,6 +18,11 @@ import (
 
 	"github.com/lsy223622/UniDERP/v2/internal/cluster"
 	"github.com/lsy223622/UniDERP/v2/internal/config"
+	"github.com/lsy223622/UniDERP/v2/internal/derper"
+	"tailscale.com/derp/derphttp"
+	"tailscale.com/net/netmon"
+	"tailscale.com/types/key"
+	"tailscale.com/types/logger"
 )
 
 func TestUnregisteredControllerStartsFailClosedPublicRelay(t *testing.T) {
@@ -82,6 +88,88 @@ func TestUnregisteredControllerStartsFailClosedPublicRelay(t *testing.T) {
 	}
 	if _, err := os.Stat(cachePath + ".watermark"); err != nil {
 		t.Fatal("discard reset revision watermark", err)
+	}
+}
+
+func TestLocalConsoleLeaveClosesExistingDERPConnections(t *testing.T) {
+	binary := os.Getenv("UNIDERP_TEST_DERPER")
+	if binary == "" {
+		t.Skip("requires freshly built patched derper")
+	}
+	d := localTestDaemon(t, true)
+	cfg := d.desiredConfig()
+	cfg.SetupRequired = false
+	cfg.Controller = &config.ControllerConfig{Enabled: false}
+	cfg.Server.Hostname = "relay.example.com"
+	cfg.Server.DERP.Listen = freeLoopbackAddress(t)
+	udp, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Server.DERP.STUNListen = udp.LocalAddr().String()
+	udp.Close()
+	cfg.Node.ControllerURL = "https://127.0.0.1:1"
+	p := daemonPolicy(t)
+	device := key.NewNode()
+	p.Grants[0].Keys = []cluster.DeviceKey{{NodePublic: device.Public().String()}}
+	if _, err := cluster.LoadNodeIdentity(filepath.Join(cfg.Node.StateDir, "node.key")); err != nil {
+		t.Fatal(err)
+	}
+	registration, _ := json.Marshal(map[string]any{"controller_url": cfg.Node.ControllerURL, "domain": cfg.Server.Hostname, "session": cluster.NodeSession{ClusterID: p.ClusterID, NodeID: p.NodeID, Token: strings.Repeat("c", 64), ExpiresAt: time.Now().Add(time.Hour)}})
+	if err := os.WriteFile(filepath.Join(cfg.Node.StateDir, "registration.json"), registration, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := cluster.SaveCache(filepath.Join(cfg.Node.StateDir, "policy.json"), p); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.saveLocalConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	d.derper = derper.NewProcess(binary, io.Discard)
+	if err := d.ApplySettings(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	client, err := derphttp.NewClient(device, "http://"+cfg.Server.DERP.Listen+"/derp", logger.Discard, netmon.NewStatic())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if err := client.Connect(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Recv(); err != nil {
+		t.Fatal("authorized connection", err)
+	}
+	if _, err := d.Leave(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Recv(); err == nil {
+		t.Fatal("existing connection survived leave")
+	}
+	if err := d.ApplySettings(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := d.Status(t.Context())
+	if after.Joined || after.Control.Usable {
+		t.Fatal(after)
+	}
+	old, err := derphttp.NewClient(device, "http://"+cfg.Server.DERP.Listen+"/derp", logger.Discard, netmon.NewStatic())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer old.Close()
+	if err := old.Connect(t.Context()); err == nil {
+		if _, err := old.Recv(); err == nil {
+			t.Fatal("old device admitted after restart")
+		}
+	}
+	response, err := http.Get("http://" + d.managementListener.Addr().String() + "/manage/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != 200 {
+		t.Fatal("management unavailable", response.StatusCode)
 	}
 }
 
@@ -168,7 +256,7 @@ func TestDaemonControlAppliesAndExpiresCachedPolicy(t *testing.T) {
 				t.Error("unbound control request")
 			}
 			policy := p
-			policy.Grants[0].ControlUntil = time.Now().Add(2 * time.Second)
+			policy.Grants[0].ControlUntil = time.Now().Add(20 * time.Second)
 			json.NewEncoder(w).Encode(cluster.ControlMessage{Type: "policy", Policy: &policy})
 			w.(http.Flusher).Flush()
 			select {
@@ -197,6 +285,7 @@ func TestDaemonControlAppliesAndExpiresCachedPolicy(t *testing.T) {
 	http.DefaultTransport = controller.Client().Transport
 	defer func() { http.DefaultTransport = transport }()
 	cfg.Node.ControllerURL = controller.URL
+	cfg.Node.MaxBudgetBPS = 80000000
 	registration, _ := json.Marshal(map[string]any{"controller_url": controller.URL, "domain": cfg.Server.Hostname, "session": cluster.NodeSession{ClusterID: p.ClusterID, NodeID: p.NodeID}})
 	if err := os.WriteFile(filepath.Join(cfg.Node.StateDir, "registration.json"), registration, 0600); err != nil {
 		t.Fatal(err)
@@ -221,7 +310,28 @@ func TestDaemonControlAppliesAndExpiresCachedPolicy(t *testing.T) {
 	if len(state.Node.Traffic) != 1 || state.Node.TrafficObservedAt.IsZero() {
 		t.Fatal("health did not sample actual child traffic", state.Node)
 	}
-	deadline = time.Now().Add(3 * time.Second)
+	before, err := os.ReadFile(d.policyClient.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	local, _ := d.Status(t.Context())
+	if local.EffectiveBudgetBPS != 80000000 {
+		t.Fatal(local)
+	}
+	settings := local.Saved
+	settings.MaxBudgetBPS = 40000000
+	if err := d.SaveSettings(t.Context(), settings); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ApplySettings(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	local, _ = d.Status(t.Context())
+	after, _ := os.ReadFile(d.policyClient.Path)
+	if local.EffectiveBudgetBPS != 40000000 || !bytes.Equal(before, after) || !local.Control.Usable {
+		t.Fatal("offline local limit apply", local)
+	}
+	deadline = time.Now().Add(21 * time.Second)
 	for d.healthSnapshot().Ready && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}

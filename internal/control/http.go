@@ -181,7 +181,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if r.URL.Path == "/cluster/v1/control" || r.URL.Path == "/cluster/v1/heartbeat" || r.URL.Path == "/cluster/v1/ack" || r.URL.Path == "/cluster/v1/node/leave" {
+	if r.URL.Path == "/cluster/v1/control" || r.URL.Path == "/cluster/v1/heartbeat" || r.URL.Path == "/cluster/v1/ack" || r.URL.Path == "/cluster/v1/node/leave" || r.URL.Path == "/cluster/v1/node/ports" {
 		h.clusterMux.ServeHTTP(w, r)
 		return
 	}

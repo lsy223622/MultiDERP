@@ -91,7 +91,7 @@ func TestNodeACKSeparatesReceivedAndApplied(t *testing.T) {
 	if send(cluster.PolicyACK{Revision: 1, State: "received"}) != 200 {
 		t.Fatal("receive rejected")
 	}
-	if send(cluster.PolicyACK{Revision: 1, State: "nack", Error: "host_budget"}) != 200 {
+	if send(cluster.PolicyACK{Revision: 1, State: "nack", Error: "apply_failed"}) != 200 {
 		t.Fatal("safe NACK rejected")
 	}
 	var received, applied int
@@ -112,7 +112,7 @@ func TestNodeACKSeparatesReceivedAndApplied(t *testing.T) {
 	if send(cluster.PolicyACK{Revision: 1, State: "nack", Error: "secret raw diagnostic"}) != 400 {
 		t.Fatal("arbitrary diagnostics accepted")
 	}
-	if send(cluster.PolicyACK{Revision: 1, State: "nack", Error: "host_budget"}) != 409 {
+	if send(cluster.PolicyACK{Revision: 1, State: "nack", Error: "apply_failed"}) != 409 {
 		t.Fatal("late NACK overwrote successful application")
 	}
 }

@@ -35,6 +35,20 @@ func (h *httpHandler) allowNodeAttempt(r *http.Request) bool {
 
 func (h *httpHandler) mountNodes() {
 	s := h.store
+	h.clusterMux.HandleFunc("POST /cluster/v1/node/ports", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			DERPPort int `json:"derp_port"`
+			STUNPort int `json:"stun_port"`
+		}
+		if !decodeRequest(w, r, &body) {
+			return
+		}
+		if err := s.SetNodeSessionPorts(r.Context(), nodeBearer(r), body.DERPPort, body.STUNPort); err != nil {
+			httpError(w, err)
+			return
+		}
+		writeJSON(w, map[string]bool{"ok": true})
+	})
 	h.clusterMux.HandleFunc("POST /cluster/v1/node/leave", func(w http.ResponseWriter, r *http.Request) {
 		if err := s.ReleaseNode(r.Context(), nodeBearer(r)); err != nil {
 			httpError(w, err)

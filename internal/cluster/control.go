@@ -6,7 +6,6 @@ import (
 )
 
 var ErrIdentityConflict = errors.New("node identity conflict")
-var ErrHostBudget = errors.New("node host budget exceeded")
 
 type ControlMessage struct {
 	Type   string  `json:"type"`
@@ -21,11 +20,12 @@ type PolicyACK struct {
 }
 
 type PolicyApplication struct {
-	Revision          uint64
-	Usable            bool
-	Traffic           []TailnetTraffic
-	TrafficObservedAt time.Time
-	ActiveConnections uint64
+	EffectiveBudgetBPS uint64
+	Revision           uint64
+	Usable             bool
+	Traffic            []TailnetTraffic
+	TrafficObservedAt  time.Time
+	ActiveConnections  uint64
 }
 
 type TailnetTraffic struct {
