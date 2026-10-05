@@ -97,7 +97,7 @@ func New(parent context.Context, options Options) *Daemon {
 		options.Logger = log.New(os.Stderr, "uniderp: ", log.LstdFlags|log.Lmicroseconds)
 	}
 	if len(options.ConfigTemplate) == 0 {
-		options.ConfigTemplate = config.ExampleYAML()
+		options.ConfigTemplate = config.BootstrapYAML()
 	}
 	logFilter := logging.New(options.Logger, config.DefaultLoggingLevel)
 	d := &Daemon{

@@ -22,7 +22,6 @@ func TestClusterRoleConfigurations(t *testing.T) {
 
 func TestClusterRejectsInvalidLocalConfiguration(t *testing.T) {
 	for _, input := range []string{
-		"version: 2\ncontroller:\n  enabled: false\n",
 		"version: 2\ncontroller:\n  enabled: false\nnode:\n  controller_url: http://control.example.com\n",
 		"version: 2\ncontroller:\n  enabled: false\n  key_file: /data/secret\nnode:\n  controller_url: https://control.example.com\n",
 		"version: 2\ncontroller:\n  enabled: true\n  allowed_node_cidrs: [not-a-range]\n",

@@ -35,12 +35,13 @@ const (
 )
 
 type Config struct {
-	Controller *ControllerConfig `yaml:"controller"`
-	Node       NodeConfig        `yaml:"node"`
-	Version    int               `yaml:"version"`
-	Server     ServerConfig      `yaml:"server"`
-	Storage    StorageConfig     `yaml:"storage"`
-	Logging    LoggingConfig     `yaml:"logging"`
+	SetupRequired bool              `yaml:"setup_required,omitempty"`
+	Controller    *ControllerConfig `yaml:"controller"`
+	Node          NodeConfig        `yaml:"node"`
+	Version       int               `yaml:"version"`
+	Server        ServerConfig      `yaml:"server"`
+	Storage       StorageConfig     `yaml:"storage"`
+	Logging       LoggingConfig     `yaml:"logging"`
 }
 
 type ControllerConfig struct {
@@ -52,16 +53,23 @@ type ControllerConfig struct {
 }
 
 type NodeConfig struct {
+	DERPPort      int    `yaml:"derp_port,omitempty"`
+	STUNPort      int    `yaml:"stun_port,omitempty"`
 	ControllerURL string `yaml:"controller_url,omitempty"`
 	StateDir      string `yaml:"state_dir"`
 	MaxBudgetBPS  uint64 `yaml:"max_budget_bps,omitempty"`
 }
 
 type ServerConfig struct {
-	Hostname string       `yaml:"hostname"`
-	DERP     DERPConfig   `yaml:"derp"`
-	Admin    AdminConfig  `yaml:"admin"`
-	Health   HealthConfig `yaml:"health"`
+	Management ManagementConfig `yaml:"management,omitempty"`
+	Hostname   string           `yaml:"hostname"`
+	DERP       DERPConfig       `yaml:"derp"`
+	Admin      AdminConfig      `yaml:"admin"`
+	Health     HealthConfig     `yaml:"health"`
+}
+
+type ManagementConfig struct {
+	Listen string `yaml:"listen,omitempty"`
 }
 
 type DERPConfig struct {
@@ -140,6 +148,12 @@ func (c *Config) Normalize() {
 	}
 	if c.Node.StateDir == "" {
 		c.Node.StateDir = filepath.Join(c.Storage.StateDir, "node")
+	}
+	if c.Node.DERPPort == 0 {
+		c.Node.DERPPort = 443
+	}
+	if c.Node.STUNPort == 0 {
+		c.Node.STUNPort = 3478
 	}
 	if c.Logging.Level == "" {
 		c.Logging.Level = DefaultLoggingLevel
@@ -316,9 +330,19 @@ func (c Config) Validate() error {
 		if c.Controller.Listen != "" || c.Controller.Database != "" || c.Controller.KeyFile != "" || len(c.Controller.AllowedNodeCIDRs) != 0 {
 			return errors.New("member node cannot configure controller storage or settings")
 		}
-		u, err := url.Parse(c.Node.ControllerURL)
-		if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
-			return errors.New("node.controller_url must be an HTTPS origin")
+		if c.Node.ControllerURL != "" {
+			u, err := url.Parse(c.Node.ControllerURL)
+			if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" {
+				return errors.New("node.controller_url must be an HTTPS origin")
+			}
+		}
+	}
+	if c.Node.DERPPort < 1 || c.Node.DERPPort > 65535 || c.Node.STUNPort < 1 || c.Node.STUNPort > 65535 {
+		return errors.New("node public ports must be between 1 and 65535")
+	}
+	if c.Server.Management.Listen != "" {
+		if err := validateListenAddress(c.Server.Management.Listen, "server.management.listen"); err != nil {
+			return err
 		}
 	}
 	if strings.TrimSpace(c.Node.StateDir) == "" {
@@ -403,6 +427,7 @@ func RestartOnlyChanged(oldConfig, newConfig Config) bool {
 	oldConfig.Normalize()
 	newConfig.Normalize()
 	return oldConfig.Server.Hostname != newConfig.Server.Hostname ||
+		oldConfig.SetupRequired != newConfig.SetupRequired || oldConfig.Server.Management != newConfig.Server.Management ||
 		!reflect.DeepEqual(oldConfig.Server.DERP, newConfig.Server.DERP) ||
 		oldConfig.Server.Admin.Socket != newConfig.Server.Admin.Socket ||
 		oldConfig.Server.Health.Listen != newConfig.Server.Health.Listen ||
@@ -533,18 +558,20 @@ type schemaNode struct {
 
 var (
 	rootSchema = &schemaNode{Fields: map[string]*schemaNode{
-		"version":    nil,
-		"server":     serverSchema,
-		"storage":    storageSchema,
-		"logging":    loggingSchema,
-		"controller": {Fields: map[string]*schemaNode{"enabled": nil, "listen": nil, "database": nil, "key_file": nil, "allowed_node_cidrs": nil}},
-		"node":       {Fields: map[string]*schemaNode{"controller_url": nil, "state_dir": nil, "max_budget_bps": nil}},
+		"setup_required": nil,
+		"version":        nil,
+		"server":         serverSchema,
+		"storage":        storageSchema,
+		"logging":        loggingSchema,
+		"controller":     {Fields: map[string]*schemaNode{"enabled": nil, "listen": nil, "database": nil, "key_file": nil, "allowed_node_cidrs": nil}},
+		"node":           {Fields: map[string]*schemaNode{"controller_url": nil, "state_dir": nil, "max_budget_bps": nil, "derp_port": nil, "stun_port": nil}},
 	}}
 	serverSchema = &schemaNode{Fields: map[string]*schemaNode{
-		"hostname": nil,
-		"derp":     derpSchema,
-		"admin":    adminSchema,
-		"health":   healthSchema,
+		"management": {Fields: map[string]*schemaNode{"listen": nil}},
+		"hostname":   nil,
+		"derp":       derpSchema,
+		"admin":      adminSchema,
+		"health":     healthSchema,
 	}}
 	derpSchema = &schemaNode{Fields: map[string]*schemaNode{
 		"listen": nil, "stun_listen": nil, "tls_mode": nil, "cert_mode": nil, "cert_dir": nil,
