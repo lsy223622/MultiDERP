@@ -39,14 +39,16 @@ docker compose -f docker-compose.example.yaml up -d
 
 [config.example.yaml](config.example.yaml) 启用主控，使用 `/data/controller.sqlite`、`/data/controller.key` 和 `/data/node`。镜像以 UID/GID 10001 运行，根文件系统只读，`/run/uniderp` 为私有 tmpfs。将整个 `/data` 持久化并允许该 UID 写入，保证密钥、SQLite WAL 和节点状态一起保留。admin socket 和 health 监听保持本地访问。
 
-用受保护的编辑器或 secret 工具创建 `/data/admin-password`，写入 12–72 字节密码，仅允许 UID 10001 读取。不要把内容写进命令参数或日志。初始化后删除临时文件：
+打开 `https://你的主控域名/manage/`。尚未配置管理员时，页面会让你设置首个管理员的用户名、密码（12–72 字节）及确认密码，提交后自动登录。之后访问显示正常登录页。
+
+自动化部署也可以通过本地 admin socket 初始化：用受保护的编辑器或 secret 工具创建 `/data/admin-password`，写入 12–72 字节密码，仅允许 UID 10001 读取。不要把内容写进命令参数或日志。初始化后删除临时文件：
 
 ```sh
 docker exec uniderp uniderp controller init \
   --username admin --password-file /data/admin-password
 ```
 
-打开 `https://你的主控域名/manage/`。管理员创建成员账号，并在设置页调整身份保留期和控制保留期。平台密码与尾网凭据独立；尾网 API 故障不会阻止平台登录。
+管理员创建成员账号，并在设置页调整身份保留期和控制保留期。平台密码与尾网凭据独立；尾网 API 故障不会阻止平台登录。
 
 ### TLS 与代理
 

@@ -7,6 +7,7 @@
   enrollment using private-key and HTTPS domain proof.
 - Adds provider approval and applicant confirmation for shared tailnets,
   manual DERP map export, scoped management pages, events and audit.
+- Adds first-run web administrator setup with automatic sign-in.
 - Records public DERP TCP and STUN UDP ports per relay for map export and
   independent endpoint probes, with owner/administrator configuration.
 - Enforces absolute identity/control/key deadlines and online connection

@@ -77,6 +77,12 @@ func (s *Store) InitializeAdmin(ctx context.Context, username, password string) 
 	return s.createUser(ctx, Actor{ID: "local", Role: "admin", Enabled: true}, username, password, "admin", true)
 }
 
+func (s *Store) hasAdmin(ctx context.Context) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM users WHERE role='admin')").Scan(&exists)
+	return exists, err
+}
+
 func (s *Store) CreateMember(ctx context.Context, actor Actor, username, password string) (Actor, error) {
 	if !actor.Enabled || actor.Role != "admin" {
 		return Actor{}, ErrForbidden

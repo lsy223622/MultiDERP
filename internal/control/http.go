@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"sync"
@@ -37,6 +38,15 @@ func NewHTTPHandler(s *Store) http.Handler {
 	h.mountObservability()
 	h.mountResources()
 	h.mux.HandleFunc("POST /api/v1/login", h.login)
+	h.mux.HandleFunc("POST /api/v1/setup", h.login)
+	h.mux.HandleFunc("GET /api/v1/setup", func(w http.ResponseWriter, r *http.Request) {
+		exists, err := s.hasAdmin(r.Context())
+		if err != nil {
+			httpError(w, err)
+			return
+		}
+		writeJSON(w, map[string]bool{"required": !exists})
+	})
 	h.mux.HandleFunc("POST /api/v1/logout", func(w http.ResponseWriter, r *http.Request) {
 		cookie, _ := r.Cookie(sessionCookie)
 		if _, err := s.db.ExecContext(r.Context(), "DELETE FROM sessions WHERE token_hash=?", tokenHash(cookie.Value)); err != nil {
@@ -172,7 +182,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.clusterMux.ServeHTTP(w, r)
 		return
 	}
-	if r.URL.Path != "/api/v1/login" {
+	if r.URL.Path != "/api/v1/login" && r.URL.Path != "/api/v1/setup" {
 		cookie, err := r.Cookie(sessionCookie)
 		if err != nil {
 			httpError(w, ErrUnauthorized)
@@ -193,6 +203,24 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *httpHandler) login(w http.ResponseWriter, r *http.Request) {
+	initial := r.URL.Path == "/api/v1/setup"
+	if initial {
+		exists, err := h.store.hasAdmin(r.Context())
+		if err != nil {
+			httpError(w, err)
+			return
+		}
+		if exists {
+			httpError(w, ErrConflict)
+			return
+		}
+		origin := r.Header.Get("Origin")
+		mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if (origin != "https://"+r.Host && origin != "http://"+r.Host) || err != nil || mediaType != "application/json" {
+			httpError(w, ErrForbidden)
+			return
+		}
+	}
 	ip, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		ip = r.RemoteAddr
@@ -220,6 +248,12 @@ func (h *httpHandler) login(w http.ResponseWriter, r *http.Request) {
 	}
 	if !decodeRequest(w, r, &body) {
 		return
+	}
+	if initial {
+		if _, err := h.store.InitializeAdmin(r.Context(), body.Username, body.Password); err != nil {
+			httpError(w, err)
+			return
+		}
 	}
 	token, csrf, err := h.store.login(r.Context(), body.Username, body.Password)
 	if err != nil {

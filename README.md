@@ -39,14 +39,16 @@ docker compose -f docker-compose.example.yaml up -d
 
 [config.example.yaml](config.example.yaml) enables the controller, using `/data/controller.sqlite`, `/data/controller.key` and `/data/node`. The image runs as UID/GID 10001, with a read-only root filesystem and a private `/run/uniderp` tmpfs. Keep `/data` writable by that UID; mount the whole directory so keys, SQLite WAL files and node state persist together. Admin and health listeners remain local.
 
-Create a temporary `/data/admin-password` file containing a 12–72 byte password, readable only by UID 10001. Write it with a protected editor or secret provisioning tool; keep its contents out of command arguments and logs. Initialize the administrator, then delete the temporary file:
+Open `https://YOUR-CONTROLLER-DOMAIN/manage/`. When no administrator is configured, the page asks you to choose the first administrator's username, password (12–72 bytes) and password confirmation, then signs you in. Later visits use the normal login page.
+
+For automated deployment, create a temporary `/data/admin-password` file containing a 12–72 byte password, readable only by UID 10001. Write it with a protected editor or secret provisioning tool; keep its contents out of command arguments and logs. Initialize through the local admin socket, then delete the temporary file:
 
 ```sh
 docker exec uniderp uniderp controller init \
   --username admin --password-file /data/admin-password
 ```
 
-Open `https://YOUR-CONTROLLER-DOMAIN/manage/`. The administrator creates member accounts and configures identity/control retention under Settings. Platform passwords are separate from tailnet credentials; a tailnet API failure does not prevent platform login.
+The administrator creates member accounts and configures identity/control retention under Settings. Platform passwords are separate from tailnet credentials; a tailnet API failure does not prevent platform login.
 
 ### TLS and proxy
 

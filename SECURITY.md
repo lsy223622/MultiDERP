@@ -16,6 +16,8 @@ Configure a dedicated OAuth client with `devices:core:read` only. UniDERP reques
 
 Platform passwords are independent of OAuth and stored as password hashes. Sessions use protected cookies, and account mutations require CSRF validation and server-side authorization. Member nodes use their persistent Ed25519 identity and scoped node sessions; a node session cannot call platform account APIs. Enrollment codes are single-use, time-limited and bound to a resource, private-key proof and verified HTTPS domain.
 
+First-run web setup accepts same-origin JSON requests while no administrator exists, and creates only the first administrator. An existing administrator, including a disabled one, closes setup; administrator recovery remains a local admin-socket operation.
+
 Keep admin sockets, management backends, health listeners and data directories private. The external HTTP backend must only be reachable by the TLS proxy. Public TLS certificates must validate normally. Domain probes reject redirects and unsafe destinations unless explicitly allowed by controller deployment configuration. STUN is public discovery infrastructure and is separate from DERP admission.
 
 ## Authorization and time
