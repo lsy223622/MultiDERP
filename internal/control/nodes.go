@@ -169,7 +169,9 @@ func (s *Store) IssueEnrollment(ctx context.Context, actor Actor, id string) (En
 		return Enrollment{}, err
 	}
 	if n.State != "pending" {
-		return Enrollment{}, ErrConflict
+		if err := s.releaseNode(ctx, tx, id); err != nil {
+			return Enrollment{}, err
+		}
 	}
 	e, err := s.issueEnrollment(ctx, tx, n)
 	if err != nil {
@@ -178,7 +180,11 @@ func (s *Store) IssueEnrollment(ctx context.Context, actor Actor, id string) (En
 	if err := writeAudit(ctx, tx, actor.ID, n.OwnerID, "node", id, "enrollment.issue"); err != nil {
 		return Enrollment{}, err
 	}
-	return e, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return Enrollment{}, err
+	}
+	s.closeNodeStream(id)
+	return e, nil
 }
 
 func validNodeInstance(instance string) bool {
@@ -219,7 +225,7 @@ func (s *Store) EnrollmentChallenge(ctx context.Context, code string, pub []byte
 	}
 	defer tx.Rollback()
 	var id, domain string
-	if err := tx.QueryRowContext(ctx, `SELECT n.id,n.domain FROM enrollments e JOIN nodes n ON n.id=e.node_id JOIN users u ON u.id=n.owner_id WHERE e.owner_id=n.owner_id AND e.code_hash=? AND e.expires_at>? AND e.consumed_at=0 AND n.state='pending' AND u.enabled=1`, tokenHash(code), s.now().Unix()).Scan(&id, &domain); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT n.id,n.domain FROM enrollments e JOIN nodes n ON n.id=e.node_id JOIN users u ON u.id=n.owner_id WHERE e.owner_id=n.owner_id AND e.code_hash=? AND e.expires_at>? AND e.consumed_at=0 AND n.state='pending' AND (n.public_key IS NULL OR n.public_key=?) AND u.enabled=1`, tokenHash(code), s.now().Unix(), pub).Scan(&id, &domain); err != nil {
 		return cluster.NodeChallenge{}, ErrUnauthorized
 	}
 	c, err := s.newNodeChallenge(ctx, tx, "enroll", id, domain, pub, instance)
@@ -319,13 +325,13 @@ func (s *Store) EnrollNode(ctx context.Context, req cluster.EnrollmentRequest) (
 		return cluster.NodeSession{}, err
 	}
 	var owner string
-	if err := tx.QueryRowContext(ctx, "SELECT owner_id FROM nodes WHERE id=? AND domain=? AND state='pending' AND public_key IS NULL", req.Challenge.NodeID, req.Challenge.Domain).Scan(&owner); err != nil {
+	if err := tx.QueryRowContext(ctx, "SELECT owner_id FROM nodes WHERE id=? AND domain=? AND state='pending' AND (public_key IS NULL OR public_key=?)", req.Challenge.NodeID, req.Challenge.Domain, req.Challenge.PublicKey).Scan(&owner); err != nil {
 		return cluster.NodeSession{}, ErrUnauthorized
 	}
 	if _, err := tx.ExecContext(ctx, "UPDATE nodes SET public_key=?,instance_id=?,state='registered',lease_until=?,domain_verified_at=? WHERE id=?", req.Challenge.PublicKey, req.Challenge.InstanceID, s.now().Add(90*time.Second).Unix(), s.now().Unix(), req.Challenge.NodeID); err != nil {
 		return cluster.NodeSession{}, err
 	}
-	if _, err := tx.ExecContext(ctx, "INSERT INTO node_policies(node_id) VALUES(?)", req.Challenge.NodeID); err != nil {
+	if _, err := tx.ExecContext(ctx, "INSERT INTO node_policies(node_id) VALUES(?) ON CONFLICT(node_id) DO NOTHING", req.Challenge.NodeID); err != nil {
 		return cluster.NodeSession{}, err
 	}
 	if _, err := s.buildPolicy(ctx, tx, req.Challenge.NodeID, s.now()); err != nil {

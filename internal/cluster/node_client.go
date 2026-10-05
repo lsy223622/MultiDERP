@@ -81,12 +81,10 @@ func (c *EnrollmentClient) PolicyBinding() (clusterID, nodeID string) {
 }
 
 func NewEnrollmentClient(controllerURL, stateDir string) (*EnrollmentClient, error) {
-	u, err := url.Parse(controllerURL)
-	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" || stateDir == "" {
+	controllerURL, err := controllerOrigin(controllerURL)
+	if err != nil || stateDir == "" {
 		return nil, errors.New("controller must be an HTTPS origin")
 	}
-	u.Path = ""
-	controllerURL = u.String()
 	keyPath := filepath.Join(stateDir, "node.key")
 	if _, err := os.Stat(filepath.Join(stateDir, "registration.json")); err == nil {
 		if _, err := os.Stat(keyPath); err != nil {
@@ -106,13 +104,67 @@ func NewEnrollmentClient(controllerURL, stateDir string) (*EnrollmentClient, err
 	c := &EnrollmentClient{privateKey: key, instanceID: hex.EncodeToString(id[:]), statePath: filepath.Join(stateDir, "registration.json"), state: nodeRegistration{ControllerURL: controllerURL}, responder: NewDomainResponder(key), httpClient: &http.Client{Transport: transport, Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 	b, err := os.ReadFile(c.statePath)
 	if err == nil {
-		if len(b) > 64<<10 || decodeNodeJSON(b, &c.state) != nil || c.state.ControllerURL != controllerURL {
+		if len(b) > 64<<10 || decodeNodeJSON(b, &c.state) != nil || (c.state.ControllerURL != controllerURL && (c.state.Session.NodeID != "" || c.state.Pending != nil)) {
 			return nil, errors.New("invalid or differently bound node registration")
 		}
+		c.state.ControllerURL = controllerURL
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
 	return c, nil
+}
+
+func controllerOrigin(value string) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+	u, err := url.Parse(value)
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" {
+		return "", errors.New("controller must be an HTTPS origin")
+	}
+	u.Path = ""
+	return u.String(), nil
+}
+
+func (c *EnrollmentClient) SetControllerURL(value string) error {
+	value, err := controllerOrigin(value)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.state.Session.NodeID != "" || c.state.Pending != nil {
+		return errors.New("node is already bound to a controller")
+	}
+	previous := c.state
+	c.state.ControllerURL = value
+	if err := c.saveRegistration(); err != nil {
+		c.state = previous
+		return err
+	}
+	return nil
+}
+
+func (c *EnrollmentClient) ClearRegistration() (NodeSession, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	previous := c.state
+	c.state = nodeRegistration{ControllerURL: previous.ControllerURL}
+	if err := c.saveRegistration(); err != nil {
+		c.state = previous
+		return NodeSession{}, err
+	}
+	c.controlStatus = ControlStatus{}
+	return previous.Session, nil
+}
+
+func (c *EnrollmentClient) Release(ctx context.Context, previous NodeSession) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var result struct {
+		OK bool `json:"ok"`
+	}
+	return c.post(ctx, "/cluster/v1/node/leave", struct{}{}, &result, previous.Token)
 }
 
 func decodeNodeJSON(b []byte, dst any) error {

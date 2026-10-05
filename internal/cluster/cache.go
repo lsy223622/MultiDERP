@@ -15,6 +15,27 @@ import (
 
 var cacheMu sync.Mutex
 
+func RemoveCache(path string) error {
+	cacheMu.Lock()
+	defer cacheMu.Unlock()
+	if path == "" {
+		return errors.New("invalid cache location")
+	}
+	var result error
+	for _, p := range []string{path, path + ".watermark"} {
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			result = errors.Join(result, err)
+		}
+	}
+	if result != nil {
+		return result
+	}
+	if _, err := os.Stat(filepath.Dir(path)); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return syncCacheDirectory(filepath.Dir(path))
+}
+
 type cacheWatermark struct {
 	ClusterID  string    `json:"cluster_id"`
 	NodeID     string    `json:"node_id"`
