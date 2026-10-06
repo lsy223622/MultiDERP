@@ -20,7 +20,29 @@ function select(form,name,label,items) { const l=el('label',label);const input=e
 function form(parent,submit,run) { const f=el('form');parent.append(f);const b=el('button',submit);b.type='submit';f.addEventListener('submit',async e=>{e.preventDefault();b.disabled=true;try{const after=await run(new FormData(f),f);notice('操作已保存。');await render();if(typeof after==='function')after();}catch(err){notice(err.message,true);}finally{b.disabled=false;}});f.submitButton=b;return f; }
 function done(f){f.append(f.submitButton);return f;}
 function table(parent,head,rows) { const wrap=el('div',undefined,'table-wrap'),t=el('table'),tr=el('tr');for(const text of head)tr.append(el('th',text));const h=el('thead');h.append(tr);t.append(h);const body=el('tbody');for(const row of rows){const r=el('tr');for(const value of row){const c=el('td');c.append(value instanceof Node?value:el('span',value));r.append(c);}body.append(r);}t.append(body);wrap.append(t);parent.append(wrap);if(!rows.length)parent.append(el('p','暂无记录。','muted')); }
-function more(...items){const d=el('details',undefined,'more-menu');d.append(el('summary','更多'));const menu=el('div',undefined,'more-options');menu.append(...items);menu.addEventListener('click',e=>{if(e.target.closest('button'))d.open=false;});d.append(menu);return d;}
+let menuSequence=0;
+function configureMenu(trigger,menu){
+ trigger.setAttribute('aria-haspopup','menu');trigger.setAttribute('aria-expanded','false');menu.setAttribute('role','menu');
+ menu.querySelectorAll('button,a').forEach(item=>item.setAttribute('role','menuitem'));
+ menu.addEventListener('toggle',e=>{
+  const open=e.newState==='open';trigger.setAttribute('aria-expanded',String(open));if(!open)return;
+  const rect=trigger.getBoundingClientRect(),width=menu.offsetWidth,height=menu.offsetHeight;
+  const above=rect.bottom+height+4>innerHeight;
+  menu.style.left=Math.max(8,Math.min(rect.right-width,innerWidth-width-8))+'px';
+  menu.style.top=Math.max(8,above?rect.top-height-4:rect.bottom+4)+'px';
+  menu.style.transformOrigin=above?'bottom right':'top right';
+  menu.querySelector('button,a')?.focus();
+ });
+ menu.addEventListener('click',e=>{if(e.target.closest('button,a'))menu.hidePopover();});
+ menu.addEventListener('keydown',e=>{
+  const items=[...menu.querySelectorAll('button:not(:disabled),a')];let index=items.indexOf(document.activeElement);
+  if(e.key==='ArrowDown')index=(index+1)%items.length;
+  else if(e.key==='ArrowUp')index=(index-1+items.length)%items.length;
+  else if(e.key==='Home')index=0;else if(e.key==='End')index=items.length-1;else return;
+  e.preventDefault();items[index]?.focus();
+ });
+}
+function more(...items){const wrap=el('span'),trigger=el('button',undefined,'more-menu'),menu=el('div',undefined,'more-options');trigger.type='button';trigger.setAttribute('aria-label','更多操作');trigger.innerHTML='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h.01M12 12h.01M19 12h.01"/></svg>';menu.id='action-menu-'+(++menuSequence);menu.setAttribute('popover','auto');trigger.setAttribute('popovertarget',menu.id);menu.append(...items);configureMenu(trigger,menu);wrap.append(trigger,menu);return wrap;}
 function actions(...items){const r=el('div',undefined,'row');r.append(...items);return r;}
 function time(value){if(!value||value==='0001-01-01T00:00:00Z')return '尚无观测';return new Date(typeof value==='number'?value*1000:value).toLocaleString();}
 function status(value){const names={pending:'待注册',domain_pending:'等待新域名验证',registered:'已注册',ready:'已报告可用',offline:'离线',identity_conflict:'身份冲突',requested:'待提供者批准',owner_approved:'待申请方确认',active:'活跃',revoked:'已撤销',left:'已退出',rejected:'已拒绝',cancelled:'已取消',expired:'已到期',valid:'正常',invalid:'凭据异常',missing:'未配置',paused:'已暂停',unavailable:'身份源暂不可用'};return el('span',names[value]||value||'尚无状态','badge '+(['ready','active','valid'].includes(value)?'good':['identity_conflict','invalid','revoked'].includes(value)?'bad':'warn'));}
@@ -234,16 +256,18 @@ async function render(){
   if(actor.role==='admin')allowed.push('member','local','users','settings','events');
  }
  if(!allowed.includes(name))name=allowed[0];
- document.querySelectorAll('nav a').forEach(a=>{a.hidden=!allowed.includes(a.hash.slice(1));if(a.hash==='#nodes')a.textContent=actor.role==='admin'?'节点管理':'我的节点';a.setAttribute('aria-current',a.hash==='#'+name?'page':'false');});
- document.querySelectorAll('[data-nav-group]').forEach(group=>{group.hidden=!Array.from(group.querySelectorAll('a')).some(a=>!a.hidden);if(group.querySelector('a[aria-current="page"]'))group.open=true;});
+ $('content').classList.toggle('wide',['tailnets','nodes','directory','grants','requests','users','events'].includes(name));
+ document.querySelectorAll('.navigation-links a').forEach(a=>{a.hidden=!allowed.includes(a.hash.slice(1));if(a.hash==='#nodes')a.textContent=actor.role==='admin'?'节点管理':'我的节点';a.setAttribute('aria-current',a.hash==='#'+name?'page':'false');});
+ document.querySelectorAll('[data-nav-group]').forEach(group=>{group.hidden=!Array.from(group.querySelectorAll('a')).some(a=>!a.hidden);const active=group.querySelector('a[aria-current="page"]'),marker=group.querySelector('.nav-marker');marker.hidden=!active;if(active){group.open=true;marker.style.transform='translateY('+(active.offsetTop+8)+'px)';}});
  document.body.classList.remove('nav-open');$('nav-toggle').setAttribute('aria-expanded','false');
  try{await views[name]();}catch(e){notice(e.message,true);if(e.status===401)await session();}
 }
-async function session(){try{const result=await api('/session');actor=result.actor;csrf=result.csrf_token;serverRole=result.server_role;}catch(e){actor=csrf=serverRole=undefined;}const logged=!!actor;let needsSetup=false;if(!logged){try{needsSetup=(await api('/setup')).required;}catch(e){notice(e.message,true);}}$('setup').hidden=logged||!needsSetup;$('login').hidden=logged||needsSetup;$('workspace').hidden=!logged;$('account').hidden=!logged;if(!logged)$('content').replaceChildren();if(logged){$('account-name').textContent=actor.username;$('account-role').textContent=actor.role==='admin'&&serverRole!=='controller'?'节点管理员':roleNames[actor.role];await render();}}
+async function session(){try{const result=await api('/session');actor=result.actor;csrf=result.csrf_token;serverRole=result.server_role;}catch(e){actor=csrf=serverRole=undefined;}const logged=!!actor;let needsSetup=false;if(!logged){try{needsSetup=(await api('/setup')).required;}catch(e){notice(e.message,true);}}document.body.classList.toggle('logged-in',logged);$('setup').hidden=logged||!needsSetup;$('login').hidden=logged||needsSetup;$('workspace').hidden=!logged;$('account').hidden=!logged;if(!logged)$('content').replaceChildren();if(logged){$('account-avatar').textContent=actor.username.slice(0,2).toUpperCase();$('account-name').textContent=actor.username;$('account-role').textContent=actor.role==='admin'&&serverRole!=='controller'?'节点管理员':roleNames[actor.role];await render();}}
 $('setup-form').addEventListener('submit',async e=>{e.preventDefault();const f=e.currentTarget;const data=new FormData(f);const body={username:data.get('username'),password:data.get('password')};if(body.password!==data.get('password_confirm')){notice('两次输入的密码不一致',true);return;}f.elements.password.value=f.elements.password_confirm.value='';const b=f.querySelector('button');b.disabled=true;try{await api('/setup','POST',body);await session();}catch(err){notice(err.message,true);if(err.status===409)await session();}finally{b.disabled=false;}});
 $('login-form').addEventListener('submit',async e=>{e.preventDefault();const f=e.currentTarget;const data=new FormData(f);const body={username:data.get('username'),password:data.get('password')};f.elements.password.value='';const b=f.querySelector('button');b.disabled=true;try{await api('/login','POST',body);await session();}catch(err){notice(err.message,true);}finally{b.disabled=false;}});
 $('logout').addEventListener('click',async()=>{try{await api('/logout','POST',{});actor=csrf=undefined;$('content').replaceChildren();await session();}catch(e){notice(e.message,true);}});
 $('nav-toggle').addEventListener('click',()=>{const expanded=document.body.classList.toggle('nav-open');$('nav-toggle').setAttribute('aria-expanded',String(expanded));});
-document.addEventListener('click',e=>{document.querySelectorAll('.more-menu[open]').forEach(menu=>{if(!menu.contains(e.target))menu.open=false;});});
+configureMenu($('account-toggle'),$('account-menu'));
+document.addEventListener('click',e=>{if(document.body.classList.contains('nav-open')&&!e.target.closest('#navigation,#nav-toggle')){document.body.classList.remove('nav-open');$('nav-toggle').setAttribute('aria-expanded','false');}});
 window.addEventListener('hashchange',render);
 session();

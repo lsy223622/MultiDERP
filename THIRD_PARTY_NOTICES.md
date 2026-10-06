@@ -20,4 +20,9 @@ The license and patent files above are preserved verbatim from that
 upstream module and are included in the runtime image under
 `/usr/share/licenses/uniderp/`.
 
+The management UI bundles the Inter font by The Inter Project Authors under
+the SIL Open Font License 1.1. Source: <https://github.com/rsms/inter>.
+The license is included in [licenses/Inter-LICENSE.txt](licenses/Inter-LICENSE.txt)
+and in the runtime image under `/usr/share/licenses/uniderp/licenses/`.
+
 The rest of this repository is covered by the project license in `LICENSE`.

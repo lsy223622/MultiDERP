@@ -58,3 +58,22 @@ func TestManagementRolesUseSharedShellAndLocalAuthority(t *testing.T) {
 		}
 	}
 }
+
+func TestManagementFontAsset(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(method, "/manage/fonts/InterVariable.woff2", nil)
+		if !serveManagement(w, r) || w.Code != http.StatusOK {
+			t.Fatalf("%s font: handled status %d", method, w.Code)
+		}
+		if got := w.Header().Get("Content-Type"); got != "font/woff2" {
+			t.Fatalf("font content type: %q", got)
+		}
+		if method == http.MethodGet && (w.Body.Len() < 4 || string(w.Body.Bytes()[:4]) != "wOF2") {
+			t.Fatal("font response is not WOFF2")
+		}
+		if method == http.MethodHead && w.Body.Len() != 0 {
+			t.Fatal("HEAD font response has a body")
+		}
+	}
+}
