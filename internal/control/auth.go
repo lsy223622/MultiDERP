@@ -84,10 +84,63 @@ func (s *Store) hasAdmin(ctx context.Context) (bool, error) {
 }
 
 func (s *Store) CreateMember(ctx context.Context, actor Actor, username, password string) (Actor, error) {
+	return s.CreateUser(ctx, actor, username, password, "member")
+}
+
+func (s *Store) CreateUser(ctx context.Context, actor Actor, username, password, role string) (Actor, error) {
 	if !actor.Enabled || actor.Role != "admin" {
 		return Actor{}, ErrForbidden
 	}
-	return s.createUser(ctx, actor, username, password, "member", false)
+	if role != "provider" && role != "member" {
+		return Actor{}, ErrInvalid
+	}
+	return s.createUser(ctx, actor, username, password, role, false)
+}
+
+func (s *Store) SetUserRole(ctx context.Context, actor Actor, userID, role string) error {
+	if !actor.Enabled || actor.Role != "admin" {
+		return ErrForbidden
+	}
+	if role != "provider" && role != "member" {
+		return ErrInvalid
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := activeActor(ctx, tx, actor); err != nil {
+		return err
+	}
+	var current string
+	if err := tx.QueryRowContext(ctx, "SELECT role FROM users WHERE id=?", userID).Scan(&current); err != nil {
+		return err
+	}
+	if current == "admin" {
+		return ErrForbidden
+	}
+	if current == role {
+		return nil
+	}
+	if role == "member" {
+		var ownsNodes bool
+		if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM nodes WHERE owner_id=?)", userID).Scan(&ownsNodes); err != nil {
+			return err
+		}
+		if ownsNodes {
+			return ErrConflict
+		}
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE users SET role=?,session_version=session_version+1 WHERE id=?", role, userID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM sessions WHERE user_id=?", userID); err != nil {
+		return err
+	}
+	if err := writeAudit(ctx, tx, actor.ID, userID, "user", userID, "user.role"); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) createUser(ctx context.Context, actor Actor, username, password, role string, initial bool) (Actor, error) {

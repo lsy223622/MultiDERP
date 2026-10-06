@@ -45,10 +45,9 @@ func TestGrantRequiresOwnerApprovalAndApplicantConfirmation(t *testing.T) {
 		t.Fatal(g, err)
 	}
 	assertKeys(0)
-	// A provider who is an ordinary member cannot confirm for the applicant.
 	ordinaryProvider := provider
-	ordinaryProvider.Role = "member"
-	if _, err := s.db.Exec("UPDATE users SET role='member' WHERE id=?", provider.ID); err != nil {
+	ordinaryProvider.Role = "provider"
+	if _, err := s.db.Exec("UPDATE users SET role='provider' WHERE id=?", provider.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.ApplyGrantAction(t.Context(), ordinaryProvider, g.ID, g.Revision, GrantConfirm); !errors.Is(err, ErrForbidden) {

@@ -99,7 +99,9 @@ func TestVersionFiveNodesMigrateDefaultPublicPorts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = db.Exec(`CREATE TABLE nodes(id TEXT PRIMARY KEY,owner_id TEXT,domain TEXT,display_name TEXT,region_id INTEGER,state TEXT,last_heartbeat INTEGER,last_error TEXT,enabled INTEGER);
+	_, err = db.Exec(`CREATE TABLE users(id TEXT PRIMARY KEY,username TEXT NOT NULL UNIQUE COLLATE NOCASE,role TEXT NOT NULL CHECK(role IN ('admin','member')),enabled INTEGER NOT NULL,password_hash BLOB NOT NULL,session_version INTEGER NOT NULL DEFAULT 1);
+INSERT INTO users VALUES('owner','owner','member',1,'hash',1);
+CREATE TABLE nodes(id TEXT PRIMARY KEY,owner_id TEXT,domain TEXT,display_name TEXT,region_id INTEGER,state TEXT,last_heartbeat INTEGER,last_error TEXT,enabled INTEGER);
 INSERT INTO nodes VALUES('node','owner','relay.example.com','Relay',902,'registered',123,'',1);
 PRAGMA user_version=5;`)
 	db.Close()
@@ -111,7 +113,7 @@ PRAGMA user_version=5;`)
 		t.Fatal(err)
 	}
 	defer s.Close()
-	n, err := s.Node(t.Context(), Actor{ID: "owner", Role: "member", Enabled: true}, "node")
+	n, err := s.Node(t.Context(), Actor{ID: "owner", Role: "provider", Enabled: true}, "node")
 	if err != nil {
 		t.Fatal(err)
 	}

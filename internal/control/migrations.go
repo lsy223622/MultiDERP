@@ -2,17 +2,26 @@ package control
 
 import "fmt"
 
-func (s *Store) migrate() error {
+func (s *Store) migrate() (err error) {
 	var version int
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version == 6 {
+	if version == 7 {
 		return nil
 	}
-	if version < 0 || version > 6 {
+	if version < 0 || version > 7 {
 		return fmt.Errorf("unsupported controller database version %d", version)
 	}
+	if _, err := s.db.Exec("PRAGMA foreign_keys=OFF"); err != nil {
+		return err
+	}
+	defer func() {
+		_, restoreErr := s.db.Exec("PRAGMA foreign_keys=ON")
+		if err == nil {
+			err = restoreErr
+		}
+	}()
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -27,7 +36,7 @@ func (s *Store) migrate() error {
 		_, err = tx.Exec(`
 CREATE TABLE users (
  id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE,
- role TEXT NOT NULL CHECK(role IN ('admin','member')), enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
+ role TEXT NOT NULL CHECK(role IN ('admin','provider','member')), enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
  password_hash BLOB NOT NULL, session_version INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE sessions (
@@ -129,9 +138,39 @@ CREATE TABLE node_observations (
 			return err
 		}
 	}
-	if _, err := tx.Exec(`ALTER TABLE nodes ADD COLUMN derp_port INTEGER NOT NULL DEFAULT 443 CHECK(derp_port BETWEEN 1 AND 65535);
+	if version < 6 {
+		if _, err := tx.Exec(`ALTER TABLE nodes ADD COLUMN derp_port INTEGER NOT NULL DEFAULT 443 CHECK(derp_port BETWEEN 1 AND 65535);
 ALTER TABLE nodes ADD COLUMN stun_port INTEGER NOT NULL DEFAULT 3478 CHECK(stun_port BETWEEN 1 AND 65535);
 PRAGMA user_version=6;`); err != nil {
+			return err
+		}
+	}
+	if version > 0 {
+		if _, err := tx.Exec(`CREATE TABLE users_new (
+ id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+ role TEXT NOT NULL CHECK(role IN ('admin','provider','member')), enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
+ password_hash BLOB NOT NULL, session_version INTEGER NOT NULL DEFAULT 1
+);
+INSERT INTO users_new SELECT id,username,CASE WHEN role='member' AND EXISTS(SELECT 1 FROM nodes WHERE owner_id=users.id) THEN 'provider' ELSE role END,enabled,password_hash,session_version FROM users;
+DROP TABLE users;
+ALTER TABLE users_new RENAME TO users;`); err != nil {
+			return err
+		}
+	}
+	rows, err := tx.Query("PRAGMA foreign_key_check")
+	if err != nil {
+		return err
+	}
+	broken := rows.Next()
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	if broken {
+		return fmt.Errorf("controller migration has invalid resource ownership")
+	}
+	if _, err := tx.Exec("PRAGMA user_version=7"); err != nil {
 		return err
 	}
 	return tx.Commit()

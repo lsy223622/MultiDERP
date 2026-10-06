@@ -84,16 +84,37 @@ func newHTTPHandler(s *Store) *httpHandler {
 		var body struct {
 			Username string `json:"username"`
 			Password string `json:"password"`
+			Role     string `json:"role"`
 		}
 		if !decodeRequest(w, r, &body) {
 			return
 		}
-		user, err := s.CreateMember(r.Context(), actor, body.Username, body.Password)
+		if body.Role == "" {
+			body.Role = "member"
+		}
+		user, err := s.CreateUser(r.Context(), actor, body.Username, body.Password, body.Role)
 		if err != nil {
 			httpError(w, err)
 			return
 		}
 		writeJSON(w, user)
+	})
+	h.mux.HandleFunc("POST /api/v1/users/{id}/role", func(w http.ResponseWriter, r *http.Request) {
+		if h.actor(r).Role != "admin" {
+			httpError(w, ErrForbidden)
+			return
+		}
+		var body struct {
+			Role string `json:"role"`
+		}
+		if !decodeRequest(w, r, &body) {
+			return
+		}
+		if err := s.SetUserRole(r.Context(), h.actor(r), r.PathValue("id"), body.Role); err != nil {
+			httpError(w, err)
+			return
+		}
+		writeJSON(w, map[string]bool{"ok": true})
 	})
 	h.mux.HandleFunc("GET /api/v1/users", func(w http.ResponseWriter, r *http.Request) {
 		actor := h.actor(r)

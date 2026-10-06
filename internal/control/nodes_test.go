@@ -16,6 +16,10 @@ import (
 func nodeTestStore(t *testing.T) (*Store, Actor, Actor) {
 	t.Helper()
 	s, _, admin, member := accountTestServer(t)
+	if err := s.SetUserRole(t.Context(), admin, member.ID, "provider"); err != nil {
+		t.Fatal(err)
+	}
+	member.Role = "provider"
 	if err := s.EnableIdentity(filepath.Join(t.TempDir(), "controller.key")); err != nil {
 		t.Fatal(err)
 	}

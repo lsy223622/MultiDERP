@@ -38,9 +38,9 @@ docker compose -f docker-compose.example.yaml up -d
 
 打开 `https://你的主控域名/manage/`。尚未配置管理员时，页面会让你设置首个管理员的用户名、密码（12–72 字节）及确认密码，提交后自动登录。之后访问显示正常登录页。
 
-空数据目录会自动生成首次设置配置，先开放管理服务，再由网页选择“配置为主控”或“加入已有集群”。填写本机域名、实际监听地址、公开端口和 TLS 模式，保存并应用；成员在“集群连接”页输入主控 HTTPS 地址和一次性注册码。主控管理员可在“我的服务器”页注册本机中继，仍需真实私钥和 HTTPS 域名证明，注册本身不会自动授予设备访问许可。预先配置的 YAML 按原角色启动。
+空数据目录会自动生成首次设置配置，先开放管理服务，再由网页选择“配置为主控”或“加入已有集群”。填写本机域名、实际监听地址、公开端口和 TLS 模式，保存并应用；DERP 节点在“本机节点”页输入主控 HTTPS 地址和一次性注册码。主控管理员可在“本机节点”页注册内置 DERP 节点，仍需真实私钥和 HTTPS 域名证明，注册本身不会自动授予设备访问许可。预先配置的 YAML 按原角色启动。
 
-“本机设置”由该服务器自己的管理员操作：保存会持久化配置，应用会重启本机中继，管理服务和账号保持可用。成员与主控失联时仍能登录和退出；退出立即关闭本机中继连接、清除注册和许可缓存，保留节点私钥和本地限速。在线退出同时撤销主控上的旧授权；重新加入需新注册码、原私钥和新的共享同意。共享授权、主控总预算、owner/shared 权重和 Tailnet 规则在主控面板配置。本地总限速独立保存，RX/TX 各取它与主控预算中的较小值；0 表示不另设本地上限。高于本地限制的策略正常应用，不覆写本地配置或改写原始策略缓存；页面分别显示已接收预算与实际调度预算。
+“本机设置”由该主控或 DERP 节点自己的管理员操作：保存会持久化配置，应用会重启本机中继，管理服务和账号保持可用。成员与主控失联时仍能登录和退出；退出立即关闭本机中继连接、清除注册和许可缓存，保留节点私钥和本地限速。在线退出同时撤销主控上的旧授权；重新加入需新注册码、原私钥和新的共享同意。共享授权、主控总预算、owner/shared 权重和 Tailnet 规则在主控面板配置。本地总限速独立保存，RX/TX 各取它与主控预算中的较小值；0 表示不另设本地上限。高于本地限制的策略正常应用，不覆写本地配置或改写原始策略缓存；页面分别显示已接收预算与实际调度预算。
 
 自动化部署也可以通过本地 admin socket 初始化：用受保护的编辑器或 secret 工具创建 `/data/admin-password`，写入 12–72 字节密码，仅允许 UID 10001 读取。不要把内容写进命令参数或日志。初始化后删除临时文件：
 
@@ -49,7 +49,7 @@ docker exec uniderp uniderp controller init \
   --username admin --password-file /data/admin-password
 ```
 
-管理员创建成员账号，并在设置页调整身份保留期和控制保留期。平台密码与尾网凭据独立；尾网 API 故障不会阻止平台登录。
+管理导航分为主控、节点、Tailnet、账号四组，按部署角色和账号权限显示页面，空分组隐藏。主控管理员管理集群、账号及主控内置节点；节点提供者管理自己的节点与 Tailnet；成员管理自己的 Tailnet 和节点使用授权。独立 DERP 节点的管理员只管理本机。主控管理员在账号管理选择节点提供者或成员，角色变更使旧会话失效；仍拥有节点的账号不能降级为成员。升级时已有节点的普通账号自动归为节点提供者，保留资源、密码和会话。平台密码与 Tailnet 凭据独立；Tailnet API 故障不会阻止平台登录。
 
 ### TLS 与代理
 
@@ -138,7 +138,7 @@ CA bundle 路径必须存在于代理所在的容器或主机。Nginx 默认不�
 
 在成员主机将 [config.node.example.yaml](config.node.example.yaml) 复制到 `node-data/config.yaml`，设置 `node.controller_url` 为主控 HTTPS origin，`server.hostname` 为成员自己的公网域名。按主控相同方式设置 `node-data` 的 UID 10001 和严格权限，启动 [docker-compose.node.example.yaml](docker-compose.node.example.yaml)。配置成员 TLS/代理和 STUN。各 Compose 示例用于各自的主机；同机部署时自行调整端口。
 
-提供者在“我的服务器”中为准确域名创建资源，取得有效 30 分钟的一次性注册码。在成员主机写入受保护的 `/data/enrollment-code`：
+节点提供者在“我的节点”中为准确域名创建资源，取得有效 30 分钟的一次性注册码。在成员主机写入受保护的 `/data/enrollment-code`：
 
 ```sh
 docker exec uniderp-node uniderp node enroll \
@@ -150,7 +150,7 @@ docker exec uniderp-node uniderp node enroll \
 ## 绑定尾网与共享授权
 
 1. 在“我的 Tailnet”输入 Tailscale General 设置中的规范 `T...` Tailnet ID，以及只配置 `devices:core:read` 的 OAuth client secret。UniDERP 从 secret 自动提取 client ID，请求该只读 scope 并同步设备公钥。成功读取不能证明原始 OAuth client 没有其他权限，所有者需检查原始配置。参见 [Tailscale OAuth clients](https://tailscale.com/docs/features/oauth-clients) 和 [trust credential scopes](https://tailscale.com/docs/reference/trust-credentials)。
-2. 在服务器目录为自己的 tailnet 申请使用中继。提供者批准后，申请人还需确认生效；未确认不能放行设备。提供者自己的尾网直接生效。
+2. 在“节点列表”为自己的 Tailnet 申请使用 DERP 节点。提供者在“收到的使用申请”批准后，申请人在“节点使用授权”确认生效；未确认不能放行设备。自己的 Tailnet 使用自己的节点直接生效。
 3. 导出该尾网 DERP map，将 `Regions` 合并到现有 Tailscale policy 的 `derpMap.Regions`。保留原有 ACL/grants、其他区域和默认 DERP 设置，并检查 900–999 的区域 ID 是否冲突。UniDERP 不自动修改 policy 或分发客户端配置。参见 [自定义 DERP 服务器](https://tailscale.com/docs/reference/derp-servers)。
 
 map 公布仍有效的授权资源，使用各资源保存的公开 DERP TCP 和 STUN UDP 端口，默认分别为 443 和 3478。发现与授权分开：旧 map 条目不会赋予设备公钥权限。标准协议面向原版客户端，但本地 DERP library 测试不能替代真实尾网中的原版应用验证。

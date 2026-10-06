@@ -8,19 +8,22 @@
 <script src="/manage/app.js" defer></script>
 </head>
 <body>
-<header><a class="brand" href="/manage/">UniDERP<span>共享中继管理</span></a><div id="account" hidden><span id="account-name"></span><button id="logout" class="quiet" type="button">退出</button></div></header>
+<header><div class="header-brand"><button id="nav-toggle" class="quiet" type="button" aria-label="展开导航" aria-controls="navigation" aria-expanded="false">☰</button><a class="brand" href="/manage/">UniDERP<span>共享中继管理</span></a></div><div id="account" hidden><div><span id="account-name"></span><small id="account-role"></small></div><button id="logout" class="quiet" type="button">退出</button></div></header>
 <div id="notice" role="status" aria-live="polite" hidden></div>
 <section id="setup" class="login card" hidden>
 <p class="eyebrow">UNIDERP CONTROL</p><h1>设置管理员</h1><p class="muted">首次使用，请设置管理员账号和密码。</p>
 <form id="setup-form"><label>管理员用户名<input name="username" autocomplete="username" maxlength="80" required></label><label>密码（12–72 字节）<input name="password" type="password" autocomplete="new-password" required></label><label>确认密码<input name="password_confirm" type="password" autocomplete="new-password" required></label><button type="submit">创建管理员并登录</button></form>
 </section>
 <section id="login" class="login card" hidden>
-<p class="eyebrow">UNIDERP</p><h1>登录管理面板</h1><p class="muted">主控账号用于管理 Tailnet 和共享策略；成员节点使用本机管理员账号。</p>
+<p class="eyebrow">UNIDERP</p><h1>登录管理面板</h1><p class="muted">主控管理员、节点提供者和成员使用主控账号登录；DERP 节点使用独立的本机管理员账号。</p>
 <form id="login-form"><label>用户名<input name="username" autocomplete="username" maxlength="80" required></label><label>密码<input name="password" type="password" autocomplete="current-password" required></label><button type="submit">登录</button></form>
 </section>
 <div id="workspace" class="workspace" hidden>
-<nav aria-label="集群导航">
-<a href="#bootstrap" data-local>初始设置</a><a href="#member" data-local>集群连接</a><a href="#local" data-local>本机设置</a><a href="#tailnets" data-controller>我的 Tailnet</a><a href="#directory" data-controller>服务器目录</a><a href="#nodes" data-controller>我的服务器</a><a href="#grants" data-controller>申请与授权</a><a href="#map" data-controller>DERP map</a><a href="#events" data-controller>事件与审计</a><a href="#account">我的账号</a><a href="#users" data-controller data-admin>账号管理</a><a href="#settings" data-controller data-admin>集群设置</a>
+<nav id="navigation" aria-label="管理导航">
+<details data-nav-group open><summary>主控</summary><a href="#bootstrap">初始设置</a><a href="#settings">集群设置</a><a href="#events">事件与审计</a></details>
+<details data-nav-group open><summary>节点</summary><a href="#directory">节点列表</a><a href="#nodes">我的节点</a><a href="#member">本机节点</a><a href="#local">本机设置</a><a href="#requests">收到的使用申请</a></details>
+<details data-nav-group open><summary>Tailnet</summary><a href="#tailnets">我的 Tailnet</a><a href="#grants">节点使用授权</a><a href="#map">DERP map</a></details>
+<details data-nav-group open><summary>账号</summary><a href="#account">我的账号</a><a href="#users">账号管理</a></details>
 </nav>
 <main id="content" aria-live="polite"></main>
 </div>

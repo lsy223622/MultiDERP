@@ -13,7 +13,7 @@ func TestStoreMigrationTransactionAndReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	var version int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 6 {
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 7 {
 		t.Fatalf("migration = %d, %v", version, err)
 	}
 	tx, err := s.db.BeginTx(context.Background(), nil)

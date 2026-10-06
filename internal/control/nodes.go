@@ -84,6 +84,9 @@ func (s *Store) Node(ctx context.Context, actor Actor, id string) (Node, error) 
 }
 
 func (s *Store) ListNodes(ctx context.Context, actor Actor) ([]Node, error) {
+	if actor.Role != "admin" && actor.Role != "provider" {
+		return nil, ErrForbidden
+	}
 	if err := RequireOwner(actor, actor.ID); err != nil {
 		return nil, err
 	}
@@ -113,6 +116,9 @@ func (s *Store) issueEnrollment(ctx context.Context, tx *sql.Tx, n Node) (Enroll
 }
 
 func (s *Store) CreateNode(ctx context.Context, actor Actor, name, domain string, derpPort, stunPort int) (Node, Enrollment, error) {
+	if actor.Role != "admin" && actor.Role != "provider" {
+		return Node{}, Enrollment{}, ErrForbidden
+	}
 	if s.clusterID == "" || strings.TrimSpace(name) == "" || len(name) > 160 || derpPort < 1 || derpPort > 65535 || stunPort < 1 || stunPort > 65535 {
 		return Node{}, Enrollment{}, ErrInvalid
 	}
