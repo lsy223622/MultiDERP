@@ -244,21 +244,82 @@ async function member(){
  else {const f=form(card('加入已有集群'),'验证并加入',async(data,f)=>{const body={controller_url:data.get('controller_url'),enrollment_code:data.get('enrollment_code')};f.elements.enrollment_code.value='';await api('/local/join','POST',body);});field(f,'controller_url','主控 HTTPS 地址','url',true,s.controller_url);const code=field(f,'enrollment_code','一次性注册码','password');code.autocomplete='off';done(f);}
 }
 
-const views={tailnets,nodes,directory,grants,requests,map,account,users,settings,events,bootstrap,local:localSettings,member};
+async function overview(){
+ const localOnly=serverRole==='member',admin=actor.role==='admin';
+ const [nodeItems,tailnetItems,grantItems,local]=await Promise.all([
+  localOnly?[]:api(actor.role==='member'?'/relays':'/nodes'),localOnly?[]:api('/tailnets'),localOnly?[]:api('/grants'),admin?api('/local/status'):null
+ ]);
+ page('概览',localOnly?'本机 DERP 节点的集群连接、带宽与运行状态。':admin?'集群节点、Tailnet 身份源与使用授权，一目了然。':'你的 DERP 资源、Tailnet 身份源与使用授权。');
+ const root=el('div',undefined,'overview'),hero=el('section',undefined,'overview-hero'),intro=el('div');
+ intro.append(el('p',localOnly?'DERP NODE':'UNIDERP CONTROL','eyebrow'),el('h2',localOnly?(local.active.hostname||'本机 DERP 节点'):'连接你的网络'),el('p',localOnly?'本地限速与主控策略共同约束中继带宽。':'让 DERP 节点与 Tailnet 在同一处保持连接。','muted'),el('span',actor.username+' · '+(localOnly?'节点管理员':roleNames[actor.role]),'badge'));
+ const art=el('div',undefined,'overview-network');art.setAttribute('aria-hidden','true');
+ art.innerHTML='<svg viewBox="0 0 260 140"><path class="network-line" d="M44 42 130 70 218 32M44 108 130 70 218 110"/><circle class="network-halo" cx="130" cy="70" r="36"/><rect class="network-core" x="108" y="48" width="44" height="44" rx="12"/><path class="network-glyph" d="M121 62h18M121 70h18M121 78h10"/><circle class="network-peer" cx="44" cy="42" r="11"/><circle class="network-peer" cx="44" cy="108" r="11"/><circle class="network-peer" cx="218" cy="32" r="11"/><circle class="network-peer" cx="218" cy="110" r="11"/></svg>';
+ hero.append(intro,art);root.append(hero);$('content').append(root);
+ const metrics=el('div',undefined,'overview-metrics');root.append(metrics);
+ const metric=(title,value,hint,href)=>{const c=el('a',undefined,'overview-metric');c.href='#'+href;c.append(el('span',title,'muted'),el('strong',String(value)),el('small',hint));metrics.append(c);};
+ const panel=(title,href,label)=>{const c=el('section',undefined,'overview-panel'),head=el('div',undefined,'row space'),link=el('a',label);link.href='#'+href;head.append(el('h2',title),link);c.append(head);return c;};
+ const item=(parent,title,detail,badge,href)=>{const r=el('div',undefined,'overview-item'),text=el('div'),heading=el('strong',title);if(href){const link=el('a');link.href='#'+href;link.append(heading);text.append(link);}else text.append(heading);text.append(el('small',detail));r.append(text);if(badge)r.append(badge);parent.append(r);};
+ const budget=value=>value?value/1000000+' Mbps':'尚无策略';
+ const localPanel=()=>{
+  const c=panel(localOnly?'集群与本机':'主控内置节点','member','管理本机节点 →');
+  item(c,local.active.hostname||'尚未设置域名',local.joined?'已注册到集群':'尚未注册到集群',el('span',local.joined?(local.control.connected?'已连接主控':'主控连接中断'):'尚未注册','badge '+(local.control.connected?'good':'warn')));
+  item(c,'中继许可',local.control.usable?'当前有有效设备许可':'当前没有有效设备许可',status(local.control.usable?'valid':'missing'));
+  item(c,'策略版本','接收 '+local.control.received_revision+' / 应用 '+local.control.applied_revision);
+  item(c,'最后联系主控',time(local.control.last_contact));
+  if(local.apply_error)c.append(el('p',local.apply_error,'error'));return c;
+ };
+ const grid=el('div',undefined,'overview-panels');root.append(grid);
+ if(localOnly){
+  metric('有效调度预算',budget(local.effective_budget_bps),'RX、TX 各自的总预算','member');
+  metric('本地总限速',local.active.max_budget_bps?budget(local.active.max_budget_bps):'不另设上限','独立于主控下发策略','local');
+  metric('主控下发预算',budget(local.policy_budget_bps),'在本地限速内生效','member');
+  metric('活动 DERP 连接',local.control.active_connections,'采样于 '+time(local.control.traffic_observed_at),'member');
+  grid.append(localPanel());const c=panel('节点配置','local','本机设置 →');
+  item(c,'TLS 模式',local.active.tls_mode);item(c,'公开端口','DERP TCP '+local.active.derp_port+' · STUN UDP '+local.active.stun_port);
+  item(c,'主控地址',local.controller_url||'尚未配置');item(c,'配置应用',local.pending_apply?'已保存，待应用':local.apply_error?'应用失败':'已应用');grid.append(c);
+ }else{
+  const pending=grantItems.filter(g=>g.state==='requested'||g.state==='owner_approved');
+  metric(actor.role==='member'?'可选 DERP 节点':admin?'集群 DERP 节点':'我的 DERP 节点',nodeItems.length,nodeItems.filter(n=>n.enabled).length+' 个已启用',actor.role==='member'?'directory':'nodes');
+  metric(admin?'Tailnet 身份源':'我的 Tailnet',tailnetItems.length,tailnetItems.filter(t=>t.enabled&&t.credential_status==='valid').length+' 个已启用且凭据正常','tailnets');
+  metric('活跃使用授权',grantItems.filter(g=>g.state==='active'&&(admin||g.tailnet_owner_id===actor.id)).length,admin?'集群共享节点的使用关系':'我的 Tailnet 使用共享节点','grants');
+  metric('待确认使用授权',pending.filter(g=>g.state==='owner_approved'&&(admin||g.tailnet_owner_id===actor.id)).length,'提供者已批准，等待确认','grants');
+  const nodesPanel=panel(actor.role==='member'?'可选 DERP 节点':admin?'集群节点':'我的节点',actor.role==='member'?'directory':'nodes','查看节点 →');
+  for(const n of nodeItems.slice(0,4))item(nodesPanel,n.display_name,n.domain+' · 最近心跳 '+time(n.last_heartbeat),status(n.enabled?n.state:'paused'));
+  if(!nodeItems.length)nodesPanel.append(el('p','暂无节点。','muted'));grid.append(nodesPanel);
+  const tailnetPanel=panel(admin?'Tailnet 身份源':'我的 Tailnet','tailnets','管理 Tailnet →');
+  for(const t of tailnetItems.slice(0,4))item(tailnetPanel,t.display_name,'完整身份成功：'+time(t.last_identity_success),status(t.enabled?t.credential_status:'paused'));
+  if(!tailnetItems.length)tailnetPanel.append(el('p','绑定 Tailnet 后，即可为其选择 DERP 节点。','muted'));grid.append(tailnetPanel);
+  const grantsPanel=panel('使用授权','grants','查看授权 →');
+  for(const g of [...pending,...grantItems.filter(g=>g.state==='active')].slice(0,4))item(grantsPanel,g.tailnet_name+' → '+g.node_name,'授权版本 r'+g.revision,status(g.state),g.node_owner_id===actor.id&&g.tailnet_owner_id!==actor.id?'requests':'grants');
+  if(!pending.length&&!grantItems.some(g=>g.state==='active'))grantsPanel.append(el('p','暂无待处理或活跃的共享授权。','muted'));grid.append(grantsPanel);
+  if(local)grid.append(localPanel());
+ }
+ const foot=el('div',undefined,'overview-foot row space');foot.append(el('small','数据读取于 '+new Date().toLocaleString()+' · 状态来自主控记录与本机观测','muted'),button('刷新概览',render));root.append(foot);
+}
+
+function positionNavMarker(){
+ const links=document.querySelector('.navigation-links'),marker=links.querySelector('.nav-marker'),active=links.querySelector('a[aria-current="page"]');
+ if(!active||active.closest('details')?.open===false){marker.hidden=true;return;}
+ marker.style.transform='translateY('+(active.getBoundingClientRect().top-links.getBoundingClientRect().top+links.scrollTop+8)+'px)';
+ if(marker.hidden){marker.getBoundingClientRect();marker.hidden=false;}
+}
+
+const views={overview,tailnets,nodes,directory,grants,requests,map,account,users,settings,events,bootstrap,local:localSettings,member};
 async function render(){
  if(!actor)return;
  let name=location.hash.slice(1),allowed;
  if(serverRole==='setup')allowed=actor.role==='admin'?['bootstrap','account']:['account'];
- else if(serverRole==='member')allowed=actor.role==='admin'?['member','local','account']:['account'];
+ else if(serverRole==='member')allowed=actor.role==='admin'?['overview','member','local','account']:['account'];
  else {
-  allowed=['tailnets','directory','grants','map','account'];
+  allowed=['overview','tailnets','directory','grants','map','account'];
   if(actor.role==='admin'||actor.role==='provider')allowed.push('nodes','requests');
   if(actor.role==='admin')allowed.push('member','local','users','settings','events');
  }
  if(!allowed.includes(name))name=allowed[0];
- $('content').classList.toggle('wide',['tailnets','nodes','directory','grants','requests','users','events'].includes(name));
+ $('content').classList.toggle('wide',['overview','tailnets','nodes','directory','grants','requests','users','events'].includes(name));
  document.querySelectorAll('.navigation-links a').forEach(a=>{a.hidden=!allowed.includes(a.hash.slice(1));if(a.hash==='#nodes')a.textContent=actor.role==='admin'?'节点管理':'我的节点';a.setAttribute('aria-current',a.hash==='#'+name?'page':'false');});
- document.querySelectorAll('[data-nav-group]').forEach(group=>{group.hidden=!Array.from(group.querySelectorAll('a')).some(a=>!a.hidden);const active=group.querySelector('a[aria-current="page"]'),marker=group.querySelector('.nav-marker');marker.hidden=!active;if(active){group.open=true;marker.style.transform='translateY('+(active.offsetTop+8)+'px)';}});
+ document.querySelectorAll('[data-nav-group]').forEach(group=>{group.hidden=!Array.from(group.querySelectorAll('a')).some(a=>!a.hidden);if(group.querySelector('a[aria-current="page"]'))group.open=true;});
+ positionNavMarker();
  document.body.classList.remove('nav-open');$('nav-toggle').setAttribute('aria-expanded','false');
  try{await views[name]();}catch(e){notice(e.message,true);if(e.status===401)await session();}
 }
@@ -270,4 +331,6 @@ $('nav-toggle').addEventListener('click',()=>{const expanded=document.body.class
 configureMenu($('account-toggle'),$('account-menu'));
 document.addEventListener('click',e=>{if(document.body.classList.contains('nav-open')&&!e.target.closest('#navigation,#nav-toggle')){document.body.classList.remove('nav-open');$('nav-toggle').setAttribute('aria-expanded','false');}});
 window.addEventListener('hashchange',render);
+window.addEventListener('resize',positionNavMarker);
+document.querySelectorAll('[data-nav-group]').forEach(group=>{group.addEventListener('toggle',positionNavMarker);group.addEventListener('transitionend',positionNavMarker);});
 session();
