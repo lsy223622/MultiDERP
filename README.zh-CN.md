@@ -6,14 +6,14 @@ UniDERP 让自建 Tailscale DERP 中继服务多个独立 tailnet。单个主控
 
 主控本机也可提供中继，注册和授权规则与成员节点相同。成员保存节点身份、策略和独立的本机管理员账号；Tailnet OAuth 凭据和共享资源账号留在主控。Tailscale 继续负责对端身份、网络策略和 WireGuard 加密。
 
-此候选版本面向 Linux/amd64。Compose 示例使用 `ghcr.io/lsy223622/uniderp:2.0.0-rc.1`，预发布不会更新稳定 `latest`。Windows 二进制有构建检查，本次不提供 Windows 下载包或 ARM64 镜像。
+此候选版本面向 Linux/amd64。Compose 示例使用 `ghcr.io/lsy223622/uniderp:2.0.0-rc.2`，预发布不会更新稳定 `latest`。Windows 二进制有构建检查，本次不提供 Windows 下载包或 ARM64 镜像。
 
 两个独立真实 Tailnet 的只读 OAuth 和原版 Tailscale 应用已完成隔离验收，包括确认时准入、external/手动证书 TLS 转发、在线撤销、分角色网页流程，以及真实 DERP map 剪贴板与下载文件内容。自动证书签发、持续竞争流量和完整备份恢复分别作为候选版本验收项；现有证据不构成公网吞吐或可用性保证。
 
 ```sh
-docker pull ghcr.io/lsy223622/uniderp:2.0.0-rc.1
+docker pull ghcr.io/lsy223622/uniderp:2.0.0-rc.2
 docker run --rm --entrypoint /usr/local/bin/uniderp \
-  ghcr.io/lsy223622/uniderp:2.0.0-rc.1 version
+  ghcr.io/lsy223622/uniderp:2.0.0-rc.2 version
 ```
 
 固定部署可使用已发布镜像的 digest。源码及 CI 位于 [lsy223622/UniDERP](https://github.com/lsy223622/UniDERP)，各版本实际验证结果见 [Release](https://github.com/lsy223622/UniDERP/releases)。
@@ -108,6 +108,8 @@ server:
 
 该示例公开 TCP 80/443，授予 `NET_BIND_SERVICE`。实际签发和生产代理仍需在部署环境验证。
 
+已有 HTTP 反代终止公网 TLS 时，把此域名的 `/.well-known/acme-challenge/` 请求转发到 derper 内部 HTTP 80 端口，让 [HTTP-01 验证](https://letsencrypt.org/docs/challenge-types/#http-01-challenge) 能到达处理器；终止 TLS 的反代无法把 TLS-ALPN 验证传给后端。在共用宿主机上，可将 HTTP listener 仅映射到回环端口，只修改中继域名的 challenge location。DERP 的容器内 TLS listener 仍设为 443，并保留后端证书与 SNI 的正常验证。首次签发可能比普通就绪探测更久，自动模式为启动留出约两分钟。重启与备份时保留整个 `cert_dir`，包括 ACME 账号密钥。
+
 使用已有证书时设置 `cert_mode: manual`。在 `cert_dir` 中提供 PEM 格式的 `relay.example.com.crt`（站点证书及所需中间证书链）和匹配的 `relay.example.com.key`；证书必须覆盖 `server.hostname`。目录允许 UID 10001 访问，私钥仅允许该服务身份读取。手动证书在 derper 启动时加载，更换后需重启节点。
 
 手动 TLS 可使用非 443 后端端口：
@@ -180,7 +182,7 @@ RX、TX 分别调度字节、分别使用预算。统计为中继载荷，不含
 
 管理页区分 heartbeat/应用状态、设备与授权期限、区间流量速率以及独立 DERP/STUN 探测。探测有自己的观察时间，不能证明所有客户端路径。共享者仅查看自己尾网用量，提供者和平台管理员有更广的资源视图。事件与审计按相关资源过滤，管理员代操作记录真实 actor。
 
-删除服务器或改域名前先暂停。在线节点必须先 ACK 空策略。改域名保留节点身份，需重新证明 HTTPS 域名控制权，并保持暂停直到显式启用。同时更新该中继的 hostname 配置、DNS 和 TLS/代理；listener/TLS/hostname 修改在 config reload 后还需重启 daemon。保持已注册节点使用的主控 origin 可访问，修改中继域名不会迁移主控 origin。节点身份被复制时，先停止重复进程，再在管理页恢复实例。普通重启可等待前一个 90 秒实例租约到期；不要靠删除密钥绕过冲突。
+删除服务器或改域名前先暂停。在线节点必须先 ACK 空策略。改域名保留节点身份，需重新证明 HTTPS 域名控制权，并保持暂停直到显式启用。同时更新该中继的 hostname 配置、DNS 和 TLS/代理；listener/TLS/hostname 修改在 config reload 后还需重启 daemon。保持已注册节点使用的主控 origin 可访问，修改中继域名不会迁移主控 origin。节点身份被复制时，先停止重复进程，再在管理页恢复实例。新的节点进程在续期会话前等待完整的 90 秒旧实例租约窗口，因为主控已提交的心跳租约可能晚于节点最后落盘的截止时间；缓存策略保留原绝对期限。不要靠删除密钥绕过冲突。
 
 ```sh
 docker exec uniderp uniderp config reload
@@ -200,6 +202,6 @@ version 1 配置会以明确迁移错误停止。旧 verifier state 不能转换
 
 CI 构建 patched derper 后运行集成测试，分别对 patched 上游转发和主控/集群运行 Linux race 检查。本地已有权限 API/浏览器流程、可信本地 TLS/STUN、DERP library 转发/撤销、确定性和受控字节调度、真实 Linux race 证据。公网 DNS、真实 OAuth、原版应用和 WAN 行为仍是独立验收项。
 
-镜像 workflow 接受稳定 `vX.Y.Z` 和 `v2.0.0-rc.1` 等预发布 tag。预发布只生成明确版本的镜像 tag，不更新 `latest`；稳定 tag 仅更新新 `ghcr.io/lsy223622/uniderp` 包的 `latest`。旧 MultiDERP tags 与 `ghcr.io/lsy223622/multiderp` 包单独保留，供 v1 部署与回退使用。
+镜像 workflow 接受稳定 `vX.Y.Z` 和 `v2.0.0-rc.2` 等预发布 tag。预发布只生成明确版本的镜像 tag，不更新 `latest`；稳定 tag 仅更新新 `ghcr.io/lsy223622/uniderp` 包的 `latest`。旧 MultiDERP tags 与 `ghcr.io/lsy223622/multiderp` 包单独保留，供 v1 部署与回退使用。
 
 UniDERP 使用 [GNU GPL v3](LICENSE)。信任边界与漏洞报告见 [SECURITY.md](SECURITY.md)，patched 上游许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，发布历史见 [CHANGELOG.md](CHANGELOG.md)。

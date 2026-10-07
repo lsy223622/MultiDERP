@@ -1,7 +1,7 @@
 services:
   uniderp:
     container_name: uniderp
-    image: ghcr.io/lsy223622/uniderp:2.0.0-rc.1
+    image: ghcr.io/lsy223622/uniderp:2.0.0-rc.2
     user: "10001:10001"
     restart: unless-stopped
     read_only: true

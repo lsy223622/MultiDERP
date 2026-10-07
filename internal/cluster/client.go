@@ -78,13 +78,14 @@ func (c *EnrollmentClient) RunControl(ctx context.Context, path string, apply fu
 					c.mu.Unlock()
 				}
 			}
-		}
-		if renewRequired || session.InstanceID != c.instanceID || !time.Now().Add(10*time.Minute).Before(session.ExpiresAt) {
 			if session.InstanceID != c.instanceID {
-				if err := waitControl(ctx, time.Until(session.LeaseUntil)); err != nil {
+				// A committed heartbeat can outlive its lost response and persisted lease.
+				if err := waitControl(ctx, 90*time.Second); err != nil {
 					return err
 				}
 			}
+		}
+		if renewRequired || session.InstanceID != c.instanceID || !time.Now().Add(10*time.Minute).Before(session.ExpiresAt) {
 			var err error
 			session, err = c.RenewSession(ctx)
 			if err != nil {

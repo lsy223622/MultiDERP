@@ -6,14 +6,14 @@ UniDERP shares self-hosted Tailscale DERP relays across independent tailnets. On
 
 The controller also runs a local relay, subject to the same registration and authorization rules as members. Members hold their node identity, policy and independent local administrator account; Tailnet OAuth credentials and shared resource accounts stay on the controller. Tailscale continues to manage peer identity, network policy and WireGuard encryption.
 
-This release candidate targets Linux/amd64. The Compose examples use `ghcr.io/lsy223622/uniderp:2.0.0-rc.1`; prereleases do not move stable `latest`. Windows binaries are build-tested, but this release does not provide a Windows download package or an ARM64 image.
+This release candidate targets Linux/amd64. The Compose examples use `ghcr.io/lsy223622/uniderp:2.0.0-rc.2`; prereleases do not move stable `latest`. Windows binaries are build-tested, but this release does not provide a Windows download package or an ARM64 image.
 
 Isolated acceptance has exercised two independent real Tailnets with read-only OAuth and stock Tailscale applications, confirmation-time admission, external/manual-certificate TLS forwarding, online revocation, scoped console workflows and actual DERP map clipboard/download contents. Automatic certificate issuance, sustained competing traffic and complete backup restoration are separate candidate acceptance gates; the current evidence does not establish a WAN throughput or availability guarantee.
 
 ```sh
-docker pull ghcr.io/lsy223622/uniderp:2.0.0-rc.1
+docker pull ghcr.io/lsy223622/uniderp:2.0.0-rc.2
 docker run --rm --entrypoint /usr/local/bin/uniderp \
-  ghcr.io/lsy223622/uniderp:2.0.0-rc.1 version
+  ghcr.io/lsy223622/uniderp:2.0.0-rc.2 version
 ```
 
 Use the published image digest for immutable deployments. Source and CI are at [lsy223622/UniDERP](https://github.com/lsy223622/UniDERP); see [releases](https://github.com/lsy223622/UniDERP/releases) for version-specific results.
@@ -108,6 +108,8 @@ server:
 
 This profile publishes TCP 80/443 and grants `NET_BIND_SERVICE`. Certificate issuance and your production reverse proxy must be verified in your deployment.
 
+When an existing HTTP proxy terminates public TLS, route this domain's `/.well-known/acme-challenge/` requests to derper's internal HTTP port 80 so the [HTTP-01 challenge](https://letsencrypt.org/docs/challenge-types/#http-01-challenge) can reach its handler. A TLS-terminating proxy cannot pass the TLS-ALPN challenge to the backend. For a shared host, publish that HTTP listener only on a loopback port and change only the relay domain's challenge location. Keep the configured DERP TLS listener on container port 443 and normal upstream certificate/SNI validation. The first certificate can take longer than an ordinary readiness probe; automatic mode allows about two minutes for startup. Preserve all of `cert_dir`, including the ACME account key, when restarting or backing up.
+
 For an existing certificate, use `cert_mode: manual`. Place the PEM certificate chain, including the leaf and required intermediates, in `relay.example.com.crt`, and its matching private key in `relay.example.com.key`, under `cert_dir`. The certificate must cover `server.hostname`. Make the directory accessible to UID 10001 and keep the private key readable only by that service identity. Manual certificates are loaded when derper starts; restart the node after replacing them.
 
 Manual TLS can use a non-443 backend port:
@@ -180,7 +182,7 @@ Online revocation closes connections when the node applies the new policy. Contr
 
 The console separates heartbeat/application state, device/grant deadlines, interval traffic rates and independent DERP/STUN probe results. A probe records its own observation time and does not prove every client's path. Participants see their own tailnet usage; providers and platform administrators have broader resource visibility. Events and audit are scoped to relevant resources and record the actual administrator actor.
 
-Pause a relay before deleting it or changing its domain. A connected relay must ACK an empty policy first. A domain change preserves node identity, requires new HTTPS domain proof and leaves the relay paused until explicitly enabled. Update the relay's hostname configuration, DNS and TLS/proxy for the new domain; listener/TLS/hostname changes require a daemon restart after config reload. Keep the controller origin used by enrolled nodes reachable; changing a relay domain does not migrate that origin. For a copied node identity, stop duplicate processes before recovering its instance in the console. An ordinary restart can wait for the previous 90-second instance lease; do not delete keys to bypass conflicts.
+Pause a relay before deleting it or changing its domain. A connected relay must ACK an empty policy first. A domain change preserves node identity, requires new HTTPS domain proof and leaves the relay paused until explicitly enabled. Update the relay's hostname configuration, DNS and TLS/proxy for the new domain; listener/TLS/hostname changes require a daemon restart after config reload. Keep the controller origin used by enrolled nodes reachable; changing a relay domain does not migrate that origin. For a copied node identity, stop duplicate processes before recovering its instance in the console. A new node process waits a complete 90-second prior-instance lease window before renewing its session, since a committed heartbeat can have a newer deadline than the node last persisted. Its cached policy keeps its original absolute deadlines; do not delete keys to bypass conflicts.
 
 ```sh
 docker exec uniderp uniderp config reload
@@ -200,6 +202,6 @@ Version 1 configuration is rejected with a migration error. Old verifier state c
 
 CI builds patched derper for integration tests and runs Linux race checks on both the patched upstream data path and the controller/cluster packages. Local evidence includes scoped API/browser workflows, trusted local TLS and STUN, DERP library relay/revocation, deterministic and controlled byte-scheduling tests, and actual Linux race execution. Public DNS, real OAuth, stock applications and WAN behavior remain separate acceptance requirements.
 
-The image workflow accepts stable `vX.Y.Z` and prerelease tags such as `v2.0.0-rc.1`. A prerelease produces its explicit version image tag and does not update `latest`; stable tags update `latest` only in the new `ghcr.io/lsy223622/uniderp` package. Historical MultiDERP tags and the `ghcr.io/lsy223622/multiderp` package remain separate for v1 deployments and rollback.
+The image workflow accepts stable `vX.Y.Z` and prerelease tags such as `v2.0.0-rc.2`. A prerelease produces its explicit version image tag and does not update `latest`; stable tags update `latest` only in the new `ghcr.io/lsy223622/uniderp` package. Historical MultiDERP tags and the `ghcr.io/lsy223622/multiderp` package remain separate for v1 deployments and rollback.
 
 UniDERP is licensed under [GNU GPL v3](LICENSE). See [SECURITY.md](SECURITY.md) for trust and reporting, [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the patched upstream license, and [CHANGELOG.md](CHANGELOG.md) for release history.

@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.0.0-rc.2] - 2026-10-08
+
+- Waits for the complete prior instance lease on node process restart, including
+  a controller heartbeat whose response was not persisted by the stopping node.
+  Copied-identity conflict detection and absolute policy deadlines remain enforced.
+- Documents automatic TLS behind an existing HTTPS proxy, ACME challenge routing,
+  first-issuance startup waiting and preservation of the certificate/account cache.
+
 ## [2.0.0-rc.1] - 2026-10-08
 
 - Introduces the v2 single-controller platform with accounts, encrypted

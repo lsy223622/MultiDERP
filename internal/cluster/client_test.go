@@ -15,6 +15,29 @@ import (
 	"time"
 )
 
+func TestRestartWaitsForOutstandingHeartbeatLease(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]string{"code": "identity_conflict"})
+	}))
+	defer server.Close()
+	c, err := NewEnrollmentClient(server.URL, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.httpClient.Transport = server.Client().Transport
+	c.state.Domain = "relay.example.com"
+	c.state.Session = NodeSession{ClusterID: strings.Repeat("a", 64), NodeID: strings.Repeat("b", 64), InstanceID: strings.Repeat("c", 64), Token: strings.Repeat("d", 64), ExpiresAt: time.Now().Add(time.Hour), LeaseUntil: time.Now().Add(-time.Second)}
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	err = c.RunControl(ctx, filepath.Join(t.TempDir(), "policy.json"), func(context.Context, Policy) (PolicyApplication, error) { return PolicyApplication{}, nil }, func(context.Context) (PolicyApplication, error) { return PolicyApplication{}, nil })
+	if !errors.Is(err, context.DeadlineExceeded) || requests.Load() != 0 {
+		t.Fatalf("restart contacted controller before its outstanding heartbeat lease could expire: requests=%d error=%v", requests.Load(), err)
+	}
+}
+
 func TestRenewSessionAcceptsExplicitDomainChallengeAndServesPrivateProof(t *testing.T) {
 	for _, purpose := range []string{"domain_change", "session"} {
 		t.Run(purpose, func(t *testing.T) {
