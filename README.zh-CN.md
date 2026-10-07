@@ -6,7 +6,17 @@ UniDERP 让自建 Tailscale DERP 中继服务多个独立 tailnet。单个主控
 
 主控本机也可提供中继，注册和授权规则与成员节点相同。成员保存节点身份、策略和独立的本机管理员账号；Tailnet OAuth 凭据和共享资源账号留在主控。Tailscale 继续负责对端身份、网络策略和 WireGuard 加密。
 
-当前分支处于 v2 发布准备阶段，示例使用本地构建镜像。两个独立真实 tailnet 的只读 OAuth 和原版 Tailscale 应用已有隔离验收结果，包括共享确认前拒绝连接，以及通过主控和成员中继的公网 external 与手动证书 passthrough 文件传输；标准 Dockerfile 使用正常构建缓存的完整构建已通过。自动证书签发仍未验证；不使用依赖缓存的构建在依赖下载时遇到 EOF 错误。
+此候选版本面向 Linux/amd64。Compose 示例使用 `ghcr.io/lsy223622/uniderp:2.0.0-rc.1`，预发布不会更新稳定 `latest`。Windows 二进制有构建检查，本次不提供 Windows 下载包或 ARM64 镜像。
+
+两个独立真实 Tailnet 的只读 OAuth 和原版 Tailscale 应用已完成隔离验收，包括确认时准入、external/手动证书 TLS 转发、在线撤销、分角色网页流程，以及真实 DERP map 剪贴板与下载文件内容。自动证书签发、持续竞争流量和完整备份恢复分别作为候选版本验收项；现有证据不构成公网吞吐或可用性保证。
+
+```sh
+docker pull ghcr.io/lsy223622/uniderp:2.0.0-rc.1
+docker run --rm --entrypoint /usr/local/bin/uniderp \
+  ghcr.io/lsy223622/uniderp:2.0.0-rc.1 version
+```
+
+固定部署可使用已发布镜像的 digest。源码及 CI 位于 [lsy223622/UniDERP](https://github.com/lsy223622/UniDERP)，各版本实际验证结果见 [Release](https://github.com/lsy223622/UniDERP/releases)。
 
 ## 构建
 
@@ -31,6 +41,7 @@ docker build --build-arg UNIDERP_VERSION=v2-local \
 mkdir -p data
 sudo chown -R 10001:10001 data
 sudo chmod 700 data
+docker compose -f docker-compose.example.yaml pull
 docker compose -f docker-compose.example.yaml up -d
 ```
 
@@ -189,6 +200,6 @@ version 1 配置会以明确迁移错误停止。旧 verifier state 不能转换
 
 CI 构建 patched derper 后运行集成测试，分别对 patched 上游转发和主控/集群运行 Linux race 检查。本地已有权限 API/浏览器流程、可信本地 TLS/STUN、DERP library 转发/撤销、确定性和受控字节调度、真实 Linux race 证据。公网 DNS、真实 OAuth、原版应用和 WAN 行为仍是独立验收项。
 
-镜像 workflow 接受稳定 `vX.Y.Z` 和 `v2.0.0-alpha.1` 等预发布 tag。预发布只生成明确的版本镜像 tag，不更新 `latest`；稳定 tag 保留既有 `latest` 行为。建 tag、push、发布 release、远端仓库改名及 GHCR 迁移需分别授权。本地分支尚未发布 v2 镜像。
+镜像 workflow 接受稳定 `vX.Y.Z` 和 `v2.0.0-rc.1` 等预发布 tag。预发布只生成明确版本的镜像 tag，不更新 `latest`；稳定 tag 仅更新新 `ghcr.io/lsy223622/uniderp` 包的 `latest`。旧 MultiDERP tags 与 `ghcr.io/lsy223622/multiderp` 包单独保留，供 v1 部署与回退使用。
 
 UniDERP 使用 [GNU GPL v3](LICENSE)。信任边界与漏洞报告见 [SECURITY.md](SECURITY.md)，patched 上游许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，发布历史见 [CHANGELOG.md](CHANGELOG.md)。

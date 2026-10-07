@@ -6,7 +6,17 @@ UniDERP shares self-hosted Tailscale DERP relays across independent tailnets. On
 
 The controller also runs a local relay, subject to the same registration and authorization rules as members. Members hold their node identity, policy and independent local administrator account; Tailnet OAuth credentials and shared resource accounts stay on the controller. Tailscale continues to manage peer identity, network policy and WireGuard encryption.
 
-This branch is v2 release preparation. The examples use a locally built image. Isolated acceptance has exercised two independent real tailnets with read-only OAuth and stock Tailscale applications, including denial before sharing confirmation and transfers through both the controller relay and a member relay using external TLS and manual-certificate passthrough. A complete standard Dockerfile build passed with normal build caching. Automatic certificate issuance remains unverified; builds without cached dependencies failed on dependency download EOF errors.
+This release candidate targets Linux/amd64. The Compose examples use `ghcr.io/lsy223622/uniderp:2.0.0-rc.1`; prereleases do not move stable `latest`. Windows binaries are build-tested, but this release does not provide a Windows download package or an ARM64 image.
+
+Isolated acceptance has exercised two independent real Tailnets with read-only OAuth and stock Tailscale applications, confirmation-time admission, external/manual-certificate TLS forwarding, online revocation, scoped console workflows and actual DERP map clipboard/download contents. Automatic certificate issuance, sustained competing traffic and complete backup restoration are separate candidate acceptance gates; the current evidence does not establish a WAN throughput or availability guarantee.
+
+```sh
+docker pull ghcr.io/lsy223622/uniderp:2.0.0-rc.1
+docker run --rm --entrypoint /usr/local/bin/uniderp \
+  ghcr.io/lsy223622/uniderp:2.0.0-rc.1 version
+```
+
+Use the published image digest for immutable deployments. Source and CI are at [lsy223622/UniDERP](https://github.com/lsy223622/UniDERP); see [releases](https://github.com/lsy223622/UniDERP/releases) for version-specific results.
 
 ## Build
 
@@ -31,6 +41,7 @@ The following commands target a Linux Docker host. Set a public DNS name with tr
 mkdir -p data
 sudo chown -R 10001:10001 data
 sudo chmod 700 data
+docker compose -f docker-compose.example.yaml pull
 docker compose -f docker-compose.example.yaml up -d
 ```
 
@@ -49,7 +60,7 @@ docker exec uniderp uniderp controller init \
   --username admin --password-file /data/admin-password
 ```
 
-Navigation is grouped into Controller, Nodes, Tailnet and Account, with pages determined by the deployment role and account permissions; empty groups are hidden. Controller administrators manage the cluster, accounts and built-in DERP node. Providers manage their own nodes and Tailnets; members manage their Tailnets and node-use permissions. An independent DERP node administrator only manages that node. Controller administrators create providers or members and can change their role, invalidating existing sessions. A provider who still owns nodes cannot be downgraded. Existing ordinary accounts that own nodes become providers on upgrade, preserving resources, passwords and sessions. Platform passwords are separate from Tailnet credentials; a Tailnet API failure does not prevent platform login.
+Navigation has an independent Overview and Controller, Nodes and Tailnet groups, with pages determined by the deployment role and account permissions; empty groups are hidden. My account, Account management and System/Light/Dark appearance are in the bottom-left account menu. Controller administrators manage the cluster, accounts and built-in DERP node. Providers manage their own nodes and Tailnets; members manage their Tailnets and node-use permissions. An independent DERP node administrator only manages that node. Controller administrators create providers or members and can change their role, invalidating existing sessions. A provider who still owns nodes cannot be downgraded. Existing ordinary accounts that own nodes become providers on upgrade, preserving resources, passwords and sessions. Platform passwords are separate from Tailnet credentials; a Tailnet API failure does not prevent platform login.
 
 ### TLS and proxy
 
@@ -138,7 +149,7 @@ The CA bundle path must exist inside the proxy's container or host. Nginx defaul
 
 On the member host, copy [config.node.example.yaml](config.node.example.yaml) to `node-data/config.yaml`; set `node.controller_url` to the controller's HTTPS origin and `server.hostname` to the member's own public domain. Prepare `node-data` with the same UID 10001 and restrictive permissions, then start [docker-compose.node.example.yaml](docker-compose.node.example.yaml). Configure member TLS/proxy and STUN as above. Each example is intended for its own host; adjust ports if colocating services.
 
-In **My servers**, the provider creates a relay resource for that exact domain and obtains a single-use enrollment code valid for 30 minutes. Put the code in a protected `/data/enrollment-code` file on the member host:
+In **My nodes**, the provider creates a relay resource for that exact domain and obtains a single-use enrollment code valid for 30 minutes. Put the code in a protected `/data/enrollment-code` file on the member host:
 
 ```sh
 docker exec uniderp-node uniderp node enroll \
@@ -189,6 +200,6 @@ Version 1 configuration is rejected with a migration error. Old verifier state c
 
 CI builds patched derper for integration tests and runs Linux race checks on both the patched upstream data path and the controller/cluster packages. Local evidence includes scoped API/browser workflows, trusted local TLS and STUN, DERP library relay/revocation, deterministic and controlled byte-scheduling tests, and actual Linux race execution. Public DNS, real OAuth, stock applications and WAN behavior remain separate acceptance requirements.
 
-The image workflow accepts stable `vX.Y.Z` and prerelease tags such as `v2.0.0-alpha.1`. A prerelease produces its explicit version image tag and does not update `latest`; stable tags retain the existing `latest` behavior. Creating a tag, pushing, publishing a release, changing the remote repository or migrating GHCR is a separate authorized action. This local branch has not published a v2 image.
+The image workflow accepts stable `vX.Y.Z` and prerelease tags such as `v2.0.0-rc.1`. A prerelease produces its explicit version image tag and does not update `latest`; stable tags update `latest` only in the new `ghcr.io/lsy223622/uniderp` package. Historical MultiDERP tags and the `ghcr.io/lsy223622/multiderp` package remain separate for v1 deployments and rollback.
 
 UniDERP is licensed under [GNU GPL v3](LICENSE). See [SECURITY.md](SECURITY.md) for trust and reporting, [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the patched upstream license, and [CHANGELOG.md](CHANGELOG.md) for release history.

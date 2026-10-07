@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [2.0.0-rc.1] - 2026-10-08
 
 - Introduces the v2 single-controller platform with accounts, encrypted
   read-only OAuth credentials, device identity synchronization and member relay
@@ -16,15 +16,17 @@
   with idle borrowing, optional ceilings and bounded queues.
 - Requires a separate version 2 configuration/data migration; preserve old
   data for rollback and re-enter OAuth credentials and resource grants.
-- Adds controller/member deployment examples and prerelease image tags that
-  leave stable `latest` unchanged; no v2 release has been published.
+- Adds Linux/amd64 controller/member deployment examples using the UniDERP
+  GHCR package. Candidate tags leave stable `latest` and legacy MultiDERP images
+  unchanged. Windows is build-tested, without a Windows download package.
 - Completes isolated acceptance on two independent real tailnets with dedicated
   read-only OAuth, stock clients and normally distributed standard DERP maps:
   public external/manual-TLS relay transfers and online revocation/recovery on
-  controller and member relays. The complete canonical Dockerfile build passed
-  with normal caching. Automatic certificate issuance remains unverified;
-  the latest full no-cache retry failed in `go mod download` with EOF errors
-  downloading `modernc.org/sqlite` and `modernc.org/libc`.
+  controller and member relays. Adds grouped, scoped management, independent
+  node settings and local bandwidth ceilings, System/Light/Dark appearance,
+  inline grant status and actual DERP map clipboard/download validation.
+- Keeps automatic certificate issuance, competing WAN traffic and complete
+  backup restoration as separate candidate acceptance gates.
 
 ## [1.0.3] - 2026-09-04
 
