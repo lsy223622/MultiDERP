@@ -65,7 +65,7 @@ function field(form,name,label,type='text',required=true,value='') { const l=el(
 function select(form,name,label,items) { const l=el('label',label);const input=el('select');input.name=name;for(const [value,text] of items){const o=el('option',text);o.value=value;input.append(o);}l.append(input);form.append(l);return input; }
 function form(parent,submit,run) { const f=el('form');parent.append(f);const b=el('button',submit);b.type='submit';f.addEventListener('submit',async e=>{e.preventDefault();const generation=pageGeneration;b.disabled=true;f.querySelectorAll('.field-error').forEach(n=>n.remove());f.querySelectorAll('[aria-invalid]').forEach(n=>n.removeAttribute('aria-invalid'));try{const after=await run(new FormData(f),f);if(generation!==pageGeneration)return;notice(f.successMessage||submit+'：已保存。');await render({preserveScroll:true});if(typeof after==='function')await after();}catch(err){if(err.name==='AbortError')return;const input=err.field&&f.elements.namedItem(err.field);if(input){input.setAttribute('aria-invalid','true');input.after(el('small',err.message,'field-error'));input.focus();}notice(err.message,true);}finally{b.disabled=false;}});f.submitButton=b;return f; }
 function done(f){f.append(f.submitButton);return f;}
-function table(parent,head,rows) { const wrap=el('div',undefined,'table-wrap'),t=el('table'),tr=el('tr');for(const text of head)tr.append(el('th',text));const h=el('thead');h.append(tr);t.append(h);const body=el('tbody');for(const row of rows){const r=el('tr');for(const value of row){const c=el('td');c.append(value instanceof Node?value:el('span',value));r.append(c);}body.append(r);}t.append(body);wrap.append(t);parent.append(wrap);if(!rows.length)parent.append(el('p','暂无记录。','muted')); }
+function table(parent,head,rows) { const wrap=el('div',undefined,'table-wrap'),t=el('table',undefined,'business-table'),tr=el('tr');for(const text of head)tr.append(el('th',text));const h=el('thead');h.append(tr);t.append(h);const body=el('tbody');for(const row of rows){const r=el('tr');for(const [i,value] of row.entries()){const c=el('td');c.dataset.label=head[i];c.append(value instanceof Node?value:el('span',value));r.append(c);}body.append(r);}t.append(body);wrap.append(t);parent.append(wrap);if(!rows.length)parent.append(el('p','暂无记录。','muted')); }
 let menuSequence=0;
 function configureMenu(trigger,menu){
  trigger.setAttribute('aria-haspopup','menu');trigger.setAttribute('aria-expanded','false');menu.setAttribute('role','menu');
@@ -92,6 +92,17 @@ function configureMenu(trigger,menu){
 function more(...items){const wrap=el('span'),trigger=el('button',undefined,'more-menu'),menu=el('div',undefined,'more-options');trigger.type='button';trigger.setAttribute('aria-label','更多操作');trigger.innerHTML='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h.01M12 12h.01M19 12h.01"/></svg>';menu.id='action-menu-'+(++menuSequence);menu.setAttribute('popover','auto');trigger.setAttribute('popovertarget',menu.id);menu.append(...items);configureMenu(trigger,menu);wrap.append(trigger,menu);return wrap;}
 function actions(...items){const r=el('div',undefined,'row');r.append(...items);return r;}
 function time(value){if(!value||value==='0001-01-01T00:00:00Z')return '尚无观测';return new Date(typeof value==='number'?value*1000:value).toLocaleString();}
+function bytes(value){const text=el('span');text.title=String(value)+' 字节';text.textContent=value>=1048576?(value/1048576).toFixed(2)+' MiB':value>=1024?(value/1024).toFixed(2)+' KiB':value+' B';return text;}
+function shortIdentity(id,name){const details=el('details',undefined,'identity');details.append(el('summary',name||id.slice(0,8)+'…'),el('code',id),button('复制完整 ID',()=>copyText(id)));return details;}
+async function visibleTailnetNames(){const [tailnets,grants]=await Promise.all([api('/tailnets'),api('/grants')]);const names=new Map(grants.map(g=>[g.tailnet_id,g.tailnet_name+' · '+g.applicant]));for(const t of tailnets)if(!names.has(t.id))names.set(t.id,t.display_name);return {tailnets,names};}
+function reportedBudget(parent,state){
+ const r=state.report;
+ if(r&&r.revision!==state.desired_revision)parent.append(el('p','规则更新中，以下为最近节点报告。','badge warn'));
+ table(parent,['节点报告项目','值','来源'],[
+  ['本地总上限',r?.local_max_budget_bps===undefined?'尚无节点报告':r.local_max_budget_bps===0?'不另设上限':r.local_max_budget_bps/1000000+' Mbps',r?'采样于 '+time(r.observed_at):'尚无节点报告'],
+  ['实际执行预算',r?.effective_budget_bps===undefined?'尚无节点报告':r.effective_budget_bps/1000000+' Mbps',r?'版本 '+r.revision:'尚无节点报告']
+ ]);parent.append(el('p','以上是预算和运行配置观测，不代表吞吐、保底带宽或连通性承诺。','muted'));
+}
 function status(value){const names={pending:'待注册',domain_pending:'等待新域名验证',registered:'已注册',ready:'已报告可用',offline:'离线',identity_conflict:'身份冲突',requested:'待提供者批准',owner_approved:'待申请方确认',active:'活跃',revoked:'已撤销',left:'已退出',rejected:'已拒绝',cancelled:'已取消',expired:'已到期',valid:'正常',invalid:'凭据异常',missing:'未配置',paused:'已暂停',unavailable:'身份源暂不可用'};return el('span',names[value]||value||'尚无状态','badge '+(['ready','active','valid'].includes(value)?'good':['identity_conflict','invalid','revoked'].includes(value)?'bad':'warn'));}
 function secretFields(f){const input=field(f,'client_secret','OAuth Client Secret · ','password');input.autocomplete='new-password';const link=el('a','OAuth 文档');link.href='https://tailscale.com/docs/features/oauth-clients';link.target='_blank';link.rel='noopener noreferrer';input.before(link,el('span',' · 只需 devices:core:read','muted'));return input;}
 async function tailnets(){
@@ -205,13 +216,14 @@ function ruleSummary(parent,q) {
   const total=q.owner_weight+q.shared_weight;
   table(parent,['预算 / 组','争用时份额','硬上限'],[
     ['RX / TX 各 '+(q.budget_bps/1000000)+' Mbps','按实际字节计量','各方向受总预算限制'],
-    ['owner 组',(q.owner_weight/total*100).toFixed(1)+'%（权重 '+q.owner_weight+'）','总预算'],
-    ['shared 组',(q.shared_weight/total*100).toFixed(1)+'%（权重 '+q.shared_weight+'）',q.shared_max_bps?(q.shared_max_bps/1000000)+' Mbps':'未另设上限']
+    ['自用组',(q.owner_weight/total*100).toFixed(1)+'%（权重 '+q.owner_weight+'）','总预算'],
+    ['共享组',(q.shared_weight/total*100).toFixed(1)+'%（权重 '+q.shared_weight+'）',q.shared_max_bps?(q.shared_max_bps/1000000)+' Mbps':'未另设上限']
   ]);
   parent.append(el('p','份额用于双方均有需求时的分配；需求不足的一组会让出闲置容量，硬上限持续有效。组内 Tailnet 按权重分配，增加共享连接不会增加份额。','muted'));
 }
 async function nodeState(n) {
-  const s=await api('/nodes/'+n.id+'/status'),c=detailCard(n.display_name+' · 观测状态','state-'+n.id);
+  const [s,{names}]=await Promise.all([api('/nodes/'+n.id+'/status'),visibleTailnetNames()]),c=detailCard(n.display_name+' · 观测状态','state-'+n.id);
+  reportedBudget(c,s);
   c.append(actions(status(s.node.state),...(!s.node.enabled?[status('paused')]:[]),button('刷新观测',async()=>{c.remove();await nodeState(n);}))); 
   table(c,['配置阶段','版本','来源'],[
     ['期望配置',s.desired_revision,'主控当前策略'],
@@ -227,7 +239,7 @@ async function nodeState(n) {
     ['最后应用 ACK 的许可状态',s.reported_usable?'当时有可用许可':'当时没有可用许可'],
     ['当前所示授权的期限',s.policy_has_live_keys?'尚有未到期设备许可':'当前没有未到期设备许可']
   ]);
-  table(c,['Tailnet','有效设备数','完整身份刷新','身份缓存截止','主控联系截止','明确授权截止'],s.grants.map(g=>[g.tailnet_id,g.valid_keys,time(g.last_identity_success),time(g.identity_until),time(g.control_until),g.explicit_until==='0001-01-01T00:00:00Z'?'未另设截止':time(g.explicit_until)]));
+  table(c,['Tailnet','有效设备数','完整身份刷新','身份缓存截止','主控联系截止','明确授权截止'],s.grants.map(g=>[shortIdentity(g.tailnet_id,names.get(g.tailnet_id)),g.valid_keys,time(g.last_identity_success),time(g.identity_until),time(g.control_until),g.explicit_until==='0001-01-01T00:00:00Z'?'未另设截止':time(g.explicit_until)]));
   if(s.node.state==='identity_conflict'&&(actor.role==='admin'||n.owner_id===actor.id)){
     c.append(el('p','先在宿主机关闭其他副本，再选择保留的实例。恢复后该实例仍需重新证明私钥。','muted'));
     const f=form(c,'恢复唯一实例',data=>api('/nodes/'+n.id+'/recover','POST',{instance_id:data.get('instance')}));
@@ -238,7 +250,7 @@ async function nodeState(n) {
     table(c,['采样时间','控制器接收时间','采样配置版本','采样时许可'],[[time(s.report.observed_at),time(s.reported_at),s.report.revision,s.report.usable?'有可用许可':'没有可用许可']]);
     if(s.report.active_connections!==undefined)c.append(el('p','采样时活动 DERP 连接：'+s.report.active_connections));
     const rates=new Map(s.traffic_rates.map(r=>[r.tailnet_id,r]));
-    table(c,['Tailnet','累计 RX / TX 载荷（字节）','平均 RX / TX（Mbps）','采样间隔','排队载荷（字节）'],s.report.traffic.map(t=>{const r=rates.get(t.tailnet_id);return[t.tailnet_id,t.rx_payload_bytes+' / '+t.tx_payload_bytes,r?(r.rx_bits_per_second/1000000).toFixed(3)+' / '+(r.tx_bits_per_second/1000000).toFixed(3):'等待两次连续计数样本',r?r.interval_seconds.toFixed(1)+' 秒':'—',t.queued_payload_bytes];}));
+    table(c,['Tailnet','累计 RX / TX 载荷','平均 RX / TX（Mbps）','采样间隔','排队载荷'],s.report.traffic.map(t=>{const r=rates.get(t.tailnet_id);return[shortIdentity(t.tailnet_id,names.get(t.tailnet_id)),actions(bytes(t.rx_payload_bytes),el('span','/'),bytes(t.tx_payload_bytes)),r?(r.rx_bits_per_second/1000000).toFixed(3)+' / '+(r.tx_bits_per_second/1000000).toFixed(3):'等待两次连续计数样本',r?r.interval_seconds.toFixed(1)+' 秒':'—',bytes(t.queued_payload_bytes)];}));
     c.append(el('p','计数来自节点 derper；累计值从当前进程的相应 Tailnet 计数开始。平均值只覆盖最近两次采样之间的 DERP 载荷，不包含协议开销，也不证明对端应用收到数据。','muted'));
   } else c.append(el('p','尚无当前节点实例的运行报告。','muted'));
   c.append(el('h2','主控独立端点探测'));probeTable(c,s.probes,s.node);
@@ -283,11 +295,30 @@ async function grants(incoming=false){
     if(g.state==='requested'){if(owner)available.push(['approve','批准使用'],['reject','拒绝申请']);if(applicant)available.push(['cancel','取消申请']);}
     if(g.state==='owner_approved'){if(applicant)available.push(['confirm','确认使用'],['cancel','取消申请']);if(owner)available.push(['revoke','撤销使用授权']);}
     if(g.state==='active'){if(owner)available.push(['revoke','撤销使用授权']);if(applicant)available.push(['leave','停止使用']);}
-    return[g.node_name,actions(el('span',g.tailnet_name),el('span','所有者 '+g.applicant)),status(g.state),(g.explicit_until==='0001-01-01T00:00:00Z'?'未另设截止':time(g.explicit_until))+' · r'+g.revision,actions(...available.map(([action,label])=>button(label,async()=>{if(['revoke','leave'].includes(action)&&!confirm('确认'+label+'？此 Tailnet 将不能继续使用该 DERP 节点。'))return;await api('/grants/'+g.id+'/actions','POST',{expected_revision:g.revision,action});await render();})),...(['requested','owner_approved','active'].includes(g.state)?[more(button('带宽规则',()=>qos({id:g.node_id,display_name:g.node_name},false)),button('运行状态',()=>nodeState({id:g.node_id,display_name:g.node_name,owner_id:g.node_owner_id})))]:[]))];
+    return[g.node_name,actions(el('span',g.tailnet_name),el('span','所有者 '+g.applicant)),status(g.state),(g.explicit_until==='0001-01-01T00:00:00Z'?'未另设截止':time(g.explicit_until))+' · 版本 '+g.revision,actions(...available.map(([action,label])=>button(label,async()=>{if(['revoke','leave'].includes(action)&&!confirm('确认'+label+'？此 Tailnet 将不能继续使用该 DERP 节点。'))return;await api('/grants/'+g.id+'/actions','POST',{expected_revision:g.revision,action});await render();})),...(['requested','owner_approved','active'].includes(g.state)?[more(button('带宽规则',()=>qos({id:g.node_id,display_name:g.node_name},false)),button('运行状态',()=>nodeState({id:g.node_id,display_name:g.node_name,owner_id:g.node_owner_id})))]:[]))];
   }));
 }
 async function requests(){return grants(true);}
-async function qos(n,editable){const q=await api('/nodes/'+n.id+'/qos');const c=card(n.display_name+' · 带宽规则');c.append(el('p','争用时按字节分配组份额；需求不足时可借用闲置份额，硬上限仍有效。RX 和 TX 各使用同一预算。','muted'));ruleSummary(c,q);if(!editable){table(c,['你的 Tailnet','分组','组内权重','硬上限'],q.tailnets.map(r=>[r.tailnet_id,r.group,r.weight,r.max_bps?(r.max_bps/1000000)+' Mbps':'未另设上限']));return;}const tailnets=await api('/tailnets');const own=new Set(tailnets.filter(t=>t.owner_id===n.owner_id).map(t=>t.id));const f=form(c,'热应用规则',async(data)=>{const body={budget_bps:Math.round(Number(data.get('budget'))*1000000),owner_weight:Number(data.get('owner')),shared_weight:Number(data.get('shared')),shared_max_bps:Math.round(Number(data.get('shared_max')||0)*1000000),tailnets:q.tailnets.map((r,i)=>({tailnet_id:r.tailnet_id,group:data.get('group'+i),weight:Number(data.get('weight'+i)),max_bps:Math.round(Number(data.get('max'+i)||0)*1000000)}))};await api('/nodes/'+n.id+'/qos','POST',body);});for(const [name,label,value]of[['budget','总预算（Mbps）',q.budget_bps/1000000],['owner','owner 权重',q.owner_weight],['shared','shared 权重',q.shared_weight],['shared_max','shared 硬上限（Mbps，0 表示不单设上限）',q.shared_max_bps/1000000]]){const input=field(f,name,label,'number',true,value);input.min=['owner','shared'].includes(name)?'1':name==='shared_max'?'0':'0.000008';input.step=['owner','shared'].includes(name)?'1':'any';}q.tailnets.forEach((r,i)=>{f.append(el('h2',r.tailnet_id));const group=select(f,'group'+i,'分组',own.has(r.tailnet_id)?[['owner','owner'],['shared','shared']]:[['shared','shared']]);group.value=r.group;field(f,'weight'+i,'Tailnet 权重','number',true,r.weight);field(f,'max'+i,'Tailnet 硬上限（Mbps，0 表示不单设上限）','number',true,r.max_bps/1000000);});done(f);c.scrollIntoView({behavior:'smooth'});}
+async function qos(n,editable){
+ const [q,state,{tailnets,names}]=await Promise.all([api('/nodes/'+n.id+'/qos'),api('/nodes/'+n.id+'/status'),visibleTailnetNames()]);
+ document.getElementById('qos-'+n.id)?.remove();
+ const c=detailCard(n.display_name+' · 带宽规则','qos-'+n.id);
+ if(actor.role==='admin'&&n.owner_id!==actor.id&&n.owner_id)c.append(el('p',managedLabel(n.owner_id),'badge'));
+ c.append(el('p','主控配置预算：'+q.budget_bps/1000000+' Mbps · 当前期望版本 '+state.desired_revision));reportedBudget(c,state);ruleSummary(c,q);
+ c.append(el('p','自用组仅允许节点提供者自己的 Tailnet；自用 Tailnet 也可放入共享组。双方都有持续需求时按实际字节竞争，可借用闲置容量，硬上限仍有效。','muted'));
+ if(!editable){table(c,['你的 Tailnet','分组','组内权重','硬上限'],q.tailnets.map(r=>[shortIdentity(r.tailnet_id,names.get(r.tailnet_id)),r.group==='owner'?'自用组':'共享组',r.weight,r.max_bps?r.max_bps/1000000+' Mbps':'不另设上限']));return;}
+ const own=new Set(tailnets.filter(t=>t.owner_id===n.owner_id).map(t=>t.id));
+ const f=form(c,'保存并下发规则',async data=>{
+  const body={budget_bps:Math.round(Number(data.get('budget'))*1000000),owner_weight:Number(data.get('owner')),shared_weight:Number(data.get('shared')),shared_max_bps:Math.round(Number(data.get('shared_max')||0)*1000000),tailnets:q.tailnets.map((r,i)=>({tailnet_id:r.tailnet_id,group:data.get('group'+i),weight:Number(data.get('weight'+i)),max_bps:Math.round(Number(data.get('max'+i)||0)*1000000)}))};
+  await api('/nodes/'+n.id+'/qos','POST',body);return()=>qos(n,true);
+ });f.successMessage='规则已保存，正在等待节点报告应用。';
+ for(const [name,label,value]of [['budget','主控总预算（Mbps）',q.budget_bps/1000000],['owner','自用组权重',q.owner_weight],['shared','共享组权重',q.shared_weight],['shared_max','共享组硬上限（Mbps，0 表示不另设上限）',q.shared_max_bps/1000000]]){
+  const input=field(f,name,label,'number',true,value);input.min=['owner','shared'].includes(name)?'1':name==='shared_max'?'0':'0.000008';input.step=['owner','shared'].includes(name)?'1':'any';
+ }
+ const preview=el('p',undefined,'muted');f.append(preview);const update=()=>{const owner=Number(f.elements.owner.value),shared=Number(f.elements.shared.value);preview.textContent=owner+':'+shared+' → 自用 '+(owner/(owner+shared)*100).toFixed(1)+'% / 共享 '+(shared/(owner+shared)*100).toFixed(1)+'%（双方持续有需求时）';};f.elements.owner.addEventListener('input',update);f.elements.shared.addEventListener('input',update);update();
+ q.tailnets.forEach((r,i)=>{const h=el('h3');h.append(shortIdentity(r.tailnet_id,names.get(r.tailnet_id)));f.append(h);const group=select(f,'group'+i,'分组',own.has(r.tailnet_id)?[['owner','自用组'],['shared','共享组']]:[['shared','共享组']]);group.value=r.group;const weight=field(f,'weight'+i,'Tailnet 权重','number',true,r.weight);weight.min='1';weight.step='1';const max=field(f,'max'+i,'Tailnet 硬上限（Mbps，0 表示不另设上限）','number',true,r.max_bps/1000000);max.min='0';max.step='any';});done(f);
+ if(state.desired_revision!==state.applied_revision)limitedRefresh(c,async()=>{const fresh=await api('/nodes/'+n.id+'/status');const message=c.querySelector('.application-observation')||el('p',undefined,'application-observation');message.textContent=fresh.applied_revision===fresh.desired_revision?'节点已报告应用版本 '+fresh.applied_revision:'等待下发/应用：期望 '+fresh.desired_revision+' · 接收 '+fresh.received_revision+' · 应用 '+fresh.applied_revision;c.append(message);return fresh.desired_revision!==fresh.applied_revision;});
+}
 async function account(){page('我的账号','密码修改后已有会话会失效，请重新登录。');const f=form(card('修改密码'),'更新密码',async(data,f)=>{const password=data.get('password');f.elements.password.value='';await api('/users/'+actor.id+'/password','POST',{password});await session();});const input=field(f,'password','新密码（12–72 字节）','password');input.autocomplete='new-password';done(f);}
 const roleNames={admin:'主控管理员',provider:'节点提供者',member:'成员'};
 async function users(){
@@ -299,7 +330,10 @@ async function users(){
 }
 async function userRole(u){const c=card('修改 '+u.username+' 的角色');c.append(el('p','角色修改后此账号需要重新登录。仍拥有节点的提供者需先处理自己的节点，才能改为成员。','muted'));const f=form(c,'保存角色',data=>api('/users/'+u.id+'/role','POST',{role:data.get('role')}));const input=select(f,'role','账号角色',[['member','成员'],['provider','节点提供者']]);input.value=u.role;done(f);c.scrollIntoView({behavior:'smooth'});}
 async function password(u){const f=form(card('重置 '+u.username+' 的密码'),'重置密码',async(data,f)=>{const password=data.get('password');f.elements.password.value='';await api('/users/'+u.id+'/password','POST',{password});});field(f,'password','新密码','password');done(f);f.scrollIntoView({behavior:'smooth'});}
-async function settings(){page('集群设置','身份源和主控联系各有独立的离线保留期。失败或重发快照不会更新最后成功时间。');const q=await api('/settings/retention');const f=form(card('离线保留'),'保存保留期',data=>api('/settings/retention','POST',{identity_seconds:Number(data.get('identity')),control_seconds:Number(data.get('control'))}));field(f,'identity','身份缓存保留（秒）','number',true,q.identity_seconds);field(f,'control','主控联系保留（秒）','number',true,q.control_seconds);done(f);}
+async function settings(){
+ page('集群设置','身份源和主控联系各有独立的离线保留期。失败或重发快照不会更新最后成功时间。');const q=await api('/settings/retention');const f=form(card('离线保留'),'保存保留期',data=>api('/settings/retention','POST',{identity_seconds:Number(data.get('identity')),control_seconds:Number(data.get('control'))}));
+ for(const [name,label,value]of [['identity','身份缓存保留（秒）',q.identity_seconds],['control','主控联系保留（秒）',q.control_seconds]]){const input=field(f,name,label,'number',true,value),hint=el('small',undefined,'muted');input.after(hint);const update=()=>{const seconds=Number(input.value);hint.textContent=seconds%86400===0?seconds/86400+' 天':seconds%3600===0?seconds/3600+' 小时':seconds+' 秒（'+seconds/3600+' 小时）';};input.addEventListener('input',update);update();}done(f);
+}
 async function events(){page('事件与审计','各展示最近 200 条可见记录；已恢复的连续故障保留恢复时间。');const [events,audit]=await Promise.all([api('/events'),api('/audit')]);table(card('站内事件'),['时间','资源','事件','状态'],events.map(e=>[time(e.created_at),e.resource_id,e.message,e.resolved_at?'结束 / 恢复于 '+time(e.resolved_at):'待处理']));table(card('操作审计'),['时间','实际操作者','动作','资源'],audit.map(a=>[time(a.created_at),a.actor_username||a.actor_id,a.action,a.resource_id]));}
 function localState(s) {
  const c=card('本机运行状态');
@@ -309,7 +343,7 @@ function localState(s) {
  const differences=fields.filter(([key])=>s.saved[key]!==s.active[key]);
  if(differences.length)table(c,['待应用项目','运行中配置','已保存配置'],differences.map(([key,label])=>[label,key==='max_budget_bps'?s.active[key]/1000000+' Mbps':String(s.active[key]),key==='max_budget_bps'?s.saved[key]/1000000+' Mbps':String(s.saved[key])]));
  table(c,['最后联系主控','流量采样时间','活动 DERP 连接'],[[time(s.control.last_contact),time(s.control.traffic_observed_at),s.control.active_connections]]);
- if(s.control.traffic?.length)table(c,['Tailnet','累计 RX / TX 载荷（字节）','排队载荷（字节）'],s.control.traffic.map(t=>[t.tailnet_id,t.rx_payload_bytes+' / '+t.tx_payload_bytes,t.queued_payload_bytes]));
+ if(s.control.traffic?.length)table(c,['Tailnet','累计 RX / TX 载荷','排队载荷'],s.control.traffic.map(t=>[shortIdentity(t.tailnet_id),actions(bytes(t.rx_payload_bytes),el('span','/'),bytes(t.tx_payload_bytes)),bytes(t.queued_payload_bytes)]));
  return c;
 }
 
@@ -365,7 +399,7 @@ async function member(){
  page(controller?'主控内置节点':'本机节点',controller?'管理与主控一起运行的 DERP 节点。注销本机节点会停止其中继与使用许可，主控管理功能继续运行。':'本机管理员管理节点的集群连接与本地配置。共享授权、分组权重及 Tailnet 优先级由节点提供者在主控面板配置。');
  const c=localState(s);
  c.append(button('本机设置',()=>{location.hash='local';}));
- if(s.qos){const rules=card('主控下发规则');ruleSummary(rules,s.qos);table(rules,['Tailnet','分组','权重','硬上限'],s.qos.tailnets.map(t=>[t.tailnet_id,t.group,t.weight,t.max_bps?t.max_bps/1000000+' Mbps':'未另设上限']));}
+ if(s.qos){const rules=card('主控下发规则');ruleSummary(rules,s.qos);table(rules,['Tailnet','分组','权重','硬上限'],s.qos.tailnets.map(t=>[shortIdentity(t.tailnet_id),t.group==='owner'?'自用组':'共享组',t.weight,t.max_bps?t.max_bps/1000000+' Mbps':'不另设上限']));}
  if(s.joined){table(c,['主控地址','集群 ID','节点 ID'],[[s.controller_url,s.cluster_id,s.node_id]]);c.append(button(controller?'注销本机节点':'退出集群',async()=>{if(!confirm(controller?'注销会关闭本机 DERP 连接并清除设备许可，主控继续运行。重新注册后需要重新授权。确认继续？':'退出会关闭本机 DERP 连接并清除设备许可。重新加入需要主控签发新注册码及重新授权。确认继续？'))return;const result=await api('/local/leave','POST',{});await render();notice(controller?'本机节点已注销。':result.released?'本机已退出，主控已释放节点。':'本机已退出；主控暂未确认释放，请在主控重新签发注册码。');},'danger'));}
  else if(controller)c.append(button('注册本机节点',async()=>{await api('/local/register','POST',{display_name:s.saved.hostname||'主控内置节点'});await render();},'primary'));
  else {const f=form(card('加入已有集群'),'验证并加入',async(data,f)=>{const body={controller_url:data.get('controller_url'),enrollment_code:data.get('enrollment_code')};f.elements.enrollment_code.value='';await api('/local/join','POST',body);});field(f,'controller_url','主控 HTTPS 地址','url',true,s.controller_url);const code=field(f,'enrollment_code','一次性注册码','password');code.autocomplete='off';done(f);}
@@ -421,7 +455,7 @@ async function overview(){
   for(const t of tailnetItems.slice(0,4))item(tailnetPanel,t.display_name,'完整身份成功：'+time(t.last_identity_success),status(t.enabled?t.credential_status:'paused'));
   if(!tailnetItems.length)tailnetPanel.append(el('p','绑定 Tailnet 后，即可为其选择 DERP 节点。','muted'));grid.append(tailnetPanel);
   const grantsPanel=panel('使用授权','grants','查看授权 →');
-  for(const g of [...pending,...grantItems.filter(g=>g.state==='active')].slice(0,4))item(grantsPanel,g.tailnet_name+' → '+g.node_name,'授权版本 r'+g.revision,status(g.state),g.node_owner_id===actor.id&&g.tailnet_owner_id!==actor.id?'requests':'grants');
+  for(const g of [...pending,...grantItems.filter(g=>g.state==='active')].slice(0,4))item(grantsPanel,g.tailnet_name+' → '+g.node_name,'授权版本 '+g.revision,status(g.state),g.node_owner_id===actor.id&&g.tailnet_owner_id!==actor.id?'requests':'grants');
   if(!pending.length&&!grantItems.some(g=>g.state==='active'))grantsPanel.append(el('p','暂无待处理或活跃的共享授权。','muted'));grid.append(grantsPanel);
   if(local)grid.append(localPanel());
  }

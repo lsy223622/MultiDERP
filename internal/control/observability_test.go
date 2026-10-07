@@ -69,6 +69,25 @@ func TestExpiryEventsReachBothOwnersDeduplicateAndResolve(t *testing.T) {
 	}
 }
 
+func TestNodeBudgetReportDistinguishesMissingAndUnlimited(t *testing.T) {
+	for _, input := range []string{`{"revision":1}`, `{"revision":1,"local_max_budget_bps":0,"effective_budget_bps":40000000}`} {
+		var report cluster.NodeReport
+		if err := json.Unmarshal([]byte(input), &report); err != nil {
+			t.Fatal(err)
+		}
+		body, _ := json.Marshal(report)
+		var actual map[string]any
+		json.Unmarshal(body, &actual)
+		if strings.Contains(input, "local_max_budget_bps") {
+			if value, ok := actual["local_max_budget_bps"]; !ok || value != float64(0) || actual["effective_budget_bps"] != float64(40000000) {
+				t.Fatal("explicit unlimited/observed budget lost", string(body))
+			}
+		} else if _, ok := actual["local_max_budget_bps"]; ok {
+			t.Fatal("old report inferred a limit")
+		}
+	}
+}
+
 func TestNodeRuntimeReportIsScopedTimedAndIndependentOfACK(t *testing.T) {
 	s, admin, member, n, _, session := registeredTestNode(t)
 	now := time.Now().UTC().Truncate(time.Second).Add(time.Second)
@@ -82,7 +101,7 @@ func TestNodeRuntimeReportIsScopedTimedAndIndependentOfACK(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := NewHTTPHandler(s)
-	report := map[string]any{"revision": p.Revision, "usable": true, "observed_at": now, "traffic": []map[string]any{
+	report := map[string]any{"revision": p.Revision, "usable": true, "observed_at": now, "local_max_budget_bps": 40000000, "effective_budget_bps": 40000000, "active_connections": 42, "traffic": []map[string]any{
 		{"tailnet_id": "provider-private", "rx_payload_bytes": 999},
 		{"tailnet_id": "member-own", "rx_payload_bytes": 123, "tx_payload_bytes": 100, "relayed_payload_bytes": 100},
 	}}
@@ -103,9 +122,11 @@ func TestNodeRuntimeReportIsScopedTimedAndIndependentOfACK(t *testing.T) {
 	var state struct {
 		Applied uint64 `json:"applied_revision"`
 		Report  struct {
-			Revision   uint64                   `json:"revision"`
-			ObservedAt time.Time                `json:"observed_at"`
-			Traffic    []cluster.TailnetTraffic `json:"traffic"`
+			LocalMaxBudgetBPS  *uint64                  `json:"local_max_budget_bps"`
+			EffectiveBudgetBPS *uint64                  `json:"effective_budget_bps"`
+			Revision           uint64                   `json:"revision"`
+			ObservedAt         time.Time                `json:"observed_at"`
+			Traffic            []cluster.TailnetTraffic `json:"traffic"`
 		} `json:"report"`
 		ReportedAt int64 `json:"reported_at"`
 	}
@@ -114,6 +135,9 @@ func TestNodeRuntimeReportIsScopedTimedAndIndependentOfACK(t *testing.T) {
 	}
 	if w.Code != 200 || state.Applied != 0 || state.Report.Revision != p.Revision || !state.Report.ObservedAt.Equal(now) || state.ReportedAt != now.Unix() || len(state.Report.Traffic) != 1 || state.Report.Traffic[0].RXPayloadBytes != 123 || strings.Contains(w.Body.String(), "provider-private") {
 		t.Fatal("report source, privacy or ACK boundary failed", w.Body.String())
+	}
+	if state.Report.LocalMaxBudgetBPS == nil || *state.Report.LocalMaxBudgetBPS != 40000000 || state.Report.EffectiveBudgetBPS == nil || *state.Report.EffectiveBudgetBPS != 40000000 || strings.Contains(w.Body.String(), "active_connections") || strings.Contains(w.Body.String(), "instance_id") {
+		t.Fatal("budget/revision scope failed", w.Body)
 	}
 	for _, change := range []func(){
 		func() { report["revision"] = p.Revision + 1 },
@@ -133,6 +157,10 @@ func TestNodeRuntimeReportIsScopedTimedAndIndependentOfACK(t *testing.T) {
 	if state.ReportedAt != now.Add(-time.Minute).Unix() {
 		t.Fatal("reading status refreshed report timestamp")
 	}
+}
+
+func TestNodeBudgetReportPreservesScopeAndRevision(t *testing.T) {
+	TestNodeRuntimeReportIsScopedTimedAndIndependentOfACK(t)
 }
 
 func TestEventsAndAuditOnlyExposeRelatedOwnerRecords(t *testing.T) {

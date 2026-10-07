@@ -46,7 +46,7 @@ func (d *Daemon) startNodeControl(ctx context.Context) {
 	client, policy := d.nodeClient, d.policyClient
 	go func() {
 		defer close(done)
-		err := client.RunControl(ctx, policy.Path, policy.ApplyPolicy, policy.Status)
+		err := client.RunControl(ctx, policy.Path, policy.ApplyPolicy, func(ctx context.Context) (cluster.PolicyApplication, error) { return d.nodeControlSample(ctx, policy) })
 		if errors.Is(err, cluster.ErrIdentityConflict) {
 			d.derperMu.Lock()
 			defer d.derperMu.Unlock()
@@ -65,6 +65,15 @@ func (d *Daemon) startNodeControl(ctx context.Context) {
 			d.setApplyError(fmt.Errorf("node control: %w", err))
 		}
 	}()
+}
+
+func (d *Daemon) nodeControlSample(ctx context.Context, policy derper.PolicyClient) (cluster.PolicyApplication, error) {
+	sample, err := policy.Status(ctx)
+	if err == nil {
+		limit := d.activeConfig().Node.MaxBudgetBPS
+		sample.LocalMaxBudgetBPS = &limit
+	}
+	return sample, err
 }
 
 func (d *Daemon) nodeAdmin(ctx context.Context, r admin.Request) admin.Response {

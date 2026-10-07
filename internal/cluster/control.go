@@ -20,6 +20,7 @@ type PolicyACK struct {
 }
 
 type PolicyApplication struct {
+	LocalMaxBudgetBPS  *uint64
 	EffectiveBudgetBPS uint64
 	Revision           uint64
 	Usable             bool
@@ -40,11 +41,13 @@ type TailnetTraffic struct {
 const MaxControlMessageBytes = MaxPolicyBytes + 512
 
 type NodeReport struct {
-	Revision          uint64           `json:"revision"`
-	Usable            bool             `json:"usable"`
-	ObservedAt        time.Time        `json:"observed_at"`
-	Traffic           []TailnetTraffic `json:"traffic"`
-	ActiveConnections *uint64          `json:"active_connections,omitempty"`
+	LocalMaxBudgetBPS  *uint64          `json:"local_max_budget_bps,omitempty"`
+	EffectiveBudgetBPS *uint64          `json:"effective_budget_bps,omitempty"`
+	Revision           uint64           `json:"revision"`
+	Usable             bool             `json:"usable"`
+	ObservedAt         time.Time        `json:"observed_at"`
+	Traffic            []TailnetTraffic `json:"traffic"`
+	ActiveConnections  *uint64          `json:"active_connections,omitempty"`
 }
 
 type NodeHeartbeatRequest struct {

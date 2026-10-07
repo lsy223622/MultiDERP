@@ -1,8 +1,11 @@
 package daemon
 
 import (
+	"context"
+	"encoding/json"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -11,7 +14,47 @@ import (
 
 	"github.com/lsy223622/UniDERP/v2/internal/admin"
 	"github.com/lsy223622/UniDERP/v2/internal/config"
+	"github.com/lsy223622/UniDERP/v2/internal/derper"
 )
+
+func TestHeartbeatBudgetReportUsesActiveLocalLimit(t *testing.T) {
+	d := New(t.Context(), Options{})
+	d.current = config.Default()
+	d.current.Node.MaxBudgetBPS = 40000000
+	d.desired = d.current.Clone()
+	d.desired.Node.MaxBudgetBPS = 30000000
+	path := filepath.Join(shortTempDir(t), "budget.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	done := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			done <- err
+			return
+		}
+		defer conn.Close()
+		var request map[string]any
+		err = json.NewDecoder(conn).Decode(&request)
+		if err == nil {
+			err = json.NewEncoder(conn).Encode(map[string]any{"effective_budget_bps": 40000000, "revision": 7, "usable": true, "traffic_observed_at": time.Now().UTC()})
+		}
+		done <- err
+	}()
+	sample, err := d.nodeControlSample(context.Background(), derper.PolicyClient{SocketPath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if sample.LocalMaxBudgetBPS == nil || *sample.LocalMaxBudgetBPS != 40000000 || sample.EffectiveBudgetBPS != 40000000 || sample.Revision != 7 {
+		t.Fatal("pending limit leaked into sample", sample)
+	}
+}
 
 func TestMemberNodeRegistrationBoundary(t *testing.T) {
 	cfg := config.Default()

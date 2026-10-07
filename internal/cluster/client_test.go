@@ -142,12 +142,16 @@ func TestControlHeartbeatsSendActualSampleRatherThanLastACK(t *testing.T) {
 	c.controlStatus = ControlStatus{AppliedRevision: 1, Usable: true}
 	session := NodeSession{NodeID: "node", Token: "token", ExpiresAt: observed.Add(time.Hour)}
 	err = c.controlHeartbeats(ctx, session, func(context.Context) (PolicyApplication, error) {
-		return PolicyApplication{Revision: 2, Usable: false, TrafficObservedAt: observed, Traffic: []TailnetTraffic{{TailnetID: "own", TXPayloadBytes: 456}}}, nil
+		limit := uint64(40000000)
+		return PolicyApplication{LocalMaxBudgetBPS: &limit, EffectiveBudgetBPS: 40000000, Revision: 2, Usable: false, TrafficObservedAt: observed, Traffic: []TailnetTraffic{{TailnetID: "own", TXPayloadBytes: 456}}}, nil
 	})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal(err)
 	}
 	request := <-reports
+	if request.Report == nil || request.Report.LocalMaxBudgetBPS == nil || *request.Report.LocalMaxBudgetBPS != 40000000 || request.Report.EffectiveBudgetBPS == nil || *request.Report.EffectiveBudgetBPS != 40000000 {
+		t.Fatal("runtime budget not sent", request)
+	}
 	if request.Report == nil || request.Report.Revision != 2 || request.Report.Usable || !request.Report.ObservedAt.Equal(observed) || len(request.Report.Traffic) != 1 || request.Report.Traffic[0].TXPayloadBytes != 456 {
 		t.Fatal("heartbeat omitted actual runtime sample", request)
 	}

@@ -269,7 +269,8 @@ func (c *EnrollmentClient) controlHeartbeats(ctx context.Context, session NodeSe
 		cancel()
 		if sampleErr == nil && !sample.TrafficObservedAt.IsZero() {
 			connections := sample.ActiveConnections
-			request.Report = &NodeReport{Revision: sample.Revision, Usable: sample.Usable, ObservedAt: sample.TrafficObservedAt, Traffic: sample.Traffic, ActiveConnections: &connections}
+			effective := sample.EffectiveBudgetBPS
+			request.Report = &NodeReport{Revision: sample.Revision, Usable: sample.Usable, ObservedAt: sample.TrafficObservedAt, Traffic: sample.Traffic, ActiveConnections: &connections, LocalMaxBudgetBPS: sample.LocalMaxBudgetBPS, EffectiveBudgetBPS: &effective}
 			c.mu.Lock()
 			c.controlStatus.Usable = sample.Usable
 			c.controlStatus.Traffic = sample.Traffic
