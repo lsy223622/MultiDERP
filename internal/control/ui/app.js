@@ -33,7 +33,7 @@ function pageParams(){return pageLocation(location.hash,actor.role).params;}
 function updatePageParams(changes,refresh=false){
  const params=pageParams();for(const [key,value]of Object.entries(changes)){if(value)params.set(key,value);else params.delete(key);}
  const hash='#'+currentPage+(params.size?'?'+params.toString():'');
- if(refresh)location.hash=hash;else history.pushState(null,'',hash);
+ if(hash===location.hash)return;if(refresh)location.hash=hash;else history.pushState(null,'',hash);
 }
 function detailCard(title,id){
  if(!canDiscardEdits($('node-detail')))throw new DOMException('Keep edits','AbortError');++detailGeneration;
@@ -52,7 +52,7 @@ function detailCard(title,id){
  c.prepend(button('关闭详情',()=>{c.remove();if(trigger?.isConnected)trigger.focus();}));const heading=c.querySelector('h2');heading.tabIndex=-1;heading.focus();c.scrollIntoView({behavior:'smooth',block:'start'});return c;
 }
 async function openNode(n){const entry=visibleNodes.get(n.id);if(entry?.summary&&!entry.editable)return sharedNodeInfo(entry);return nodeState(n);}
-function sharedNodeInfo(entry){const s=entry.summary,c=detailCard(entry.node.display_name+' · 概览','state-'+entry.node.id);c.append(el('p',entry.node.domain+' · 提供者 '+s.provider,'muted'));ruleSummary(c,s.qos);const figure=el('div',undefined,'qos-preview');c.append(figure);qosFigure(figure,s.qos,{});probeTable(c,s.probes,s.node);return c;}
+function sharedNodeInfo(entry){const s=entry.summary,c=detailCard(entry.node.display_name+' · 概览','state-'+entry.node.id);c.append(el('p',entry.node.domain+' · 提供者 '+s.provider,'muted'));ruleSummary(c,s.qos);const figure=el('div',undefined,'qos-preview');c.append(figure);qosFigure(figure,s.qos,{tailnet_caps_unknown:true});probeTable(c,s.probes,s.node);return c;}
 async function nodeGrants(n){const ticket=++detailGeneration,grants=await api('/grants');if(ticket!==detailGeneration)return;const c=detailCard(n.display_name+' · 使用授权','state-'+n.id),incoming=n.owner_id===actor.id||actor.role==='admin';table(c,['Tailnet','共享关系','下一步'],grants.filter(g=>g.node_id===n.id).map(g=>[g.tailnet_name,actions(status(g.state),el('p',grantGuidance(g,incoming),'muted')),el('a',incoming?'查看收到的申请':'查看我的使用授权')]));c.querySelectorAll('a').forEach(a=>a.href='#'+(incoming?'requests':'grants')+'?q='+encodeURIComponent(n.display_name)+(actor.role==='admin'&&n.owner_id!==actor.id?'&scope=all':''));}
 
 function nodeMaintenance(n){const c=detailCard(n.display_name+' · 注册与维护','state-'+n.id);c.append(el('p','注册、公开端口和域名会影响客户端入口；变更后需要更新 DERP map。','muted'));c.append(actions(button('公开端口',()=>nodePorts(n)),button('域名',()=>changeDomain(n)),button(n.state==='pending'?'注册码':'重新签发注册码',()=>enrollment(n)),button('删除节点',()=>deleteNode(n),'danger')));}
@@ -100,10 +100,10 @@ function form(parent,submit,run){
  const ordinary=()=>[...f.elements].filter(input=>input.name&&!['password','file','submit'].includes(input.type));
  f.addEventListener('input',()=>{if(f.initialValues){f.dirty=ordinary().some(input=>f.initialValues.get(input.name)!==input.value);edit.hidden=!f.dirty;}});
  f.addEventListener('change',()=>{if(f.initialValues){f.dirty=ordinary().some(input=>f.initialValues.get(input.name)!==input.value);edit.hidden=!f.dirty;}});
- f.addEventListener('submit',async e=>{e.preventDefault();const generation=pageGeneration,original=b.textContent;b.disabled=true;b.textContent=processingLabel(original);f.querySelectorAll('.field-error,.persistent-error').forEach(n=>n.remove());f.querySelectorAll('[aria-invalid]').forEach(n=>n.removeAttribute('aria-invalid'));
-  try{const after=await run(new FormData(f),f);if(generation!==pageGeneration)return;f.dirty=false;edit.hidden=true;f.initialValues=new Map(ordinary().map(input=>[input.name,input.value]));notice(f.successMessage||submit+'：已保存。');if(await render({preserveScroll:true})&&typeof after==='function')await after();}
-  catch(err){if(err.name==='AbortError')return;const input=err.field&&f.elements.namedItem(err.field);if(input){input.setAttribute('aria-invalid','true');input.after(el('small',err.message,'field-error'));input.focus();}persistentError(f,err.message);}
-  finally{b.disabled=false;b.textContent=original;}
+ f.addEventListener('submit',async e=>{e.preventDefault();const generation=pageGeneration,original=b.textContent,data=new FormData(f),controls=[...f.elements].filter(input=>input!==b).map(input=>[input,input.disabled]);controls.forEach(([input])=>input.disabled=true);b.disabled=true;b.textContent=processingLabel(original);f.querySelectorAll('.field-error,.persistent-error').forEach(n=>n.remove());f.querySelectorAll('[aria-invalid]').forEach(n=>n.removeAttribute('aria-invalid'));
+  try{const after=await run(data,f);if(generation!==pageGeneration||!f.isConnected)return;f.dirty=false;edit.hidden=true;f.initialValues=new Map(ordinary().map(input=>[input.name,input.value]));notice(f.successMessage||submit+'：已保存。');if(await render({preserveScroll:true})&&typeof after==='function')await after();}
+  catch(err){if(err.name==='AbortError')return;controls.forEach(([input,disabled])=>input.disabled=disabled);const input=err.field&&f.elements.namedItem(err.field);if(input){input.setAttribute('aria-invalid','true');input.after(el('small',err.message,'field-error'));input.focus();}persistentError(f,err.message);}
+  finally{controls.forEach(([input,disabled])=>input.disabled=disabled);b.disabled=false;b.textContent=original;}
  });f.submitButton=b;return f;
 }
 function done(f){f.append(f.submitButton);f.initialValues=new Map([...f.elements].filter(input=>input.name&&!['password','file','submit'].includes(input.type)).map(input=>[input.name,input.value]));return f;}
@@ -279,7 +279,7 @@ async function nodeState(n) {
   const ticket=++detailGeneration,[s,{names}]=await Promise.all([api('/nodes/'+n.id+'/status'),visibleTailnetNames()]);if(ticket!==detailGeneration)return;const c=detailCard(n.display_name+' · 观测状态','state-'+n.id);
  const facts=nodeFacts(s);table(c,['独立状态','主控所见事实'],[['身份许可',facts.identity],['主控联系',facts.connection],['策略应用',facts.application],['节点报告',facts.report]]);
   reportedBudget(c,s);
-  c.append(actions(status(s.node.state),...(!s.node.enabled?[status('paused')]:[]),button('刷新观测',async()=>{c.remove();await nodeState(n);}))); 
+  c.append(actions(status(s.node.state),...(!s.node.enabled?[status('paused')]:[]),button('刷新观测',()=>nodeState(n))));
   table(c,['配置阶段','版本','来源'],[
     ['期望配置',s.desired_revision,'主控当前策略'],
     ['节点已接收',s.received_revision,'节点持久化后的接收 ACK'],
@@ -309,7 +309,7 @@ async function nodeState(n) {
     c.append(el('p','计数来自节点 derper；累计值从当前进程的相应 Tailnet 计数开始。平均值只覆盖最近两次采样之间的 DERP 载荷，不包含协议开销，也不证明对端应用收到数据。','muted'));
   } else c.append(el('p','尚无当前节点实例的运行报告。','muted'));
   c.append(el('h2','主控独立端点探测'));probeTable(c,s.probes,s.node);
-  if((actor.role==='admin'||n.owner_id===actor.id)&&['registered','ready','offline'].includes(s.node.state))c.append(button('立即检查端点',async()=>{await api('/nodes/'+n.id+'/probe','POST',{});c.remove();await nodeState(n);}));
+  if((actor.role==='admin'||n.owner_id===actor.id)&&['registered','ready','offline'].includes(s.node.state))c.append(button('立即检查端点',async()=>{await api('/nodes/'+n.id+'/probe','POST',{});await nodeState(n);}));
   c.scrollIntoView({behavior:'smooth'});
 }
 async function directory(){
@@ -333,7 +333,7 @@ async function directory(){
       ]));
       disclosure.append(summary,details);
       const controls=el('div',undefined,'resource-actions');
-      const grant=selected&&grants.find(g=>g.node_id===n.id&&g.tailnet_id===selected.id),action=directoryAction(grant);if(selected){controls.append(action==='confirm'?button('确认使用',async()=>{await api('/grants/'+grant.id+'/actions','POST',{expected_revision:grant.revision,action:'confirm'});await render({preserveScroll:true});},'primary'):action==='request'?button('申请使用',()=>request(n,tailnets,selected.id),'primary'):button(action==='wait'?'查看等待批准的申请':'查看授权',()=>{location.hash='#grants?q='+encodeURIComponent(selected.display_name);}));details.prepend(el('p',grant?grantGuidance(grant,false):'当前 Tailnet 尚未申请此节点。','muted'));}controls.append(button('规则与探测',()=>sharedNodeInfo(visibleNodes.get(n.id))));
+      const grant=selected&&grants.find(g=>g.node_id===n.id&&g.tailnet_id===selected.id),action=directoryAction(grant);if(selected){controls.append(action==='confirm'?button('确认使用',async()=>{await api('/grants/'+grant.id+'/actions','POST',{expected_revision:grant.revision,action:'confirm'});await render({preserveScroll:true});},'primary'):action==='request'?button('申请使用',()=>request(n,tailnets,selected.id),'primary'):button(action==='wait'?'查看等待批准的申请':'查看授权',()=>{location.hash='#grants?tailnet='+encodeURIComponent(selected.id)+(actor.role==='admin'&&selected.owner_id!==actor.id?'&scope=all':'');}));details.prepend(el('p',grant?grantGuidance(grant,false):'当前 Tailnet 尚未申请此节点。','muted'));}controls.append(button('规则与探测',()=>sharedNodeInfo(visibleNodes.get(n.id))));
       header.append(disclosure,controls);nodeCard.append(header);nodeCard.dataset.nodeId=n.id;list.append(nodeCard);
     }
     if(!items.length)listEmpty(list,nodes.length,'这一组还没有可选择的节点。');
@@ -358,7 +358,7 @@ function nodeFacts(s){return {
 };}
 async function grants(incoming=false){
   page(incoming?'收到的节点使用申请':'节点使用授权',incoming?'处理其他 Tailnet 使用你提供的 DERP 节点的申请。批准后由 Tailnet 所有者确认，设备许可才会生效。':'查看你的 Tailnet 使用哪些 DERP 节点。自己的节点直接生效；其他节点需要提供者批准，再点击“确认使用”。');
-  await scopeSelector();listFilters('grant');const allItems=(await api('/grants')).filter(g=>(actor.role==='admin'&&resourceScope==='all')||(incoming?g.node_owner_id:g.tailnet_owner_id)===actor.id),params=pageParams(),query=(params.get('q')||'').toLowerCase(),filter=params.get('state'),items=allItems.filter(g=>(g.node_name+' '+g.tailnet_name+' '+g.applicant).toLowerCase().includes(query)&&(!filter||filter==='all'||filter==='pending'&&grantNeedsAction(g,incoming,actor)||filter==='active'&&g.state==='active'||filter==='ended'&&['revoked','rejected','expired','cancelled'].includes(g.state)));
+  await scopeSelector();listFilters('grant');const allItems=(await api('/grants')).filter(g=>(actor.role==='admin'&&resourceScope==='all')||(incoming?g.node_owner_id:g.tailnet_owner_id)===actor.id),params=pageParams(),query=(params.get('q')||'').toLowerCase(),filter=params.get('state'),items=allItems.filter(g=>(!params.get('tailnet')||g.tailnet_id===params.get('tailnet'))&&(g.node_name+' '+g.tailnet_name+' '+g.applicant).toLowerCase().includes(query)&&(!filter||filter==='all'||filter==='pending'&&grantNeedsAction(g,incoming,actor)||filter==='active'&&g.state==='active'||filter==='ended'&&['revoked','rejected','expired','cancelled'].includes(g.state)));
   const list=card(incoming?'节点收到的申请':'Tailnet 的节点使用权限');if(!items.length){listEmpty(list,allItems.length,filter==='pending'?'当前没有等待你处理的使用申请。':allItems.length?'当前没有可展示的使用授权。':incoming?'节点还没有收到使用申请。':'还没有节点使用授权，请到节点列表为 Tailnet 选择节点。');return;}
   table(list,['DERP 节点','使用的 Tailnet','关系状态 / 下一步','使用截止 / 版本','操作'],items.map(g=>{
     const owner=incoming&&(actor.role==='admin'||g.node_owner_id===actor.id),applicant=!incoming&&(actor.role==='admin'||g.tailnet_owner_id===actor.id),available=[];
@@ -372,13 +372,13 @@ async function requests(){return grants(true);}
 function qosIllustration(q,state){
  const total=q.owner_weight+q.shared_weight;if(!Number.isFinite(total)||q.owner_weight<=0||q.shared_weight<=0||!Number.isFinite(q.budget_bps)||q.budget_bps<=0)return null;
  const r=state.report,current=r&&r.revision===state.desired_revision&&state.applied_revision===state.desired_revision&&Number.isFinite(r.effective_budget_bps),budget=(current?r.effective_budget_bps:q.budget_bps)/1000000,ownerRatio=q.owner_weight/total;
- return {budget,ownerRatio,owner:budget*ownerRatio,shared:budget*(1-ownerRatio),source:current?'report':'input',hasCaps:q.shared_max_bps>0||q.tailnets.some(t=>t.max_bps>0)};
+ return {budget,ownerRatio,owner:budget*ownerRatio,shared:budget*(1-ownerRatio),source:current?'report':'input',hasCaps:q.shared_max_bps>0||q.tailnets.some(t=>t.max_bps>0),capsUnknown:!!state.tailnet_caps_unknown};
 }
 function qosFigure(parent,q,state,names=new Map()){
  parent.replaceChildren();const model=qosIllustration(q,state);if(!model){parent.append(el('p','填写有效预算和两个正权重后显示比例示意。','muted'));return;}
  const caption=el('p',model.source==='report'?'参考最近匹配版本报告的有效预算 '+model.budget+' Mbps，对当前输入权重作示意；编辑仍需保存与应用。':'按当前输入的主控预算 '+model.budget+' Mbps 作示意；本地约束或应用状态未知，不能作为实际执行值。','muted');parent.append(caption);
  const bar=el('div',undefined,'qos-ratio'),own=el('span','自用 '+(model.ownerRatio*100).toFixed(1)+'%'),shared=el('span','共享 '+((1-model.ownerRatio)*100).toFixed(1)+'%');own.style.flexBasis=model.ownerRatio*100+'%';shared.style.flexBasis=(1-model.ownerRatio)*100+'%';bar.append(own,shared);bar.setAttribute('aria-label','竞争权重：自用 '+q.owner_weight+'，共享 '+q.shared_weight);parent.append(bar);
- const suffix=model.hasCaps?'（未计额外硬上限）':'（无额外组或 Tailnet 硬上限）';const rows=[['双方持续有需求','参考约 '+model.owner.toFixed(2)+' / '+model.shared.toFixed(2)+' Mbps '+suffix],['仅自用有需求','可借用闲置份额，参考预算 '+model.budget+' Mbps '+suffix],['仅共享有需求','可借用闲置份额，参考预算 '+model.budget+' Mbps '+suffix]];table(parent,['需求情形','配置示意'],rows);
+ const suffix=model.hasCaps||model.capsUnknown?'（未计额外硬上限）':'（无额外组或 Tailnet 硬上限）';const rows=[['双方持续有需求','参考约 '+model.owner.toFixed(2)+' / '+model.shared.toFixed(2)+' Mbps '+suffix],['仅自用有需求','可借用闲置份额，参考预算 '+model.budget+' Mbps '+suffix],['仅共享有需求','可借用闲置份额，参考预算 '+model.budget+' Mbps '+suffix]];table(parent,['需求情形','配置示意'],rows);if(model.capsUnknown)parent.append(el('p','这里只显示可见规则，未确认全部 Tailnet 硬上限；示意不计这些限制。','muted'));
  if(model.hasCaps){const caps=[...(q.shared_max_bps?[['共享组',q.shared_max_bps/1000000+' Mbps']]:[]),...q.tailnets.filter(t=>t.max_bps>0).map(t=>[names.get(t.tailnet_id)||t.tailnet_id.slice(0,8)+'…',t.max_bps/1000000+' Mbps'])];table(parent,['持续有效的硬上限','上限'],caps);parent.append(el('p','硬上限会限制借用；上面的数值例子未求解这些限制。','muted'));}
  parent.append(el('p','这是权重与需求情形示意，假设配置对应的组有持续需求；不代表实际吞吐或保证带宽。','muted'));
 }
@@ -389,7 +389,7 @@ async function qos(n,editable){
  if(actor.role==='admin'&&n.owner_id!==actor.id&&n.owner_id)c.append(el('p',managedLabel(n.owner_id),'badge'));
  c.append(el('p','主控配置预算：'+q.budget_bps/1000000+' Mbps · 当前期望版本 '+state.desired_revision));reportedBudget(c,state);ruleSummary(c,q);
  c.append(el('p','自用组仅允许节点提供者自己的 Tailnet；自用 Tailnet 也可放入共享组。双方都有持续需求时按实际字节竞争，可借用闲置容量，硬上限仍有效。','muted'));
- if(!editable){const figure=el('div',undefined,'qos-preview');c.append(figure);qosFigure(figure,q,state,names);table(c,['你的 Tailnet','分组','组内权重','硬上限'],q.tailnets.map(r=>[shortIdentity(r.tailnet_id,names.get(r.tailnet_id)),r.group==='owner'?'自用组':'共享组',r.weight,r.max_bps?r.max_bps/1000000+' Mbps':'不另设上限']));return;}
+ if(!editable){const figure=el('div',undefined,'qos-preview');c.append(figure);qosFigure(figure,q,{...state,tailnet_caps_unknown:true},names);table(c,['你的 Tailnet','分组','组内权重','硬上限'],q.tailnets.map(r=>[shortIdentity(r.tailnet_id,names.get(r.tailnet_id)),r.group==='owner'?'自用组':'共享组',r.weight,r.max_bps?r.max_bps/1000000+' Mbps':'不另设上限']));return;}
  const own=new Set(tailnets.filter(t=>t.owner_id===n.owner_id).map(t=>t.id));
  const f=form(c,'保存并下发规则',async data=>{
   const body={budget_bps:Math.round(Number(data.get('budget'))*1000000),owner_weight:Number(data.get('owner')),shared_weight:Number(data.get('shared')),shared_max_bps:Math.round(Number(data.get('shared_max')||0)*1000000),tailnets:q.tailnets.map((r,i)=>({tailnet_id:r.tailnet_id,group:data.get('group'+i),weight:Number(data.get('weight'+i)),max_bps:Math.round(Number(data.get('max'+i)||0)*1000000)}))};
@@ -580,7 +580,7 @@ const views={overview,tailnets,nodes,directory,grants,requests,account,users,set
 async function render(options={}){
  if(!actor||!canDiscardEdits())return false;
  ++detailGeneration;const generation=++pageGeneration,scrollY=window.scrollY;clearTimeout(refreshTimer);
- const address=pageLocation(location.hash,actor.role);let name=address.name,allowed;visibleNodes=new Map();if(address.params.has('scope'))resourceScope=address.params.get('scope');
+ const address=pageLocation(location.hash,actor.role);let name=address.name,allowed;visibleNodes=new Map();resourceScope=address.params.get('scope')||'mine';
  if(serverRole==='setup')allowed=actor.role==='admin'?['bootstrap','account']:['account'];
  else if(serverRole==='member')allowed=actor.role==='admin'?['overview','member','local','account']:['account'];
  else {
