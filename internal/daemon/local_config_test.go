@@ -125,6 +125,7 @@ func TestManualCertificateUploadValidatesPairAndHostname(t *testing.T) {
 
 func TestLocalSettingsSaveApplyAndRolePersistence(t *testing.T) {
 	d := localTestDaemon(t, true)
+	d.derper = &daemonFakeProcess{}
 	if d.Role() != "setup" || d.derper.Running() {
 		t.Fatal("bootstrap role")
 	}
@@ -141,7 +142,7 @@ func TestLocalSettingsSaveApplyAndRolePersistence(t *testing.T) {
 	}
 	saved := status.Saved
 	saved.Role = "member"
-	saved.TLSMode, saved.CertMode = "external", "none"
+	saved.Hostname = "relay.example.com"
 	saved.MaxBudgetBPS = 80000000
 	if err := d.SaveSettings(t.Context(), saved); err != nil {
 		t.Fatal(err)

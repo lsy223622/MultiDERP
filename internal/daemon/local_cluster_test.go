@@ -20,10 +20,11 @@ import (
 
 func TestWebLeaveOfflineStopsRelayBeforeReturning(t *testing.T) {
 	d := localTestDaemon(t, true)
+	d.derper = &daemonFakeProcess{}
 	settings, _ := d.Status(t.Context())
 	local := settings.Saved
 	local.Role = "member"
-	local.TLSMode, local.CertMode = "external", "none"
+	local.Hostname = "relay.example.com"
 	if err := d.SaveSettings(t.Context(), local); err != nil {
 		t.Fatal(err)
 	}
@@ -142,6 +143,7 @@ func TestWebRegisterLocalReplacesRejectedPendingCode(t *testing.T) {
 
 func TestWebJoinUsesProofAndRetriesPendingReceipt(t *testing.T) {
 	d := localTestDaemon(t, true)
+	d.derper = &daemonFakeProcess{}
 	var challenge cluster.NodeChallenge
 	var attempts int
 	var offline bool
@@ -211,7 +213,7 @@ func TestWebJoinUsesProofAndRetriesPendingReceipt(t *testing.T) {
 	settings, _ := d.Status(t.Context())
 	local := settings.Saved
 	local.Role = "member"
-	local.TLSMode, local.CertMode = "external", "none"
+	local.Hostname = "relay.example.com"
 	if err := d.SaveSettings(t.Context(), local); err != nil {
 		t.Fatal(err)
 	}
