@@ -119,11 +119,19 @@ async function tailnets(){
     const mapPanel=el('div',undefined,'resource-map');mapPanel.hidden=true;
     const mapOutput=el('textarea');mapOutput.readOnly=true;mapOutput.setAttribute('aria-label',t.display_name+' DERP map JSON');mapOutput.spellcheck=false;
     mapPanel.append(el('h3','DERP map'),mapOutput);
+    const mapMeta=el('p',undefined,'muted'),mapControls=actions(button('复制 JSON',()=>copyText(mapOutput.value)),button('下载 JSON',()=>{
+      const url=URL.createObjectURL(new Blob([mapOutput.value],{type:'application/json'})),link=el('a');link.href=url;link.download='uniderp-'+t.id+'.json';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+    }));
+    const instructions=el('ol');for(const text of ['打开 Tailscale 管理面板的 Access controls 策略。','把此 JSON 合并到策略顶层 derpMap 字段；保留现有 ACL、grants 和其他配置。','已有自定义 Region 时核对编号冲突；保留已有 Regions，不直接覆盖整个策略文件。不自动启用 OmitDefaultRegions。','保存策略后，用普通客户端检查实际 DERP 连接。复制或下载只完成导出。'])instructions.append(el('li',text));
+    const docs=el('a','Tailscale 自定义 DERP 文档');docs.href='https://tailscale.com/docs/reference/derp-servers/custom-derp-servers';docs.target='_blank';docs.rel='noopener noreferrer';
+    const empty=el('div');mapPanel.append(mapMeta,mapControls,instructions,docs,empty);
     mapPanel.id='tailnet-map-'+t.id;
     const controls=el('div',undefined,'resource-actions');
     const mapToggle=button('显示 DERP map',async()=>{
       if(!mapPanel.hidden){mapPanel.hidden=true;mapToggle.textContent='显示 DERP map';mapToggle.setAttribute('aria-expanded','false');return;}
-      const result=await api('/tailnets/'+t.id+'/derpmap');mapOutput.value=JSON.stringify(result,null,2);mapPanel.hidden=false;mapToggle.textContent='收起 DERP map';mapToggle.setAttribute('aria-expanded','true');
+      const result=await api('/tailnets/'+t.id+'/derpmap');mapOutput.value=JSON.stringify(result,null,2);const count=Object.values(result.Regions||{}).reduce((sum,r)=>sum+(r.Nodes?.length||0),0);mapMeta.textContent=count+' 个节点 · 本次读取 '+new Date().toLocaleString();empty.replaceChildren();
+      if(!count){const related=grants.filter(g=>g.tailnet_id===t.id),waiting=related.some(g=>g.state==='requested'),confirming=related.some(g=>g.state==='owner_approved');empty.append(el('p',!t.enabled?'Tailnet 已暂停，当前没有可用地图。':confirming?'提供者已批准，请确认使用。':waiting?'正在等待提供者批准。':'当前没有具备有效设备许可的活跃授权。','muted'));const link=el('a',confirming?'确认使用':waiting?'查看申请':'选择节点');link.href=confirming||waiting?'#grants':'#directory';empty.append(link);}
+      mapPanel.hidden=false;mapToggle.textContent='收起 DERP map';mapToggle.setAttribute('aria-expanded','true');
     });
     mapToggle.setAttribute('aria-controls',mapPanel.id);mapToggle.setAttribute('aria-expanded','false');controls.append(mapToggle);
     controls.append(more(button('替换凭据',()=>credential(t)),button(t.enabled?'暂停':'启用',async()=>{await api('/tailnets/'+t.id+'/enabled','POST',{enabled:!t.enabled});await render();}),button('删除凭据',async()=>{if(!confirm('删除凭据会撤销设备许可，确认继续？'))return;await api('/tailnets/'+t.id+'/credential','DELETE');await render();},'danger'),button('删除 Tailnet',async()=>{if(!confirm('删除 Tailnet 会终止所有相关授权。已离线节点的旧许可受原缓存期限约束。确认继续？'))return;await api('/tailnets/'+t.id,'DELETE');await render();},'danger'),...(actor.role==='admin'?[button('转移',()=>transfer(t))]:[])));
