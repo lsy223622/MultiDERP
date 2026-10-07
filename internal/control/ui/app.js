@@ -351,14 +351,19 @@ async function events(){
 }
 function localState(s) {
  const c=card('本机运行状态');
- table(c,['项目','状态'],[['角色',s.role==='setup'?'等待初始设置':s.role==='controller'?'主控':'成员节点'],['集群连接',s.joined?(s.control.connected?'已连接主控':'已注册，主控连接中断'):'尚未加入'],['中继许可',s.control.usable?'当前有有效许可':'当前没有有效许可'],['已接收 / 已应用策略',s.control.received_revision+' / '+s.control.applied_revision],['主控下发总预算',s.policy_budget_bps?s.policy_budget_bps/1000000+' Mbps':'尚无策略'],['本地总限速',s.active.max_budget_bps?s.active.max_budget_bps/1000000+' Mbps':'不另设上限'],['当前有效调度预算',s.effective_budget_bps?s.effective_budget_bps/1000000+' Mbps':'尚未应用'],['配置应用',s.pending_apply?'已保存，待应用':'已应用']]);
- if(s.apply_error)c.append(el('p','最近应用未成功，请检查已保存设置与证书后重试。','error'));
- const fields=[['role','角色'],['hostname','公共 DERP 域名'],['derp_listen','DERP TCP 监听'],['stun_listen','STUN UDP 监听'],['tls_mode','TLS 模式'],['cert_mode','证书方式'],['derp_port','公开 DERP TCP 端口'],['stun_port','公开 STUN UDP 端口'],['max_budget_bps','本地总限速（Mbps）'],['logging_level','日志级别']];
- const differences=fields.filter(([key])=>s.saved[key]!==s.active[key]);
- if(differences.length)table(c,['待应用项目','运行中配置','已保存配置'],differences.map(([key,label])=>[label,key==='max_budget_bps'?s.active[key]/1000000+' Mbps':String(s.active[key]),key==='max_budget_bps'?s.saved[key]/1000000+' Mbps':String(s.saved[key])]));
+ table(c,['项目','状态'],[['角色',s.role==='setup'?'等待初始设置':s.role==='controller'?'主控':'成员节点'],['集群连接',s.joined?(s.control.connected?'已连接主控':'已注册，主控连接中断'):'尚未加入'],['中继许可',s.control.usable?'当前有有效许可':'当前没有有效许可'],['已接收 / 已应用策略',s.control.received_revision+' / '+s.control.applied_revision],['主控下发总预算',s.policy_budget_bps?s.policy_budget_bps/1000000+' Mbps':'尚无策略'],['本地总限速',s.active.max_budget_bps?s.active.max_budget_bps/1000000+' Mbps':'不另设上限'],['当前有效调度预算',s.effective_budget_bps?s.effective_budget_bps/1000000+' Mbps':'尚未应用']]);
+ if(s.pending_apply||s.apply_error){const link=el('a',s.apply_error?'本机设置应用失败，检查配置与证书':'有已保存待应用的本机设置');link.href='#local';c.append(link);}
  table(c,['最后联系主控','流量采样时间','活动 DERP 连接'],[[time(s.control.last_contact),time(s.control.traffic_observed_at),s.control.active_connections]]);
  if(s.control.traffic?.length)table(c,['Tailnet','累计 RX / TX 载荷','排队载荷'],s.control.traffic.map(t=>[shortIdentity(t.tailnet_id),actions(bytes(t.rx_payload_bytes),el('span','/'),bytes(t.tx_payload_bytes)),bytes(t.queued_payload_bytes)]));
  return c;
+}
+
+function localApplication(s){
+ const c=card('配置应用');c.append(el('p',s.apply_error?'最近应用失败，请检查配置与证书。':s.pending_apply?'有已保存待应用的配置。':'已保存配置与运行配置一致。',s.apply_error?'error':'muted'));
+ const fields=[['role','角色'],['hostname','公共 DERP 域名'],['derp_listen','DERP TCP 监听'],['stun_listen','STUN UDP 监听'],['tls_mode','TLS 模式'],['cert_mode','证书方式'],['derp_port','公开 DERP TCP 端口'],['stun_port','公开 STUN UDP 端口'],['max_budget_bps','本地总限速（Mbps）'],['logging_level','日志级别']];
+ const differences=fields.filter(([key])=>s.saved[key]!==s.active[key]);
+ if(differences.length)table(c,['待应用项目','运行中配置','已保存配置'],differences.map(([key,label])=>[label,key==='max_budget_bps'?s.active[key]/1000000+' Mbps':String(s.active[key]),key==='max_budget_bps'?s.saved[key]/1000000+' Mbps':String(s.saved[key])]));
+ const link=el('a','查看本机连接与运行状态');link.href='#member';c.append(link);return c;
 }
 
 function localConfigForm(s,role,initial=false) {
@@ -391,7 +396,7 @@ function localConfigForm(s,role,initial=false) {
  const upload=form(certCard,'保存证书',async(data,f)=>{const certificate=f.elements.certificate.files[0],key=f.elements.private_key.files[0];if(!certificate||!key)throw new Error('请选择证书链和私钥文件。');await api('/local/certificate','POST',{certificate:await certificate.text(),private_key:await key.text()});f.reset();});
  field(upload,'certificate','PEM 证书链','file');field(upload,'private_key','PEM 私钥','file');done(upload);
  upload.successMessage='证书已保存，尚未应用。';
- const apply=button('③ 应用已保存设置',async()=>{await api('/local/apply','POST',{});await session();notice('设置已应用；下一步注册本机节点或加入集群。');location.hash='member';});
+ const apply=button('③ 应用已保存设置',async()=>{await api('/local/apply','POST',{});await session();notice(s.joined?'本机设置已应用。':'设置已应用，请在本机节点页注册或加入集群。');if(initial)location.hash='member';});
  apply.disabled=initial&&s.saved.role==='setup';c.append(apply);
  const updateCertificate=()=>{const manual=tls.value==='passthrough'&&cert.value==='manual';certCard.hidden=!manual;steps.hidden=!manual;f.submitButton.textContent=initial?(manual?'① 保存初始设置':'保存并应用初始设置'):'保存配置';};
  tls.addEventListener('change',updateCertificate);cert.addEventListener('change',updateCertificate);updateCertificate();
@@ -403,10 +408,10 @@ async function bootstrap(){
  const chooser=card('选择角色');
  chooser.append(actions(button('配置为主控',()=>{document.querySelectorAll('#content .card').forEach(c=>{if(c!==chooser)c.remove();});localConfigForm(s,'controller',true);}),button('加入已有集群',()=>{document.querySelectorAll('#content .card').forEach(c=>{if(c!==chooser)c.remove();});localConfigForm(s,'member',true);})));
  if(s.saved.role!=='setup')localConfigForm(s,s.saved.role,true);
- const extra=el('details',undefined,'state-disclosure');extra.append(el('summary','查看本机运行状态'));$('content').append(extra);const state=localState(s);extra.append(state);
+ const extra=el('details',undefined,'state-disclosure');extra.append(el('summary','查看已保存配置'));$('content').append(extra);extra.append(el('p','本机角色：'+s.saved.role+' · 域名：'+(s.saved.hostname||'尚未设置'),'muted'));
 }
 
-async function localSettings(){const s=await api('/local/status');page('本机设置','保存配置后单独应用。应用会重启本机中继，管理面板保持可访问。');localState(s);localConfigForm(s,s.role);}
+async function localSettings(){const s=await api('/local/status');page('本机设置','保存配置后单独应用。应用会重启本机中继，管理面板保持可访问。');localApplication(s);localConfigForm(s,s.role);}
 
 async function member(){
  const s=await api('/local/status'),controller=serverRole==='controller';
