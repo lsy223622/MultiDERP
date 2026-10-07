@@ -159,10 +159,6 @@ func TestNodeRuntimeReportIsScopedTimedAndIndependentOfACK(t *testing.T) {
 	}
 }
 
-func TestNodeBudgetReportPreservesScopeAndRevision(t *testing.T) {
-	TestNodeRuntimeReportIsScopedTimedAndIndependentOfACK(t)
-}
-
 func TestEventsAndAuditOnlyExposeRelatedOwnerRecords(t *testing.T) {
 	s, admin, member := nodeTestStore(t)
 	for _, a := range []Actor{admin, member} {

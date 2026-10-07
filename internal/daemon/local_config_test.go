@@ -141,6 +141,7 @@ func TestLocalSettingsSaveApplyAndRolePersistence(t *testing.T) {
 	}
 	saved := status.Saved
 	saved.Role = "member"
+	saved.TLSMode, saved.CertMode = "external", "none"
 	saved.MaxBudgetBPS = 80000000
 	if err := d.SaveSettings(t.Context(), saved); err != nil {
 		t.Fatal(err)

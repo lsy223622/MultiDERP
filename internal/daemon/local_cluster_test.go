@@ -23,6 +23,7 @@ func TestWebLeaveOfflineStopsRelayBeforeReturning(t *testing.T) {
 	settings, _ := d.Status(t.Context())
 	local := settings.Saved
 	local.Role = "member"
+	local.TLSMode, local.CertMode = "external", "none"
 	if err := d.SaveSettings(t.Context(), local); err != nil {
 		t.Fatal(err)
 	}
@@ -210,6 +211,7 @@ func TestWebJoinUsesProofAndRetriesPendingReceipt(t *testing.T) {
 	settings, _ := d.Status(t.Context())
 	local := settings.Saved
 	local.Role = "member"
+	local.TLSMode, local.CertMode = "external", "none"
 	if err := d.SaveSettings(t.Context(), local); err != nil {
 		t.Fatal(err)
 	}
