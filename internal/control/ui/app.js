@@ -133,7 +133,8 @@ function configureMenu(trigger,menu){
 }
 function more(...items){const wrap=el('span'),trigger=el('button',undefined,'more-menu'),menu=el('div',undefined,'more-options');trigger.type='button';trigger.setAttribute('aria-label','更多操作');trigger.innerHTML='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h.01M12 12h.01M19 12h.01"/></svg>';menu.id='action-menu-'+(++menuSequence);menu.setAttribute('popover','auto');trigger.setAttribute('popovertarget',menu.id);menu.append(...items);configureMenu(trigger,menu);wrap.append(trigger,menu);return wrap;}
 function actions(...items){const r=el('div',undefined,'row');r.append(...items);return r;}
-function time(value){if(!value||value==='0001-01-01T00:00:00Z')return '尚无观测';return new Date(typeof value==='number'?value*1000:value).toLocaleString();}
+function time(value){const date=new Date(typeof value==='number'?value*1000:value);if(!value||value==='0001-01-01T00:00:00Z'||!Number.isFinite(date.getTime()))return '尚无观测';return date.toLocaleString(undefined,{timeZoneName:'short'});}
+function observedTime(value){const absolute=time(value),result=el('time');if(absolute==='尚无观测'){result.textContent=absolute;return result;}const date=new Date(typeof value==='number'?value*1000:value),seconds=Math.round((date-Date.now())/1000),amount=Math.abs(seconds),unit=amount<60?'second':amount<3600?'minute':amount<86400?'hour':'day',divisor={second:1,minute:60,hour:3600,day:86400}[unit];result.textContent=new Intl.RelativeTimeFormat('zh-CN',{numeric:'auto'}).format(Math.round(seconds/divisor),unit);result.dateTime=date.toISOString();result.title=absolute;result.setAttribute('aria-label',result.textContent+' · '+absolute);return result;}
 function bytes(value){const text=el('span');text.title=String(value)+' 字节';text.textContent=value>=1048576?(value/1048576).toFixed(2)+' MiB':value>=1024?(value/1024).toFixed(2)+' KiB':value+' B';return text;}
 function shortIdentity(id,name){const details=el('details',undefined,'identity');details.append(el('summary',name||id.slice(0,8)+'…'),el('code',id),button('复制完整 ID',()=>copyText(id)));return details;}
 async function visibleTailnetNames(){const [tailnets,grants]=await Promise.all([api('/tailnets'),api('/grants')]);const names=new Map(grants.map(g=>[g.tailnet_id,g.tailnet_name+' · '+g.applicant]));for(const t of tailnets)if(!names.has(t.id))names.set(t.id,t.display_name);return {tailnets,names};}
@@ -195,7 +196,7 @@ async function tailnets(){
       mapPanel.hidden=false;mapToggle.textContent='收起 DERP map';mapToggle.setAttribute('aria-expanded','true');
     });
     mapToggle.setAttribute('aria-controls',mapPanel.id);mapToggle.setAttribute('aria-expanded','false');controls.append(mapToggle);
-    controls.append(more(button('替换凭据',()=>credential(t)),button(t.enabled?'暂停':'启用',async()=>{await api('/tailnets/'+t.id+'/enabled','POST',{enabled:!t.enabled});await render();}),button('删除凭据',async()=>{if(!confirm('删除凭据会撤销设备许可，确认继续？'))return;await api('/tailnets/'+t.id+'/credential','DELETE');await render();},'danger'),button('删除 Tailnet',async()=>{if(!confirm('删除 Tailnet 会终止所有相关授权。已离线节点的旧许可受原缓存期限约束。确认继续？'))return;await api('/tailnets/'+t.id,'DELETE');await render();},'danger'),...(actor.role==='admin'?[button('转移',()=>transfer(t))]:[])));
+    controls.append(more(button('替换凭据',()=>credential(t)),button(t.enabled?'暂停':'启用',async()=>{await api('/tailnets/'+t.id+'/enabled','POST',{enabled:!t.enabled});await render();}),button('删除凭据',async()=>{if(!confirm('删除 '+t.display_name+' 的 OAuth 凭据会撤销设备许可，确认继续？'))return;await api('/tailnets/'+t.id+'/credential','DELETE');await render();},'danger'),button('删除 Tailnet',async()=>{if(!confirm('删除 '+t.display_name+' 会终止所有相关授权。已离线节点的旧许可受原缓存期限约束。确认继续？'))return;await api('/tailnets/'+t.id,'DELETE');await render();},'danger'),...(actor.role==='admin'?[button('转移',()=>transfer(t))]:[])));
     header.append(disclosure,controls);c.append(header,mapPanel);$('content').append(c);
   }
   if(!items.length)$('content').append(el('p','尚未绑定 Tailnet。','muted'));
@@ -217,11 +218,11 @@ async function nodes(){
   const list=card('DERP 节点');
   const nodeActions=n=>actions(button('状态',()=>nodeState(n)),...(n.state!=='pending'?[button('规则',()=>qos(n,true))]:[]),...(local?.node_id===n.id?[button('本机管理',()=>{location.hash='member';})]:[]),more(button('公开端口',()=>nodePorts(n)),button(n.state==='pending'?'注册码':'重新签发注册码',()=>enrollment(n)),button(n.enabled?'暂停':'启用',async()=>{await api('/nodes/'+n.id+'/enabled','POST',{enabled:!n.enabled});await render();}),...(n.state!=='pending'?[button('域名',()=>changeDomain(n))]:[]),button('删除节点',()=>deleteNode(n),'danger')));
   if(!items.length)listEmpty(list,allItems.length,allItems.length?'当前没有需要展示的节点。':'还没有自己的 DERP 节点，请添加节点并完成注册。');else table(list,['名称','域名 / 公开端口','状态','最近心跳','操作'],items.map(n=>[
-    actions(button(n.display_name,()=>openNode(n),'resource-name'),...(actor.role==='admin'&&n.owner_id!==actor.id?[el('span',managedLabel(n.owner_id),'badge')]:[]),...(local?.node_id===n.id?[el('span','主控内置节点','badge')]:[])),el('code',n.domain+' · DERP TCP '+n.derp_port+' / STUN UDP '+n.stun_port),actions(status(n.state),...(!n.enabled?[status('paused')]:[])),time(n.last_heartbeat),
+    actions(button(n.display_name,()=>openNode(n),'resource-name'),...(actor.role==='admin'&&n.owner_id!==actor.id?[el('span',managedLabel(n.owner_id),'badge')]:[]),...(local?.node_id===n.id?[el('span','主控内置节点','badge')]:[])),el('code',n.domain+' · DERP TCP '+n.derp_port+' / STUN UDP '+n.stun_port),actions(status(n.state),...(!n.enabled?[status('paused')]:[])),observedTime(n.last_heartbeat),
     nodeActions(n)
   ]));
   list.querySelectorAll('tbody tr').forEach((r,i)=>r.dataset.nodeId=items[i].id);
-  if(items.some(n=>n.state==='pending'||n.state==='registered'))limitedRefresh(list,async()=>{const fresh=await api('/nodes');let pending=false;for(const [i,n]of items.entries()){const updated=fresh.find(x=>x.id===n.id);if(!updated)continue;const row=list.querySelectorAll('tbody tr[data-node-id]')[i];const stateChanged=n.state!==updated.state||n.enabled!==updated.enabled;Object.assign(n,updated);row.children[2].replaceChildren(status(n.state),...(!n.enabled?[status('paused')]:[]));row.children[3].textContent=time(n.last_heartbeat);if(stateChanged)row.children[4].replaceChildren(nodeActions(n));if(updated.state==='pending'||updated.state==='registered')pending=true;}return pending;});
+  if(items.some(n=>n.state==='pending'||n.state==='registered'))limitedRefresh(list,async()=>{const fresh=await api('/nodes');let pending=false;for(const [i,n]of items.entries()){const updated=fresh.find(x=>x.id===n.id);if(!updated)continue;const row=list.querySelectorAll('tbody tr[data-node-id]')[i];const stateChanged=n.state!==updated.state||n.enabled!==updated.enabled;Object.assign(n,updated);row.children[2].replaceChildren(status(n.state),...(!n.enabled?[status('paused')]:[]));row.children[3].replaceChildren(observedTime(n.last_heartbeat));if(stateChanged)row.children[4].replaceChildren(nodeActions(n));if(updated.state==='pending'||updated.state==='registered')pending=true;}return pending;});
   const f=form(addFormCard('添加 DERP 节点',allItems.length),'创建节点并签发注册码',async data=>{const result=await api('/nodes','POST',{display_name:data.get('name'),domain:data.get('domain').trim(),derp_port:Number(data.get('derp_port')),stun_port:Number(data.get('stun_port'))});return()=>showEnrollment(result.enrollment,result.node);});field(f,'name','显示名称');field(f,'domain','公共 DERP 域名');publicPortFields(f,{derp_port:443,stun_port:3478});done(f);
 }
 function publicPortFields(f,n) {
@@ -244,7 +245,7 @@ async function changeDomain(n){
   });field(f,'domain','新公共 DERP 域名','text',true,n.domain);done(f);
 }
 async function deleteNode(n){
-  if(!confirm('删除节点会撤销集群身份和注册码，并移出 DERP map。离线许可到原缓存期限结束。确认继续？'))return;
+  if(!confirm('删除 '+n.display_name+' 会撤销集群身份和注册码，并移出 DERP map。离线许可到原缓存期限结束。确认继续？'))return;
   if(n.state!=='pending'){
     await api('/nodes/'+n.id+'/enabled','POST',{enabled:false});
     const state=await api('/nodes/'+n.id+'/status');
@@ -287,13 +288,13 @@ async function nodeState(n) {
   if(s.desired_revision>s.applied_revision)c.append(el('p','当前变更待节点应用。已离线的节点在原缓存期限内继续执行旧快照；期限届满由 derper 自行关闭许可。','muted'));
   table(c,['控制器记录','状态 / 时间'],[
     ['控制流',s.control_stream_open?'当前有连接':'当前无连接'],
-    ['最后心跳',time(s.node.last_heartbeat)],
+    ['最后心跳',observedTime(s.node.last_heartbeat)],
     ['域名注册验证',time(s.domain_verified_at)],
     ['最近应用错误',s.node.last_error||'无已记录错误'],
     ['最后应用 ACK 的许可状态',s.reported_usable?'当时有可用许可':'当时没有可用许可'],
     ['当前所示授权的期限',s.policy_has_live_keys?'尚有未到期设备许可':'当前没有未到期设备许可']
   ]);
-  table(c,['Tailnet','有效设备数','完整身份刷新','身份缓存截止','主控联系截止','明确授权截止'],s.grants.map(g=>[shortIdentity(g.tailnet_id,names.get(g.tailnet_id)),g.valid_keys,time(g.last_identity_success),time(g.identity_until),time(g.control_until),g.explicit_until==='0001-01-01T00:00:00Z'?'未另设截止':time(g.explicit_until)]));
+  table(c,['Tailnet','有效设备数','完整身份刷新','身份缓存截止','主控联系截止','明确授权截止'],s.grants.map(g=>[shortIdentity(g.tailnet_id,names.get(g.tailnet_id)),g.valid_keys,observedTime(g.last_identity_success),time(g.identity_until),time(g.control_until),g.explicit_until==='0001-01-01T00:00:00Z'?'未另设截止':time(g.explicit_until)]));
   if(s.node.state==='identity_conflict'&&(actor.role==='admin'||n.owner_id===actor.id)){
     c.append(el('p','先在宿主机关闭其他副本，再选择保留的实例。恢复后该实例仍需重新证明私钥。','muted'));
     const f=form(c,'恢复唯一实例',data=>api('/nodes/'+n.id+'/recover','POST',{instance_id:data.get('instance')}));
@@ -301,7 +302,7 @@ async function nodeState(n) {
   }
   c.append(el('h2','节点自报运行状态'));
   if(s.report) {
-    table(c,['采样时间','控制器接收时间','采样配置版本','采样时许可'],[[time(s.report.observed_at),time(s.reported_at),s.report.revision,s.report.usable?'有可用许可':'没有可用许可']]);
+    table(c,['采样时间','控制器接收时间','采样配置版本','采样时许可'],[[observedTime(s.report.observed_at),observedTime(s.reported_at),s.report.revision,s.report.usable?'有可用许可':'没有可用许可']]);
     if(s.report.active_connections!==undefined)c.append(el('p','采样时活动 DERP 连接：'+s.report.active_connections));
     const rates=new Map(s.traffic_rates.map(r=>[r.tailnet_id,r]));
     table(c,['Tailnet','累计 RX / TX 载荷','平均 RX / TX（Mbps）','采样间隔','排队载荷'],s.report.traffic.map(t=>{const r=rates.get(t.tailnet_id);return[shortIdentity(t.tailnet_id,names.get(t.tailnet_id)),actions(bytes(t.rx_payload_bytes),el('span','/'),bytes(t.tx_payload_bytes)),r?(r.rx_bits_per_second/1000000).toFixed(3)+' / '+(r.tx_bits_per_second/1000000).toFixed(3):'等待两次连续计数样本',r?r.interval_seconds.toFixed(1)+' 秒':'—',bytes(t.queued_payload_bytes)];}));
@@ -364,7 +365,7 @@ async function grants(incoming=false){
     if(g.state==='requested'){if(owner)available.push(['approve','批准使用'],['reject','拒绝申请']);if(applicant)available.push(['cancel','取消申请']);}
     if(g.state==='owner_approved'){if(applicant)available.push(['confirm','确认使用'],['cancel','取消申请']);if(owner)available.push(['revoke','撤销使用授权']);}
     if(g.state==='active'){if(owner)available.push(['revoke','撤销使用授权']);if(applicant)available.push(['leave','停止使用']);}
-    return[actions(el('span',g.node_name),...(actor.role==='admin'&&incoming&&g.node_owner_id!==actor.id?[el('span',managedLabel(g.node_owner_id),'badge')]:[])),actions(el('span',g.tailnet_name),el('span','所有者 '+g.applicant)),actions(status(g.state),el('p',grantGuidance(g,incoming),'muted')),(g.explicit_until==='0001-01-01T00:00:00Z'?'未另设截止':time(g.explicit_until))+' · 版本 '+g.revision,actions(...(g.state==='active'&&!incoming?[button('查看 DERP map',()=>{location.hash='#tailnets';})]:[]),...(applicant&&['revoked','rejected','expired','cancelled'].includes(g.state)?[button('重新申请',async()=>request({id:g.node_id,display_name:g.node_name},await api('/tailnets'),g.tailnet_id))]:[]),...available.map(([action,label])=>button(label,async()=>{if(['revoke','leave'].includes(action)&&!confirm('确认'+label+'？此 Tailnet 将不能继续使用该 DERP 节点。'))return;await api('/grants/'+g.id+'/actions','POST',{expected_revision:g.revision,action});await render();})),...(['requested','owner_approved','active'].includes(g.state)?[more(button('带宽规则',()=>qos({id:g.node_id,display_name:g.node_name},false)),button('运行状态',()=>nodeState({id:g.node_id,display_name:g.node_name,owner_id:g.node_owner_id})))]:[]))];
+    return[actions(el('span',g.node_name),...(actor.role==='admin'&&incoming&&g.node_owner_id!==actor.id?[el('span',managedLabel(g.node_owner_id),'badge')]:[])),actions(el('span',g.tailnet_name),el('span','所有者 '+g.applicant)),actions(status(g.state),el('p',grantGuidance(g,incoming),'muted')),(g.explicit_until==='0001-01-01T00:00:00Z'?'未另设截止':time(g.explicit_until))+' · 版本 '+g.revision,actions(...(g.state==='active'&&!incoming?[button('查看 DERP map',()=>{location.hash='#tailnets';})]:[]),...(applicant&&['revoked','rejected','expired','cancelled'].includes(g.state)?[button('重新申请',async()=>request({id:g.node_id,display_name:g.node_name},await api('/tailnets'),g.tailnet_id))]:[]),...available.map(([action,label])=>button(label,async()=>{if(['revoke','leave'].includes(action)&&!confirm('确认'+label+' '+g.tailnet_name+' 对 '+g.node_name+' 的授权？此 Tailnet 将不能继续使用该节点。'))return;await api('/grants/'+g.id+'/actions','POST',{expected_revision:g.revision,action});await render();})),...(['requested','owner_approved','active'].includes(g.state)?[more(button('带宽规则',()=>qos({id:g.node_id,display_name:g.node_name},false)),button('运行状态',()=>nodeState({id:g.node_id,display_name:g.node_name,owner_id:g.node_owner_id})))]:[]))];
   }));
 }
 async function requests(){return grants(true);}
@@ -422,7 +423,7 @@ async function events(){
  const resources=new Map();for(const n of nodes)resources.set('node:'+n.id,{name:n.display_name,href:'nodes'});for(const t of tailnets)resources.set('tailnet:'+t.id,{name:t.display_name,href:'tailnets'});for(const g of grants)resources.set('grant:'+g.id,{name:g.applicant+' 的 '+g.tailnet_name+' 使用 '+g.node_name,href:g.node_owner_id===actor.id?'requests':'grants'});
  const actionNames={'grant.request':'申请使用','grant.approve':'批准使用','grant.confirm':'确认使用','grant.cancel':'取消申请','grant.reject':'拒绝申请','grant.revoke':'撤销使用授权','grant.leave':'停止使用','node.create':'创建节点','node.enroll':'注册节点','node.qos':'更新带宽规则','node.enabled':'修改节点启用状态','node.delete':'删除节点','node.domain.change':'更换节点域名','node.domain.verify':'验证节点域名','node.ports.change':'修改公开端口','node.probe':'检查节点端点','node.recover':'恢复唯一实例','node.identity_conflict':'检测到节点身份冲突','enrollment.issue':'签发注册码','tailnet.create':'绑定 Tailnet','tailnet.enabled':'修改 Tailnet 启用状态','tailnet.delete':'删除 Tailnet','tailnet.transfer':'转移 Tailnet','credential.replace':'替换 OAuth 凭据','credential.delete':'删除 OAuth 凭据','retention.update':'修改保留期','user.create':'创建账号','user.role':'修改账号角色','user.enabled':'修改账号启用状态','user.password':'更新账号密码'};
  const resource=(type,id)=>resources.get(type+':'+id)?.name||({node:'节点',tailnet:'Tailnet',grant:'使用授权',user:'账号',cluster:'集群'}[type]||type)+' '+id.slice(0,8)+'…';
- table(card('站内事件'),['时间','资源','事件','状态'],events.map(e=>[time(e.created_at),shortIdentity(e.resource_id,resource(e.resource_type,e.resource_id)),e.message,e.resolved_at?'结束 / 恢复于 '+time(e.resolved_at):'待处理']));
+ table(card('站内事件'),['时间','资源','事件','状态'],events.map(e=>[observedTime(e.created_at),shortIdentity(e.resource_id,resource(e.resource_type,e.resource_id)),e.message,e.resolved_at?'结束 / 恢复于 '+time(e.resolved_at):'待处理']));
  const c=card('操作审计'),filters=el('div',undefined,'forms');c.append(filters);const user=field(filters,'actor','操作者筛选','search',false),action=field(filters,'action','动作筛选','search',false),target=field(filters,'resource','资源筛选','search',false),count=el('p',undefined,'muted'),result=el('div');c.append(count,result);
  const update=()=>{const items=audit.filter(a=>(a.actor_username||a.actor_id).toLowerCase().includes(user.value.toLowerCase())&&(actionNames[a.action]||a.action).toLowerCase().includes(action.value.toLowerCase())&&(resource(a.resource_type,a.resource_id)+' '+a.resource_id).toLowerCase().includes(target.value.toLowerCase()));count.textContent='显示 '+items.length+' / '+audit.length+' 条（最近最多 200 条可见记录）';result.replaceChildren();table(result,['时间','实际操作者 / 操作','资源','详情'],items.map(a=>{
   const name=resource(a.resource_type,a.resource_id),item=resources.get(a.resource_type+':'+a.resource_id),r=item?el('a',name):el('span',name);if(item)r.href='#'+item.href+(a.resource_type==='node'?'?node='+a.resource_id:'');
@@ -434,7 +435,7 @@ function localState(s) {
  const c=card('本机运行状态');
  table(c,['项目','状态'],[['角色',s.role==='setup'?'等待初始设置':s.role==='controller'?'主控':'成员节点'],['集群连接',s.joined?(s.control.connected?'已连接主控':'已注册，主控连接中断'):'尚未加入'],['中继许可',s.control.usable?'当前有有效许可':'当前没有有效许可'],['已接收 / 已应用策略',s.control.received_revision+' / '+s.control.applied_revision],['主控下发总预算',s.policy_budget_bps?s.policy_budget_bps/1000000+' Mbps':'尚无策略'],['本地总限速',s.active.max_budget_bps?s.active.max_budget_bps/1000000+' Mbps':'不另设上限'],['当前有效调度预算',s.effective_budget_bps?s.effective_budget_bps/1000000+' Mbps':'尚未应用']]);
  if(s.pending_apply||s.apply_error){const link=el('a',s.apply_error?'本机设置应用失败，检查配置与证书':'有已保存待应用的本机设置');link.href='#local';c.append(link);}
- table(c,['最后联系主控','流量采样时间','活动 DERP 连接'],[[time(s.control.last_contact),time(s.control.traffic_observed_at),s.control.active_connections]]);
+ table(c,['最后联系主控','流量采样时间','活动 DERP 连接'],[[observedTime(s.control.last_contact),observedTime(s.control.traffic_observed_at),s.control.active_connections]]);
  if(s.control.traffic?.length)table(c,['Tailnet','累计 RX / TX 载荷','排队载荷'],s.control.traffic.map(t=>[shortIdentity(t.tailnet_id),actions(bytes(t.rx_payload_bytes),el('span','/'),bytes(t.tx_payload_bytes)),bytes(t.queued_payload_bytes)]));
  return c;
 }
@@ -458,15 +459,14 @@ function localConfigForm(s,role,initial=false) {
  });
  f.successMessage='配置已保存；运行中的配置要在应用后才会改变。';
  field(f,'hostname','公共 DERP 域名','text',true,q.hostname);
- field(f,'derp_listen','DERP TCP 监听地址','text',true,q.derp_listen);
- field(f,'stun_listen','STUN UDP 监听地址','text',true,q.stun_listen);
+ const advanced=el('details',undefined,'state-disclosure');advanced.append(el('summary','高级设置 · 监听地址与日志'));f.append(advanced);field(advanced,'derp_listen','DERP TCP 监听地址','text',true,q.derp_listen);field(advanced,'stun_listen','STUN UDP 监听地址','text',true,q.stun_listen);
  const tls=select(f,'tls_mode','TLS 模式',[['external','external · HTTPS 由反代终止'],['passthrough','passthrough · 中继提供 TLS']]);tls.value=q.tls_mode;
  const cert=select(f,'cert_mode','证书方式',[['none','由反代提供'],['manual','上传手动证书'],['letsencrypt','Let’s Encrypt']]);cert.value=q.cert_mode;
  tls.addEventListener('change',()=>cert.value=tls.value==='external'?'none':'manual');
  publicPortFields(f,q);
  const limit=field(f,'limit','本地 DERP 总限速（Mbps，0 表示不另设上限）','number',true,q.max_budget_bps/1000000);limit.min='0';limit.step='any';
  c.append(el('p','本地总限速独立保存，主控策略不会覆写它。RX 和 TX 各不超过本地限制与主控预算中的较小值；分组、Tailnet 权重和单独上限继续遵守主控策略。修改后需要应用配置。','muted'));
- const logging=select(f,'logging_level','日志级别',[['info','info'],['warn','warn'],['error','error'],['debug','debug']]);logging.value=q.logging_level;
+ const logging=select(advanced,'logging_level','日志级别',[['info','info'],['warn','warn'],['error','error'],['debug','debug']]);logging.value=q.logging_level;
  done(f);
  const steps=el('p',initial?'手动 TLS：① 保存设置 → ② 保存匹配证书 → ③ 应用设置 → 注册或加入集群。':'保存设置和证书后，点击应用；应用前会检查证书。','steps');c.prepend(steps);
  const certCard=card('② 上传手动证书');
@@ -479,7 +479,7 @@ function localConfigForm(s,role,initial=false) {
  upload.successMessage='证书已保存，尚未应用。';
  const apply=button('③ 应用已保存设置',async()=>{await api('/local/apply','POST',{});await session();notice(s.joined?'本机设置已应用。':'设置已应用，请在本机节点页注册或加入集群。');if(initial)location.hash='member';});
  apply.disabled=initial&&s.saved.role==='setup';c.append(apply);const updateApply=()=>apply.disabled=f.dirty||(initial&&s.saved.role==='setup');f.addEventListener('input',updateApply);f.addEventListener('change',updateApply);
- const updateCertificate=()=>{const manual=tls.value==='passthrough'&&cert.value==='manual';certCard.hidden=!manual;steps.hidden=!manual;f.submitButton.textContent=initial?(manual?'① 保存初始设置':'保存并应用初始设置'):'保存配置';};
+ const updateCertificate=()=>{const manual=tls.value==='passthrough'&&cert.value==='manual';cert.closest('label').hidden=tls.value==='external';certCard.hidden=!manual;steps.hidden=!manual;f.submitButton.textContent=initial?(manual?'① 保存初始设置':'保存并应用初始设置'):'保存配置';};
  tls.addEventListener('change',updateCertificate);cert.addEventListener('change',updateCertificate);updateCertificate();
 }
 
@@ -500,64 +500,66 @@ async function member(){
  const s=await api('/local/status'),c=localState(s);
  c.append(button('本机设置',()=>{location.hash='local';}));
  if(s.qos){const rules=card('主控下发规则');ruleSummary(rules,s.qos);table(rules,['Tailnet','分组','权重','硬上限'],s.qos.tailnets.map(t=>[shortIdentity(t.tailnet_id),t.group==='owner'?'自用组':'共享组',t.weight,t.max_bps?t.max_bps/1000000+' Mbps':'不另设上限']));}
- if(s.joined){table(c,['主控地址','集群 ID','节点 ID'],[[s.controller_url,s.cluster_id,s.node_id]]);c.append(button(controller?'注销本机节点':'退出集群',async()=>{if(!confirm(controller?'注销会关闭本机 DERP 连接并清除设备许可，主控继续运行。重新注册后需要重新授权。确认继续？':'退出会关闭本机 DERP 连接并清除设备许可。重新加入需要主控签发新注册码及重新授权。确认继续？'))return;const result=await api('/local/leave','POST',{});await render();notice(controller?'本机节点已注销。':result.released?'本机已退出，主控已释放节点。':'本机已退出；主控暂未确认释放，请在主控重新签发注册码。');},'danger'));}
+ if(s.joined){table(c,['主控地址','集群 ID','节点 ID'],[[s.controller_url,s.cluster_id,s.node_id]]);c.append(button(controller?'注销本机节点':'退出集群',async()=>{if(!confirm(controller?'注销 '+s.active.hostname+' 会关闭本机 DERP 连接并清除设备许可，主控继续运行。重新注册后需要重新授权。确认继续？':'退出 '+s.active.hostname+' 会关闭本机 DERP 连接并清除设备许可。重新加入需要主控签发新注册码及重新授权。确认继续？'))return;const result=await api('/local/leave','POST',{});await render();notice(controller?'本机节点已注销。':result.released?'本机已退出，主控已释放节点。':'本机已退出；主控暂未确认释放，请在主控重新签发注册码。');},'danger'));}
  else if(controller)c.append(button('注册本机节点',async()=>{await api('/local/register','POST',{display_name:s.saved.hostname||'主控内置节点'});await render();},'primary'));
  else {const f=form(card('加入已有集群'),'验证并加入',async(data,f)=>{const body={controller_url:data.get('controller_url'),enrollment_code:data.get('enrollment_code')};f.elements.enrollment_code.value='';await api('/local/join','POST',body);});field(f,'controller_url','主控 HTTPS 地址','url',true,s.controller_url);const code=field(f,'enrollment_code','一次性注册码','password');code.autocomplete='off';done(f);}
 }
 
 async function overview(){
  const localOnly=serverRole==='member',admin=actor.role==='admin';
- const [allNodes,allTailnets,allGrants,local]=await Promise.all([
+ page('概览',localOnly?'本机 DERP 节点的集群连接、带宽与运行状态。':'管理和共享 DERP 中继，查看节点、Tailnet 与授权。');
+ const generation=pageGeneration,reads=await Promise.allSettled([
   localOnly?[]:api(actor.role==='member'?'/relays':'/nodes'),localOnly?[]:api('/tailnets'),localOnly?[]:api('/grants'),admin?api('/local/status'):null
- ]);
- page('概览',localOnly?'本机 DERP 节点的集群连接、带宽与运行状态。':admin?'集群节点、Tailnet 身份源与使用授权，一目了然。':'你的 DERP 资源、Tailnet 身份源与使用授权。');
- if(admin&&!localOnly)await scopeSelector();
+ ]);if(generation!==pageGeneration)return;
+ const [allNodes,allTailnets,allGrants,local]=reads.map((r,i)=>r.status==='fulfilled'?r.value:i===3?null:[]),failed=i=>reads[i].status==='rejected';
+ if(admin&&!localOnly){try{await scopeSelector();}catch(e){if(e.name==='AbortError')return;persistentError($('content'),e.message,render);}}
  const global=admin&&resourceScope==='all',nodeItems=allNodes.filter(n=>!admin||global||n.owner_id===actor.id),tailnetItems=allTailnets.filter(t=>!admin||global||t.owner_id===actor.id),grantItems=allGrants.filter(g=>!admin||global||g.node_owner_id===actor.id||g.tailnet_owner_id===actor.id);
- const next=card('下一步');for(const action of nextActions({actor,serverRole,local,nodes:allNodes,tailnets:allTailnets,grants:allGrants})){const link=el('a',action.title);link.href='#'+action.href;next.append(actions(el('span',action.path,'badge'),link));}
- const root=el('div',undefined,'overview'),hero=el('section',undefined,'overview-hero'),intro=el('div');
- intro.append(el('p',localOnly?'DERP NODE':'UNIDERP CONTROL','eyebrow'),el('h2',localOnly?(local.active.hostname||'本机 DERP 节点'):'连接你的网络'),el('p',localOnly?'本地限速与主控策略共同约束中继带宽。':'让 DERP 节点与 Tailnet 在同一处保持连接。','muted'),el('span',actor.username+' · '+(localOnly?'节点管理员':roleNames[actor.role]),'badge'));
+ if(!reads.some(r=>r.status==='rejected')){const next=card('下一步');for(const action of nextActions({actor,serverRole,local,nodes:allNodes,tailnets:allTailnets,grants:allGrants})){const link=el('a',action.title);link.href='#'+action.href;next.append(actions(el('span',action.path,'badge'),link));}}
+ const root=el('div',undefined,'overview'),hero=el('section',undefined,'overview-hero'+(localOnly||allNodes.length||allTailnets.length?' compact':'')),intro=el('div');
+ intro.append(el('p',localOnly?'DERP NODE':'UNIDERP CONTROL','eyebrow'),el('h2',localOnly?(local?.active.hostname||'本机 DERP 节点'):'管理和共享 DERP 中继'),el('p',localOnly?'本地限速与主控策略共同约束中继带宽。':'查看使用申请、节点状态和 Tailnet 身份源。','muted'),el('span',actor.username+' · '+(localOnly?'节点管理员':roleNames[actor.role]),'badge'));
  const art=el('div',undefined,'overview-network');art.setAttribute('aria-hidden','true');
  art.innerHTML='<svg viewBox="0 0 260 140"><path class="network-line" d="M44 42 130 70 218 32M44 108 130 70 218 110"/><circle class="network-halo" cx="130" cy="70" r="36"/><rect class="network-core" x="108" y="48" width="44" height="44" rx="12"/><path class="network-glyph" d="M121 62h18M121 70h18M121 78h10"/><circle class="network-peer" cx="44" cy="42" r="11"/><circle class="network-peer" cx="44" cy="108" r="11"/><circle class="network-peer" cx="218" cy="32" r="11"/><circle class="network-peer" cx="218" cy="110" r="11"/></svg>';
  hero.append(intro,art);root.append(hero);$('content').append(root);
  const metrics=el('div',undefined,'overview-metrics');root.append(metrics);
  const metric=(title,value,hint,href)=>{const c=el('a',undefined,'overview-metric');c.href='#'+href;c.append(el('span',title,'muted'),el('strong',String(value)),el('small',hint));metrics.append(c);};
  const panel=(title,href,label)=>{const c=el('section',undefined,'overview-panel'),head=el('div',undefined,'row space'),link=el('a',label);link.href='#'+href;head.append(el('h2',title),link);c.append(head);return c;};
- const item=(parent,title,detail,badge,href)=>{const r=el('div',undefined,'overview-item'),text=el('div'),heading=el('strong',title);if(href){const link=el('a');link.href='#'+href;link.append(heading);text.append(link);}else text.append(heading);text.append(el('small',detail));r.append(text);if(badge)r.append(badge);parent.append(r);};
+ const item=(parent,title,detail,badge,href)=>{const r=el('div',undefined,'overview-item'),text=el('div'),heading=el('strong',title);if(href){const link=el('a');link.href='#'+href;link.append(heading);text.append(link);}else text.append(heading);const sub=el('small');sub.append(detail instanceof Node?detail:el('span',detail));text.append(sub);r.append(text);if(badge)r.append(badge);parent.append(r);};
  const budget=value=>value?value/1000000+' Mbps':'尚无策略';
  const localPanel=()=>{
   const c=panel(localOnly?'集群与本机':'主控内置节点','member','管理本机节点 →');
   item(c,local.active.hostname||'尚未设置域名',local.joined?'已注册到集群':'尚未注册到集群',el('span',local.joined?(local.control.connected?'已连接主控':'主控连接中断'):'尚未注册','badge '+(local.control.connected?'good':'warn')));
   item(c,'中继许可',local.control.usable?'当前有有效设备许可':'当前没有有效设备许可',status(local.control.usable?'valid':'missing'));
   item(c,'策略版本','接收 '+local.control.received_revision+' / 应用 '+local.control.applied_revision);
-  item(c,'最后联系主控',time(local.control.last_contact));
+  item(c,'最后联系主控',observedTime(local.control.last_contact));
   if(local.apply_error)c.append(el('p','本机设置尚未应用成功，请检查设置。','error'));return c;
  };
  const grid=el('div',undefined,'overview-panels');root.append(grid);
- if(localOnly){
+ if(localOnly&&!local){const c=panel('集群与本机','member','本机节点 →');persistentError(c,'本机状态读取失败，请重试。',render);grid.append(c);}
+ else if(localOnly){
   metric('有效调度预算',budget(local.effective_budget_bps),'RX、TX 各自的总预算','member');
   metric('本地总限速',local.active.max_budget_bps?budget(local.active.max_budget_bps):'不另设上限','独立于主控下发策略','local');
   metric('主控下发预算',budget(local.policy_budget_bps),'在本地限速内生效','member');
-  metric('活动 DERP 连接',local.control.active_connections,'采样于 '+time(local.control.traffic_observed_at),'member');
+  metric('活动 DERP 连接',local.control.active_connections,'最近采样：'+time(local.control.traffic_observed_at),'member');
   grid.append(localPanel());const c=panel('节点配置','local','本机设置 →');
   item(c,'TLS 模式',local.active.tls_mode);item(c,'公开端口','DERP TCP '+local.active.derp_port+' · STUN UDP '+local.active.stun_port);
   item(c,'主控地址',local.controller_url||'尚未配置');item(c,'配置应用',local.pending_apply?'已保存，待应用':local.apply_error?'应用失败':'已应用');grid.append(c);
  }else{
   const pending=grantItems.filter(g=>g.state==='requested'||g.state==='owner_approved');
-  metric(actor.role==='member'?'可选 DERP 节点':admin?'集群 DERP 节点':'我的 DERP 节点',nodeItems.length,nodeItems.filter(n=>n.enabled).length+' 个已启用',actor.role==='member'?'directory':'nodes');
-  metric(admin?'Tailnet 身份源':'我的 Tailnet',tailnetItems.length,tailnetItems.filter(t=>t.enabled&&t.credential_status==='valid').length+' 个已启用且凭据正常','tailnets');
-  metric(global?'全局活跃使用授权':'我的活跃使用授权',grantItems.filter(g=>g.state==='active'&&(global||g.tailnet_owner_id===actor.id)).length,global?'集群共享节点的使用关系':'我的 Tailnet 使用共享节点','grants');
-  if(actor.role==='provider')metric('等待我批准',grantItems.filter(g=>g.state==='requested'&&g.node_owner_id===actor.id).length,'我的节点收到的申请','requests');
-  metric(global?'全局待确认授权':'等待我确认',pending.filter(g=>g.state==='owner_approved'&&(global||g.tailnet_owner_id===actor.id)).length,'提供者已批准，等待使用方确认','grants');
+  metric(actor.role==='member'?'可选 DERP 节点':admin?'集群 DERP 节点':'我的 DERP 节点',failed(0)?'未知':nodeItems.length,failed(0)?'节点读取失败':nodeItems.filter(n=>n.enabled).length+' 个已启用',actor.role==='member'?'directory':'nodes');
+  metric(admin?'Tailnet 身份源':'我的 Tailnet',failed(1)?'未知':tailnetItems.length,failed(1)?'Tailnet 读取失败':tailnetItems.filter(t=>t.enabled&&t.credential_status==='valid').length+' 个已启用且凭据正常','tailnets');
+  metric(global?'全局活跃使用授权':'我的活跃使用授权',failed(2)?'未知':grantItems.filter(g=>g.state==='active'&&(global||g.tailnet_owner_id===actor.id)).length,global?'集群共享节点的使用关系':'我的 Tailnet 使用共享节点','grants');
+  if(actor.role==='provider')metric('等待我批准',failed(2)?'未知':grantItems.filter(g=>g.state==='requested'&&g.node_owner_id===actor.id).length,'我的节点收到的申请','requests');
+  metric(global?'全局待确认授权':'等待我确认',failed(2)?'未知':pending.filter(g=>g.state==='owner_approved'&&(global||g.tailnet_owner_id===actor.id)).length,'提供者已批准，等待使用方确认','grants');
   const nodesPanel=panel(actor.role==='member'?'可选 DERP 节点':admin?'集群节点':'我的节点',actor.role==='member'?'directory':'nodes','查看节点 →');
-  for(const n of nodeItems.slice(0,4))item(nodesPanel,n.display_name,n.domain+' · 最近心跳 '+time(n.last_heartbeat),status(n.enabled?n.state:'paused'));
-  if(!nodeItems.length)nodesPanel.append(el('p','暂无节点。','muted'));grid.append(nodesPanel);
+  for(const n of nodeItems.slice(0,4))item(nodesPanel,n.display_name,actions(el('span',n.domain+' · 最近心跳'),observedTime(n.last_heartbeat)),status(n.enabled?n.state:'paused'));
+  if(failed(0))persistentError(nodesPanel,'节点读取失败，请重试。',render);else if(!nodeItems.length)nodesPanel.append(el('p','暂无节点。','muted'));grid.append(nodesPanel);
   const tailnetPanel=panel(admin?'Tailnet 身份源':'我的 Tailnet','tailnets','管理 Tailnet →');
-  for(const t of tailnetItems.slice(0,4))item(tailnetPanel,t.display_name,'完整身份成功：'+time(t.last_identity_success),status(t.enabled?t.credential_status:'paused'));
-  if(!tailnetItems.length)tailnetPanel.append(el('p','绑定 Tailnet 后，即可为其选择 DERP 节点。','muted'));grid.append(tailnetPanel);
+  for(const t of tailnetItems.slice(0,4))item(tailnetPanel,t.display_name,actions(el('span','完整身份成功：'),observedTime(t.last_identity_success)),status(t.enabled?t.credential_status:'paused'));
+  if(failed(1))persistentError(tailnetPanel,'Tailnet 读取失败，请重试。',render);else if(!tailnetItems.length)tailnetPanel.append(el('p','绑定 Tailnet 后，即可为其选择 DERP 节点。','muted'));grid.append(tailnetPanel);
   const grantsPanel=panel('使用授权','grants','查看授权 →');
   for(const g of [...pending,...grantItems.filter(g=>g.state==='active')].slice(0,4))item(grantsPanel,g.tailnet_name+' → '+g.node_name,'授权版本 '+g.revision,status(g.state),g.node_owner_id===actor.id&&g.tailnet_owner_id!==actor.id?'requests':'grants');
-  if(!pending.length&&!grantItems.some(g=>g.state==='active'))grantsPanel.append(el('p','暂无待处理或活跃的共享授权。','muted'));grid.append(grantsPanel);
-  if(local)grid.append(localPanel());
+  if(failed(2))persistentError(grantsPanel,'使用授权读取失败，请重试。',render);else if(!pending.length&&!grantItems.some(g=>g.state==='active'))grantsPanel.append(el('p','暂无待处理或活跃的共享授权。','muted'));grid.append(grantsPanel);
+  if(local)grid.append(localPanel());else if(failed(3)){const c=panel('主控内置节点','member','管理本机节点 →');persistentError(c,'本机状态读取失败，请重试。',render);grid.append(c);}
  }
  const foot=el('div',undefined,'overview-foot row space');foot.append(el('small','数据读取于 '+new Date().toLocaleString()+' · 状态来自主控记录与本机观测','muted'),button('刷新概览',render));root.append(foot);
 }

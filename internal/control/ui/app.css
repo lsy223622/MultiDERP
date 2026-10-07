@@ -35,3 +35,5 @@ button{font-size:14px;line-height:14px;font-weight:500;min-height:36px;padding:0
 .list-filters{align-items:flex-end;flex-wrap:wrap;margin:16px 0}.list-filters label{margin:0;min-width:160px}.list-filters input,.list-filters select{margin-top:6px}.add-form>summary{cursor:pointer;font-size:16px;font-weight:600;min-height:36px}.add-form[open]>summary{margin-bottom:16px}.directory-context{padding:14px;border:1px solid var(--line);border-radius:8px;margin:16px 0}.directory-context select{max-width:420px}
 
 .qos-preview{margin:16px 0;padding:14px;border:1px solid var(--line);border-radius:8px;background:var(--quiet)}.qos-ratio{display:flex;border-radius:6px;overflow:hidden;min-height:34px;gap:2px}.qos-ratio span{padding:8px 4px;min-width:0;text-align:center;background:var(--surface);font-size:12px;overflow-wrap:anywhere}.qos-ratio span:first-child{background:var(--active)}
+
+.overview-hero.compact{padding:18px 24px}.overview-hero.compact h2{font-size:20px;line-height:28px}.overview-hero.compact .overview-network{width:140px}.overview-hero.compact .eyebrow{display:none}.overview-hero.compact p{margin-bottom:8px}time[title]{cursor:help}
