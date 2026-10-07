@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
+	"fmt"
 	"github.com/lsy223622/UniDERP/v2/internal/config"
 	"io"
 	"log"
@@ -16,6 +17,17 @@ import (
 	"testing"
 	"time"
 )
+
+func TestSaveSettingsInvalidHostnameReturnsInputError(t *testing.T) {
+	d := localTestDaemon(t, true)
+	s, _ := d.Status(t.Context())
+	settings := s.Saved
+	settings.Role, settings.Hostname = "controller", "https://derp.example.com/"
+	err := d.SaveSettings(t.Context(), settings)
+	if fmt.Sprintf("%T", err) != "*control.InputError" {
+		t.Fatalf("want field input error, got %T", err)
+	}
+}
 
 func localTestDaemon(t *testing.T, setup bool) *Daemon {
 	t.Helper()

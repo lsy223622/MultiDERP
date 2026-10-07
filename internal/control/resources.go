@@ -186,7 +186,7 @@ func (s *Store) DeleteNode(ctx context.Context, actor Actor, id string) error {
 func (s *Store) ChangeNodeDomain(ctx context.Context, actor Actor, id, domain string) error {
 	domain, err := normalizeNodeDomain(domain)
 	if err != nil {
-		return err
+		return &InputError{Code: "invalid_hostname", Field: "domain"}
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

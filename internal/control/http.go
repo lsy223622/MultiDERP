@@ -320,6 +320,14 @@ func writeJSON(w http.ResponseWriter, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
+type InputError struct {
+	Code  string
+	Field string
+}
+
+func (e *InputError) Error() string { return ErrInvalid.Error() }
+func (e *InputError) Unwrap() error { return ErrInvalid }
+
 func httpError(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
 	message := "request failed"
@@ -346,6 +354,10 @@ func httpError(w http.ResponseWriter, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	body := map[string]string{"error": message}
+	var input *InputError
+	if errors.As(err, &input) {
+		body["code"], body["field"] = input.Code, input.Field
+	}
 	if errors.Is(err, cluster.ErrIdentityConflict) {
 		body["code"] = "identity_conflict"
 	}

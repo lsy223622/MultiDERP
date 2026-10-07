@@ -352,7 +352,7 @@ func (c Config) Validate() error {
 		return errors.New("node.max_budget_bps overflows the supported budget")
 	}
 	if c.Server.Hostname != "" {
-		if err := validateHostname(c.Server.Hostname); err != nil {
+		if err := ValidateHostname(c.Server.Hostname); err != nil {
 			return fmt.Errorf("server.hostname: %w", err)
 		}
 	}
@@ -487,7 +487,7 @@ func writeAtomicBytes(path string, data []byte, pattern string) error {
 
 var hostnameLabel = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
 
-func validateHostname(hostname string) error {
+func ValidateHostname(hostname string) error {
 	if len(hostname) == 0 || len(hostname) > 253 || strings.ContainsAny(hostname, "/\\ \t\r\n") {
 		return errors.New("must be a valid DNS hostname")
 	}

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/lsy223622/UniDERP/v2/internal/cluster"
@@ -99,6 +100,10 @@ func (d *Daemon) SaveSettings(ctx context.Context, settings control.LocalSetting
 		return err
 	}
 	cfg, active := d.desiredConfig(), d.activeConfig()
+	settings.Hostname = strings.TrimSpace(settings.Hostname)
+	if config.ValidateHostname(settings.Hostname) != nil {
+		return &control.InputError{Code: "invalid_hostname", Field: "hostname"}
+	}
 	if settings.Role != "controller" && settings.Role != "member" {
 		return control.ErrInvalid
 	}

@@ -11,14 +11,18 @@ import (
 type localTestBackend struct {
 	role   string
 	writes int
+	err    error
 }
 
 func (b *localTestBackend) Role() string { return b.role }
 func (b *localTestBackend) Status(context.Context) (LocalStatus, error) {
 	return LocalStatus{Role: b.role}, nil
 }
-func (b *localTestBackend) SaveSettings(context.Context, LocalSettings) error { b.writes++; return nil }
-func (b *localTestBackend) ApplySettings(context.Context) error               { b.writes++; return nil }
+func (b *localTestBackend) SaveSettings(context.Context, LocalSettings) error {
+	b.writes++
+	return b.err
+}
+func (b *localTestBackend) ApplySettings(context.Context) error { b.writes++; return nil }
 func (b *localTestBackend) UploadCertificate(context.Context, string, string) error {
 	b.writes++
 	return nil
@@ -28,6 +32,16 @@ func (b *localTestBackend) Leave(context.Context) (bool, error)        { b.write
 func (b *localTestBackend) RegisterLocal(context.Context, Actor, string) (Node, error) {
 	b.writes++
 	return Node{}, nil
+}
+
+func TestLocalSettingsInputErrorResponseDoesNotExposeSecrets(t *testing.T) {
+	s, _, _ := nodeTestStore(t)
+	h := NewLocalHTTPHandler(s, &localTestBackend{role: "controller", err: &InputError{Code: "invalid_hostname", Field: "hostname"}})
+	cookie, csrf := loginTest(t, h, "admin")
+	w := accountRequest(h, cookie, csrf, "POST", "/api/v1/local/settings", LocalSettings{Hostname: "https://secret.example.com/"})
+	if w.Code != 400 || !strings.Contains(w.Body.String(), `"code":"invalid_hostname"`) || !strings.Contains(w.Body.String(), `"field":"hostname"`) || strings.Contains(w.Body.String(), "secret.example") {
+		t.Fatalf("unsafe or missing field response: %d %s", w.Code, w.Body)
+	}
 }
 
 func TestLocalManagementRequiresLocalAdminAndCSRF(t *testing.T) {

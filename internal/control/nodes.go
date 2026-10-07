@@ -124,7 +124,7 @@ func (s *Store) CreateNode(ctx context.Context, actor Actor, name, domain string
 	}
 	domain, err := normalizeNodeDomain(domain)
 	if err != nil {
-		return Node{}, Enrollment{}, ErrInvalid
+		return Node{}, Enrollment{}, &InputError{Code: "invalid_hostname", Field: "domain"}
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

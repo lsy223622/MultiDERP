@@ -13,6 +13,18 @@ import (
 	"github.com/lsy223622/UniDERP/v2/internal/cluster"
 )
 
+func TestNodeDomainInvalidHostnameReturnsFieldError(t *testing.T) {
+	s, _, _ := nodeTestStore(t)
+	h := NewHTTPHandler(s)
+	cookie, csrf := loginTest(t, h, "admin")
+	w := accountRequest(h, cookie, csrf, "POST", "/api/v1/nodes", map[string]string{"display_name": "Relay", "domain": "https://derp.example.com/"})
+	var body map[string]string
+	json.Unmarshal(w.Body.Bytes(), &body)
+	if w.Code != 400 || body["code"] != "invalid_hostname" || body["field"] != "domain" {
+		t.Fatalf("want safe hostname field error: %d %s", w.Code, w.Body)
+	}
+}
+
 func clusterRequest(h http.Handler, path string, body any) *httptest.ResponseRecorder {
 	b, _ := json.Marshal(body)
 	r := httptest.NewRequest("POST", "https://controller.example.com"+path, bytes.NewReader(b))
