@@ -1,23 +1,31 @@
 'use strict';
 let actor, csrf, serverRole;
+let pageGeneration=0, currentPage='', refreshTimer;
 const $ = id => document.getElementById(id);
 function notice(message, error = false) { const n = $('notice'); n.textContent = message; n.classList.toggle('error',error); n.hidden = false; clearTimeout(notice.timer); notice.timer = setTimeout(() => n.hidden = true,7000); }
 async function api(path,method='GET',body) {
+  const generation=pageGeneration;
   const headers = {};
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (method !== 'GET' && csrf) headers['X-CSRF-Token'] = csrf;
   const r = await fetch('/api/v1'+path,{method,headers,credentials:'same-origin',body:body===undefined?undefined:JSON.stringify(body)});
   const result = await r.json().catch(() => ({}));
+  if(generation!==pageGeneration)throw new DOMException('Page changed','AbortError');
   if (!r.ok) { const e = new Error(({invalid_hostname:'请填写纯域名，例如 derp.example.com，不包含 https://、端口或路径。',certificate_required:'请先上传证书链和私钥，再应用设置。',certificate_invalid:'证书链或私钥无法配对，请重新上传有效的 PEM 文件。',certificate_hostname_mismatch:'证书域名与已保存的公共 DERP 域名不匹配。'})[result.code]||({400:'输入不符合要求，请检查字段。',401:'请重新登录。',403:'你没有执行此操作的权限。',409:'状态已改变，请刷新后重试。',429:'请求过于频繁，请稍后再试。',503:'身份源暂不可用。请核对 Tailnet ID、OAuth Client Secret、只读设备权限和主控的 API 网络，再重试。'})[r.status] || '请求失败，请检查资源状态后重试。'); e.status=r.status;e.code=result.code;e.field=result.field; throw e; }
   return result;
 }
 function el(tag,text,className) { const e=document.createElement(tag); if(text!==undefined)e.textContent=text; if(className)e.className=className; return e; }
-function button(label,run,className='quiet') { const b=el('button',label,className); b.type='button'; b.addEventListener('click',async()=>{b.disabled=true;try{await run();}catch(e){notice(e.message,true);}finally{b.disabled=false;}});return b; }
+function button(label,run,className='quiet') { const b=el('button',label,className); b.type='button'; b.addEventListener('click',async()=>{b.disabled=true;try{await run();}catch(e){if(e.name!=='AbortError')notice(e.message,true);}finally{b.disabled=false;}});return b; }
 function page(title,hint) { $('content').replaceChildren(el('h1',title),el('p',hint,'muted')); }
 function card(title,parent=$('content')) { const c=el('section',undefined,'card');c.append(el('h2',title));parent.append(c);return c; }
+function detailCard(title,id){
+ const trigger=document.activeElement,c=card(title);c.id=id;
+ c.prepend(button('关闭详情',()=>{c.remove();if(trigger?.isConnected)trigger.focus();}));
+ const heading=c.querySelector('h2');heading.tabIndex=-1;heading.focus();c.scrollIntoView({behavior:'smooth',block:'start'});return c;
+}
 function field(form,name,label,type='text',required=true,value='') { const l=el('label',label);const input=el('input');input.name=name;input.type=type;input.required=required;input.value=value;if(name==='domain'||name==='hostname'){input.placeholder='derp.example.com';l.append(el('small','填写纯域名，不包含协议、端口或路径。','muted'));}l.append(input);form.append(l);return input; }
 function select(form,name,label,items) { const l=el('label',label);const input=el('select');input.name=name;for(const [value,text] of items){const o=el('option',text);o.value=value;input.append(o);}l.append(input);form.append(l);return input; }
-function form(parent,submit,run) { const f=el('form');parent.append(f);const b=el('button',submit);b.type='submit';f.addEventListener('submit',async e=>{e.preventDefault();b.disabled=true;f.querySelectorAll('.field-error').forEach(n=>n.remove());f.querySelectorAll('[aria-invalid]').forEach(n=>n.removeAttribute('aria-invalid'));try{const after=await run(new FormData(f),f);notice(f.successMessage||submit+'：已保存。');await render({preserveScroll:true});if(typeof after==='function')await after();}catch(err){const input=err.field&&f.elements.namedItem(err.field);if(input){input.setAttribute('aria-invalid','true');input.after(el('small',err.message,'field-error'));input.focus();}notice(err.message,true);}finally{b.disabled=false;}});f.submitButton=b;return f; }
+function form(parent,submit,run) { const f=el('form');parent.append(f);const b=el('button',submit);b.type='submit';f.addEventListener('submit',async e=>{e.preventDefault();const generation=pageGeneration;b.disabled=true;f.querySelectorAll('.field-error').forEach(n=>n.remove());f.querySelectorAll('[aria-invalid]').forEach(n=>n.removeAttribute('aria-invalid'));try{const after=await run(new FormData(f),f);if(generation!==pageGeneration)return;notice(f.successMessage||submit+'：已保存。');await render({preserveScroll:true});if(typeof after==='function')await after();}catch(err){if(err.name==='AbortError')return;const input=err.field&&f.elements.namedItem(err.field);if(input){input.setAttribute('aria-invalid','true');input.after(el('small',err.message,'field-error'));input.focus();}notice(err.message,true);}finally{b.disabled=false;}});f.submitButton=b;return f; }
 function done(f){f.append(f.submitButton);return f;}
 function table(parent,head,rows) { const wrap=el('div',undefined,'table-wrap'),t=el('table'),tr=el('tr');for(const text of head)tr.append(el('th',text));const h=el('thead');h.append(tr);t.append(h);const body=el('tbody');for(const row of rows){const r=el('tr');for(const value of row){const c=el('td');c.append(value instanceof Node?value:el('span',value));r.append(c);}body.append(r);}t.append(body);wrap.append(t);parent.append(wrap);if(!rows.length)parent.append(el('p','暂无记录。','muted')); }
 let menuSequence=0;
@@ -104,13 +112,13 @@ function publicPortFields(f,n) {
   for(const [name,label] of [['derp_port','公开 DERP TCP 端口'],['stun_port','公开 STUN UDP 端口']]){const input=field(f,name,label,'number',true,n[name]);input.min='1';input.max='65535';input.step='1';}
 }
 async function nodePorts(n) {
-  const c=card(n.display_name+' · 公开端口');
+  const c=detailCard(n.display_name+' · 公开端口','ports-'+n.id);
   c.append(el('p','填写客户端访问的宿主机映射或代理端口。先配置对应入口，再保存并更新使用者的 DERP map；节点域名注册证明仍使用 HTTPS 443。','muted'));
   const f=form(c,'保存公开端口',data=>api('/nodes/'+n.id+'/ports','POST',{derp_port:Number(data.get('derp_port')),stun_port:Number(data.get('stun_port'))}));
   publicPortFields(f,n);done(f);c.scrollIntoView({behavior:'smooth'});
 }
 async function changeDomain(n){
-  const c=card(n.display_name+' · 更换域名');
+  const c=detailCard(n.display_name+' · 更换域名','domain-'+n.id);
   c.append(el('p','先在节点宿主机配置新域名的 DNS、TLS 和转发入口。提交时会暂停许可，节点随后以原私钥证明新域名；完成验证后仍需手动启用节点。使用者需要更新 DERP map。','muted'));
   const f=form(c,'暂停并验证新域名',async data=>{
     await api('/nodes/'+n.id+'/enabled','POST',{enabled:false});
@@ -144,7 +152,7 @@ function ruleSummary(parent,q) {
   parent.append(el('p','份额用于双方均有需求时的分配；需求不足的一组会让出闲置容量，硬上限持续有效。组内 Tailnet 按权重分配，增加共享连接不会增加份额。','muted'));
 }
 async function nodeState(n) {
-  const s=await api('/nodes/'+n.id+'/status'),c=card(n.display_name+' · 观测状态');
+  const s=await api('/nodes/'+n.id+'/status'),c=detailCard(n.display_name+' · 观测状态','state-'+n.id);
   c.append(actions(status(s.node.state),...(!s.node.enabled?[status('paused')]:[]),button('刷新观测',async()=>{c.remove();await nodeState(n);}))); 
   table(c,['配置阶段','版本','来源'],[
     ['期望配置',s.desired_revision,'主控当前策略'],
@@ -206,7 +214,7 @@ async function directory(){
   renderGroup('自己的节点',summaries.filter(s=>s.node.owner_id===actor.id));
   renderGroup('其他提供者的节点',summaries.filter(s=>s.node.owner_id!==actor.id));
 }
-async function request(n,tailnets){if(!tailnets.length)throw new Error('请先绑定自己的 Tailnet。');const c=card('申请使用 '+n.display_name);const f=form(c,'申请 Tailnet 使用此节点',async data=>{const existing=await api('/grants');const g=existing.find(g=>g.node_id===n.id&&g.tailnet_id===data.get('tailnet'));await api('/grants','POST',{node_id:n.id,tailnet_id:data.get('tailnet'),expected_revision:g?.revision||0,explicit_until:data.get('until')?new Date(data.get('until')).toISOString():'0001-01-01T00:00:00Z'});});select(f,'tailnet','使用 Tailnet',tailnets.filter(t=>actor.role==='admin'||t.owner_id===actor.id).map(t=>[t.id,t.display_name]));field(f,'until','使用截止时间（可选）','datetime-local',false);done(f);c.scrollIntoView({behavior:'smooth'});}
+async function request(n,tailnets){if(!tailnets.length)throw new Error('请先绑定自己的 Tailnet。');const c=detailCard('申请使用 '+n.display_name,'request-'+n.id);const f=form(c,'申请 Tailnet 使用此节点',async data=>{const existing=await api('/grants');const g=existing.find(g=>g.node_id===n.id&&g.tailnet_id===data.get('tailnet'));await api('/grants','POST',{node_id:n.id,tailnet_id:data.get('tailnet'),expected_revision:g?.revision||0,explicit_until:data.get('until')?new Date(data.get('until')).toISOString():'0001-01-01T00:00:00Z'});});select(f,'tailnet','使用 Tailnet',tailnets.filter(t=>actor.role==='admin'||t.owner_id===actor.id).map(t=>[t.id,t.display_name]));field(f,'until','使用截止时间（可选）','datetime-local',false);done(f);c.scrollIntoView({behavior:'smooth'});}
 async function grants(incoming=false){
   page(incoming?'收到的节点使用申请':'节点使用授权',incoming?'处理其他 Tailnet 使用你提供的 DERP 节点的申请。批准后由 Tailnet 所有者确认，设备许可才会生效。':'查看你的 Tailnet 使用哪些 DERP 节点。自己的节点直接生效；其他节点需要提供者批准，再点击“确认使用”。');
   const items=(await api('/grants')).filter(g=>actor.role==='admin'||(incoming?g.node_owner_id:g.tailnet_owner_id)===actor.id);
@@ -369,8 +377,9 @@ function positionNavMarker(){
 }
 
 const views={overview,tailnets,nodes,directory,grants,requests,account,users,settings,events,bootstrap,local:localSettings,member};
-async function render(){
+async function render(options={}){
  if(!actor)return;
+ const generation=++pageGeneration,scrollY=window.scrollY;clearTimeout(refreshTimer);
  let name=location.hash.slice(1),allowed;
  if(serverRole==='setup')allowed=actor.role==='admin'?['bootstrap','account']:['account'];
  else if(serverRole==='member')allowed=actor.role==='admin'?['overview','member','local','account']:['account'];
@@ -380,12 +389,14 @@ async function render(){
   if(actor.role==='admin')allowed.push('member','local','users','settings','events');
  }
  if(!allowed.includes(name))name=allowed[0];
+ if(location.hash!=='#'+name)history.replaceState(null,'','#'+name);
+ const changed=currentPage!==name;currentPage=name;
  $('content').classList.toggle('wide',['overview','tailnets','nodes','directory','grants','requests','users','events'].includes(name));
  document.querySelectorAll('.navigation-links a,#account-menu a').forEach(a=>{a.hidden=!allowed.includes(a.hash.slice(1));if(a.hash==='#nodes')a.textContent=actor.role==='admin'?'节点管理':'我的节点';a.setAttribute('aria-current',a.hash==='#'+name?'page':'false');});
  document.querySelectorAll('[data-nav-group]').forEach(group=>{group.hidden=!Array.from(group.querySelectorAll('a')).some(a=>!a.hidden);if(group.querySelector('a[aria-current="page"]'))group.open=true;});
  positionNavMarker();
  document.body.classList.remove('nav-open');$('nav-toggle').setAttribute('aria-expanded','false');
- try{await views[name]();}catch(e){notice(e.message,true);if(e.status===401)await session();}
+ try{await views[name]();if(generation!==pageGeneration)return;if(options.preserveScroll&&!changed)window.scrollTo(0,scrollY);else window.scrollTo(0,0);if(options.focusResource)document.getElementById(options.focusResource)?.focus();}catch(e){if(e.name==='AbortError')return;notice(e.message,true);if(e.status===401)await session();}
 }
 async function session(){try{const result=await api('/session');actor=result.actor;csrf=result.csrf_token;serverRole=result.server_role;}catch(e){actor=csrf=serverRole=undefined;}const logged=!!actor;let needsSetup=false;if(!logged){try{needsSetup=(await api('/setup')).required;}catch(e){notice(e.message,true);}}document.body.classList.toggle('logged-in',logged);$('setup').hidden=logged||!needsSetup;$('login').hidden=logged||needsSetup;$('workspace').hidden=!logged;$('account').hidden=!logged;if(!logged)$('content').replaceChildren();if(logged){$('account-avatar').textContent=actor.username.slice(0,2).toUpperCase();$('account-name').textContent=actor.username;$('account-role').textContent=actor.role==='admin'&&serverRole!=='controller'?'节点管理员':roleNames[actor.role];await render();}}
 $('setup-form').addEventListener('submit',async e=>{e.preventDefault();const f=e.currentTarget;const data=new FormData(f);const body={username:data.get('username'),password:data.get('password')};if(body.password!==data.get('password_confirm')){notice('两次输入的密码不一致',true);return;}f.elements.password.value=f.elements.password_confirm.value='';const b=f.querySelector('button');b.disabled=true;try{await api('/setup','POST',body);await session();}catch(err){notice(err.message,true);if(err.status===409)await session();}finally{b.disabled=false;}});
@@ -396,7 +407,8 @@ configureMenu($('account-toggle'),$('account-menu'));
 document.querySelectorAll('[data-theme-choice]').forEach(choice=>choice.addEventListener('click',()=>setTheme(choice.dataset.themeChoice)));
 applyTheme();
 document.addEventListener('click',e=>{if(document.body.classList.contains('nav-open')&&!e.target.closest('#navigation,#nav-toggle')){document.body.classList.remove('nav-open');$('nav-toggle').setAttribute('aria-expanded','false');}});
-window.addEventListener('hashchange',render);
+window.addEventListener('hashchange',()=>render());
+document.addEventListener('visibilitychange',()=>{if(document.hidden)clearTimeout(refreshTimer);});
 window.addEventListener('resize',positionNavMarker);
 document.querySelectorAll('[data-nav-group]').forEach(group=>{group.addEventListener('toggle',positionNavMarker);group.addEventListener('transitionend',positionNavMarker);});
 session();
