@@ -455,7 +455,7 @@ function localConfigForm(s,role,initial=false) {
  const read=data=>({role,hostname:data.get('hostname'),derp_listen:data.get('derp_listen'),stun_listen:data.get('stun_listen'),tls_mode:data.get('tls_mode'),cert_mode:data.get('cert_mode'),derp_port:Number(data.get('derp_port')),stun_port:Number(data.get('stun_port')),max_budget_bps:Math.round(Number(data.get('limit'))*1000000),logging_level:data.get('logging_level')});
  const f=form(c,initial?'保存初始设置':'保存配置',async data=>{
   const settings=read(data);settings.hostname=settings.hostname.trim();await api('/local/settings','POST',settings);
-  if(initial&&!(settings.tls_mode==='passthrough'&&settings.cert_mode==='manual')){await api('/local/apply','POST',{});await session();return()=>{location.hash=settings.role==='controller'?'member':'member';};}
+  if(initial&&!(settings.tls_mode==='passthrough'&&settings.cert_mode==='manual')){await api('/local/apply','POST',{});if(!f.isConnected)return;f.dirty=false;history.replaceState(null,'','#member');await session();}
  });
  f.successMessage='配置已保存；运行中的配置要在应用后才会改变。';
  field(f,'hostname','公共 DERP 域名','text',true,q.hostname);
