@@ -60,7 +60,7 @@ async function scopeSelector(){
  if(actor.role!=='admin')return;
  const users=await api('/users');userNames=new Map(users.map(u=>[u.id,u.username]));
  const row=el('div',undefined,'row scope-selector'),input=select(row,'scope','资源范围',[['mine','我的'],['all','全部']]);input.value=resourceScope;
- input.addEventListener('change',()=>{resourceScope=input.value;updatePageParams({scope:resourceScope,node:null},true);});$('content').append(row);
+ input.addEventListener('change',()=>{updatePageParams({scope:input.value,node:null},true);});$('content').append(row);
 }
 function managedLabel(owner){return owner!==actor.id?'代 '+(userNames.get(owner)||owner.slice(0,8))+' 管理':'';}
 function nextActions({actor,serverRole,local,nodes,tailnets,grants}){
@@ -147,6 +147,14 @@ function reportedBudget(parent,state){
 }
 function status(value){const names={pending:'待注册',domain_pending:'等待新域名验证',registered:'已注册',ready:'已报告可用',offline:'离线',identity_conflict:'身份冲突',requested:'待提供者批准',owner_approved:'待申请方确认',active:'活跃',revoked:'已撤销',left:'已退出',rejected:'已拒绝',cancelled:'已取消',expired:'已到期',valid:'正常',invalid:'凭据异常',missing:'未配置',paused:'已暂停',unavailable:'身份源暂不可用'};return el('span',names[value]||value||'尚无状态','badge '+(['ready','active','valid'].includes(value)?'good':['identity_conflict','invalid','revoked'].includes(value)?'bad':'warn'));}
 function secretFields(f){const input=field(f,'client_secret','OAuth Client Secret · ','password');input.autocomplete='new-password';const link=el('a','OAuth 文档');link.href='https://tailscale.com/docs/features/oauth-clients';link.target='_blank';link.rel='noopener noreferrer';input.before(link,el('span',' · 只需 devices:core:read','muted'));return input;}
+function filterNodes(items,params){const q=(params.get('q')||'').toLowerCase(),state=params.get('state');return items.filter(n=>(n.display_name+' '+n.domain).toLowerCase().includes(q)&&(!state||state==='all'||(state==='paused'?!n.enabled:n.state===state)));}
+function listFilters(kind){const c=el('form',undefined,'list-filters row'),params=pageParams();const search=field(c,'q',kind==='grant'?'搜索节点、Tailnet 或所有者':'搜索节点名称或域名','search',false,params.get('q')||'');
+ const states=kind==='grant'?[['','全部'],['pending','待我处理'],['active','已生效'],['ended','已结束']]:[['','全部状态'],['pending','待注册'],['registered','已注册'],['ready','已报告可用'],['offline','主控联系超时'],['paused','已暂停'],['identity_conflict','身份冲突']];const state=select(c,'state','状态筛选',states);state.value=params.get('state')||'';
+ const submit=el('button','筛选');submit.type='submit';c.append(submit);c.addEventListener('submit',e=>{e.preventDefault();updatePageParams({q:search.value.trim(),state:state.value,node:null},true);});state.addEventListener('change',()=>updatePageParams({q:search.value.trim(),state:state.value,node:null},true));$('content').append(c);
+}
+function listEmpty(parent,hasResources,message){const filtered=pageParams().get('q')||(pageParams().get('state')&&pageParams().get('state')!=='pending');parent.append(el('p',filtered?'没有符合当前筛选的记录。':message,'muted'));if(filtered)parent.append(button('清除筛选',()=>updatePageParams({q:null,state:null},true)));}
+function addFormCard(title,hasResources){const c=el('details',undefined,'card add-form');c.open=!hasResources;c.append(el('summary',title));c.addEventListener('toggle',()=>{if(c.open)c.querySelector('input')?.focus();});$('content').append(c);return c;}
+function directoryAction(g){return g?.state==='requested'?'wait':g?.state==='owner_approved'?'confirm':g?.state==='active'?'view':'request';}
 async function tailnets(){
   page('我的 Tailnet','使用稳定的 Tailnet ID 绑定身份源。OAuth 只请求设备只读权限，原始客户端权限由所有者配置。');
   await scopeSelector();
@@ -191,7 +199,7 @@ async function tailnets(){
     header.append(disclosure,controls);c.append(header,mapPanel);$('content').append(c);
   }
   if(!items.length)$('content').append(el('p','尚未绑定 Tailnet。','muted'));
-  const f=form(card('绑定 Tailnet'),'验证并绑定',async(data,f)=>{const body={display_name:data.get('name'),api_id:data.get('api_id'),credential:{client_secret:data.get('client_secret')}};f.elements.client_secret.value='';await api('/tailnets','POST',body);});
+  const f=form(addFormCard('绑定 Tailnet',items.length),'验证并绑定',async(data,f)=>{const body={display_name:data.get('name'),api_id:data.get('api_id'),credential:{client_secret:data.get('client_secret')}};f.elements.client_secret.value='';await api('/tailnets','POST',body);});
   field(f,'name','显示名称');field(f,'api_id','Tailnet ID（General Settings 中的 T… 标识）').autocomplete='off';secretFields(f);done(f);
 }
 async function transfer(t){
@@ -203,18 +211,18 @@ async function credential(t){const c=card('替换 '+t.display_name+' 的凭据')
 async function nodes(){
   page(actor.role==='admin'?'节点管理':'我的节点','管理 DERP 节点的注册、公开端口、使用权限和带宽规则。暂停会下发空许可；域名或公开端口变更后，使用者需要更新 DERP map。');
   await scopeSelector();
-  const items=(await api('/nodes')).filter(n=>actor.role!=='admin'||resourceScope==='all'||n.owner_id===actor.id),local=actor.role==='admin'?await api('/local/status'):null;
+  const allItems=(await api('/nodes')).filter(n=>actor.role!=='admin'||resourceScope==='all'||n.owner_id===actor.id),items=filterNodes(allItems,pageParams()),local=actor.role==='admin'?await api('/local/status'):null;
   if(local&&!local.joined)$('content').append(button('注册主控内置节点',async()=>{await api('/local/register','POST',{display_name:local.saved.hostname||'主控内置节点'});await render();},'primary'));
-  for(const n of items)visibleNodes.set(n.id,{node:n,editable:true});
+  listFilters('node');for(const n of allItems)visibleNodes.set(n.id,{node:n,editable:true});
   const list=card('DERP 节点');
   const nodeActions=n=>actions(button('状态',()=>nodeState(n)),...(n.state!=='pending'?[button('规则',()=>qos(n,true))]:[]),...(local?.node_id===n.id?[button('本机管理',()=>{location.hash='member';})]:[]),more(button('公开端口',()=>nodePorts(n)),button(n.state==='pending'?'注册码':'重新签发注册码',()=>enrollment(n)),button(n.enabled?'暂停':'启用',async()=>{await api('/nodes/'+n.id+'/enabled','POST',{enabled:!n.enabled});await render();}),...(n.state!=='pending'?[button('域名',()=>changeDomain(n))]:[]),button('删除节点',()=>deleteNode(n),'danger')));
-  table(list,['名称','域名 / 公开端口','状态','最近心跳','操作'],items.map(n=>[
+  if(!items.length)listEmpty(list,allItems.length,allItems.length?'当前没有需要展示的节点。':'还没有自己的 DERP 节点，请添加节点并完成注册。');else table(list,['名称','域名 / 公开端口','状态','最近心跳','操作'],items.map(n=>[
     actions(button(n.display_name,()=>openNode(n),'resource-name'),...(actor.role==='admin'&&n.owner_id!==actor.id?[el('span',managedLabel(n.owner_id),'badge')]:[]),...(local?.node_id===n.id?[el('span','主控内置节点','badge')]:[])),el('code',n.domain+' · DERP TCP '+n.derp_port+' / STUN UDP '+n.stun_port),actions(status(n.state),...(!n.enabled?[status('paused')]:[])),time(n.last_heartbeat),
     nodeActions(n)
   ]));
   list.querySelectorAll('tbody tr').forEach((r,i)=>r.dataset.nodeId=items[i].id);
   if(items.some(n=>n.state==='pending'||n.state==='registered'))limitedRefresh(list,async()=>{const fresh=await api('/nodes');let pending=false;for(const [i,n]of items.entries()){const updated=fresh.find(x=>x.id===n.id);if(!updated)continue;const row=list.querySelectorAll('tbody tr[data-node-id]')[i];const stateChanged=n.state!==updated.state||n.enabled!==updated.enabled;Object.assign(n,updated);row.children[2].replaceChildren(status(n.state),...(!n.enabled?[status('paused')]:[]));row.children[3].textContent=time(n.last_heartbeat);if(stateChanged)row.children[4].replaceChildren(nodeActions(n));if(updated.state==='pending'||updated.state==='registered')pending=true;}return pending;});
-  const f=form(card('添加 DERP 节点'),'创建节点并签发注册码',async data=>{const result=await api('/nodes','POST',{display_name:data.get('name'),domain:data.get('domain').trim(),derp_port:Number(data.get('derp_port')),stun_port:Number(data.get('stun_port'))});return()=>showEnrollment(result.enrollment,result.node);});field(f,'name','显示名称');field(f,'domain','公共 DERP 域名');publicPortFields(f,{derp_port:443,stun_port:3478});done(f);
+  const f=form(addFormCard('添加 DERP 节点',allItems.length),'创建节点并签发注册码',async data=>{const result=await api('/nodes','POST',{display_name:data.get('name'),domain:data.get('domain').trim(),derp_port:Number(data.get('derp_port')),stun_port:Number(data.get('stun_port'))});return()=>showEnrollment(result.enrollment,result.node);});field(f,'name','显示名称');field(f,'domain','公共 DERP 域名');publicPortFields(f,{derp_port:443,stun_port:3478});done(f);
 }
 function publicPortFields(f,n) {
   for(const [name,label] of [['derp_port','公开 DERP TCP 端口'],['stun_port','公开 STUN UDP 端口']]){const input=field(f,name,label,'number',true,n[name]);input.min='1';input.max='65535';input.step='1';}
@@ -307,7 +315,8 @@ async function directory(){
   page('节点列表','为你的 Tailnet 选择 DERP 节点。自己的 Tailnet 使用自己的节点直接生效；使用其他提供者的节点需要对方批准，再由你确认。');
   if(actor.role==='admin')userNames=new Map((await api('/users')).map(u=>[u.id,u.username]));
   const [nodes,tailnets,grants]=await Promise.all([api('/relays'),api('/tailnets'),api('/grants')]);
-  const summaries=await Promise.all(nodes.map(n=>api('/nodes/'+n.id+'/summary'))),active=grants.filter(g=>g.state==='active');
+  const summaries=await Promise.all(nodes.map(n=>api('/nodes/'+n.id+'/summary'))),active=grants.filter(g=>g.state==='active');for(const s of summaries)visibleNodes.set(s.node.id,{node:s.node,summary:s,editable:actor.role==='admin'||s.node.owner_id===actor.id});
+  listFilters('node');const choices=tailnets.filter(t=>actor.role==='admin'||t.owner_id===actor.id).sort((a,b)=>Number(b.owner_id===actor.id)-Number(a.owner_id===actor.id)),context=el('div',undefined,'directory-context'),input=select(context,'tailnet','本次操作的 Tailnet',[['','请选择 Tailnet'],...choices.map(t=>[t.id,t.display_name])]);input.value=choices.find(t=>t.id===pageParams().get('tailnet'))?.id||choices.find(t=>t.owner_id===actor.id)?.id||'';const selected=choices.find(t=>t.id===input.value);input.addEventListener('change',()=>updatePageParams({tailnet:input.value,node:null},true));if(selected)context.append(el('p',selected.owner_id!==actor.id?managedLabel(selected.owner_id):'使用 '+selected.display_name,'muted'));else{const link=el('a',choices.length?'请选择本次操作的 Tailnet。':'先绑定自己的 Tailnet');link.href='#tailnets';context.append(link);}$('content').append(context);const matching=new Set(filterNodes(nodes,pageParams()).map(n=>n.id));
   const renderGroup=(title,items)=>{
     const group=el('details',undefined,'card resource-group');group.open=true;
     const heading=el('summary');heading.append(el('strong',title),el('span',items.length+' 个节点','muted'));
@@ -323,16 +332,16 @@ async function directory(){
       ]));
       disclosure.append(summary,details);
       const controls=el('div',undefined,'resource-actions');
-      controls.append(button('申请使用',()=>request(n,tailnets),'primary'),button('规则与探测',()=>sharedNodeInfo(visibleNodes.get(n.id))));
+      const grant=selected&&grants.find(g=>g.node_id===n.id&&g.tailnet_id===selected.id),action=directoryAction(grant);if(selected){controls.append(action==='confirm'?button('确认使用',async()=>{await api('/grants/'+grant.id+'/actions','POST',{expected_revision:grant.revision,action:'confirm'});await render({preserveScroll:true});},'primary'):action==='request'?button('申请使用',()=>request(n,tailnets,selected.id),'primary'):button(action==='wait'?'查看等待批准的申请':'查看授权',()=>{location.hash='#grants?q='+encodeURIComponent(selected.display_name);}));details.prepend(el('p',grant?grantGuidance(grant,false):'当前 Tailnet 尚未申请此节点。','muted'));}controls.append(button('规则与探测',()=>sharedNodeInfo(visibleNodes.get(n.id))));
       header.append(disclosure,controls);nodeCard.append(header);nodeCard.dataset.nodeId=n.id;list.append(nodeCard);
     }
-    if(!items.length)list.append(el('p','暂无节点。','muted'));
+    if(!items.length)listEmpty(list,nodes.length,'这一组还没有可选择的节点。');
     group.append(heading,list);$('content').append(group);
   };
-  renderGroup('自己的节点',summaries.filter(s=>s.node.owner_id===actor.id));
-  renderGroup('其他提供者的节点',summaries.filter(s=>s.node.owner_id!==actor.id));
+  renderGroup('自己的节点',summaries.filter(s=>s.node.owner_id===actor.id&&matching.has(s.node.id)));
+  renderGroup('其他提供者的节点',summaries.filter(s=>s.node.owner_id!==actor.id&&matching.has(s.node.id)));
 }
-async function request(n,tailnets){if(!tailnets.length)throw new Error('请先绑定自己的 Tailnet。');const c=detailCard('申请使用 '+n.display_name,'request-'+n.id);const f=form(c,'申请 Tailnet 使用此节点',async data=>{const existing=await api('/grants');const g=existing.find(g=>g.node_id===n.id&&g.tailnet_id===data.get('tailnet'));await api('/grants','POST',{node_id:n.id,tailnet_id:data.get('tailnet'),expected_revision:g?.revision||0,explicit_until:data.get('until')?new Date(data.get('until')).toISOString():'0001-01-01T00:00:00Z'});});const choices=tailnets.filter(t=>actor.role==='admin'||t.owner_id===actor.id),input=select(f,'tailnet','使用 Tailnet',[['','请选择 Tailnet'],...choices.map(t=>[t.id,t.display_name+' · 所有者 '+(userNames.get(t.owner_id)||(t.owner_id===actor.id?actor.username:t.owner_id.slice(0,8)))])]);input.required=true;input.value=choices.find(t=>t.owner_id===actor.id)?.id||'';input.addEventListener('change',()=>{let context=c.querySelector('.managed-context');if(context)context.remove();const selected=choices.find(t=>t.id===input.value);if(selected&&selected.owner_id!==actor.id)c.append(el('p',managedLabel(selected.owner_id),'managed-context badge'));});field(f,'until','使用截止时间（可选）','datetime-local',false);done(f);c.scrollIntoView({behavior:'smooth'});}
+async function request(n,tailnets,selectedID){if(!tailnets.length)throw new Error('请先绑定自己的 Tailnet。');const c=detailCard('申请使用 '+n.display_name,'request-'+n.id);const f=form(c,'申请 Tailnet 使用此节点',async data=>{const existing=await api('/grants');const g=existing.find(g=>g.node_id===n.id&&g.tailnet_id===data.get('tailnet'));await api('/grants','POST',{node_id:n.id,tailnet_id:data.get('tailnet'),expected_revision:g?.revision||0,explicit_until:data.get('until')?new Date(data.get('until')).toISOString():'0001-01-01T00:00:00Z'});});const choices=tailnets.filter(t=>actor.role==='admin'||t.owner_id===actor.id),input=select(f,'tailnet','使用 Tailnet',[['','请选择 Tailnet'],...choices.map(t=>[t.id,t.display_name+' · 所有者 '+(userNames.get(t.owner_id)||(t.owner_id===actor.id?actor.username:t.owner_id.slice(0,8)))])]);input.required=true;input.value=choices.find(t=>t.id===selectedID)?.id||choices.find(t=>t.owner_id===actor.id)?.id||'';const selected=choices.find(t=>t.id===input.value);if(selected&&selected.owner_id!==actor.id)c.append(el('p',managedLabel(selected.owner_id),'managed-context badge'));input.addEventListener('change',()=>{let context=c.querySelector('.managed-context');if(context)context.remove();const selected=choices.find(t=>t.id===input.value);if(selected&&selected.owner_id!==actor.id)c.append(el('p',managedLabel(selected.owner_id),'managed-context badge'));});field(f,'until','使用截止时间（可选）','datetime-local',false);done(f);c.scrollIntoView({behavior:'smooth'});}
 function grantNeedsAction(g,incoming,user){return incoming?g.state==='requested'&&g.node_owner_id===user.id:g.state==='owner_approved'&&g.tailnet_owner_id===user.id;}
 function grantGuidance(g,incoming){
  if(g.state==='requested')return incoming?'等待节点提供者批准，可批准或拒绝。':'等待节点提供者批准，随后需要你确认。';
@@ -348,8 +357,9 @@ function nodeFacts(s){return {
 };}
 async function grants(incoming=false){
   page(incoming?'收到的节点使用申请':'节点使用授权',incoming?'处理其他 Tailnet 使用你提供的 DERP 节点的申请。批准后由 Tailnet 所有者确认，设备许可才会生效。':'查看你的 Tailnet 使用哪些 DERP 节点。自己的节点直接生效；其他节点需要提供者批准，再点击“确认使用”。');
-  await scopeSelector();const items=(await api('/grants')).filter(g=>(actor.role==='admin'&&resourceScope==='all')||(incoming?g.node_owner_id:g.tailnet_owner_id)===actor.id);
-  table(card(incoming?'节点收到的申请':'Tailnet 的节点使用权限'),['DERP 节点','使用的 Tailnet','关系状态 / 下一步','使用截止 / 版本','操作'],items.map(g=>{
+  await scopeSelector();listFilters('grant');const allItems=(await api('/grants')).filter(g=>(actor.role==='admin'&&resourceScope==='all')||(incoming?g.node_owner_id:g.tailnet_owner_id)===actor.id),params=pageParams(),query=(params.get('q')||'').toLowerCase(),filter=params.get('state'),items=allItems.filter(g=>(g.node_name+' '+g.tailnet_name+' '+g.applicant).toLowerCase().includes(query)&&(!filter||filter==='all'||filter==='pending'&&grantNeedsAction(g,incoming,actor)||filter==='active'&&g.state==='active'||filter==='ended'&&['revoked','rejected','expired','cancelled'].includes(g.state)));
+  const list=card(incoming?'节点收到的申请':'Tailnet 的节点使用权限');if(!items.length){listEmpty(list,allItems.length,filter==='pending'?'当前没有等待你处理的使用申请。':allItems.length?'当前没有可展示的使用授权。':incoming?'节点还没有收到使用申请。':'还没有节点使用授权，请到节点列表为 Tailnet 选择节点。');return;}
+  table(list,['DERP 节点','使用的 Tailnet','关系状态 / 下一步','使用截止 / 版本','操作'],items.map(g=>{
     const owner=incoming&&(actor.role==='admin'||g.node_owner_id===actor.id),applicant=!incoming&&(actor.role==='admin'||g.tailnet_owner_id===actor.id),available=[];
     if(g.state==='requested'){if(owner)available.push(['approve','批准使用'],['reject','拒绝申请']);if(applicant)available.push(['cancel','取消申请']);}
     if(g.state==='owner_approved'){if(applicant)available.push(['confirm','确认使用'],['cancel','取消申请']);if(owner)available.push(['revoke','撤销使用授权']);}
