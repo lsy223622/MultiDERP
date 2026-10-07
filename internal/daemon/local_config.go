@@ -39,6 +39,7 @@ func (d *Daemon) Status(ctx context.Context) (control.LocalStatus, error) {
 	status := control.LocalStatus{Role: configRole(active), Saved: localSettings(saved), Active: localSettings(active), PendingApply: d.pendingRestart, ApplyError: d.applyError}
 	childOK := d.childOK
 	d.mu.RUnlock()
+	status.Certificate = manualCertificateStatus(saved)
 	status.ControllerURL = saved.Node.ControllerURL
 	if active.Controller.Enabled && active.Server.Hostname != "" {
 		status.ControllerURL = nodeControllerURL(active)
@@ -193,6 +194,11 @@ func (d *Daemon) applyLocalConfig(ctx context.Context, cfg config.Config) error 
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
+	certificate := manualCertificateStatus(cfg)
+	if certificate.State != "not_required" && certificate.State != "ready" {
+		code := map[string]string{"missing": "certificate_required", "invalid": "certificate_invalid", "hostname_mismatch": "certificate_hostname_mismatch"}[certificate.State]
+		return &control.InputError{Code: code, Field: "certificate"}
+	}
 	d.stopNodeControl()
 	if err := d.stopRelay(ctx); err != nil {
 		return err
@@ -237,11 +243,14 @@ func (d *Daemon) UploadCertificate(ctx context.Context, certificate, privateKey 
 	cfg := d.desiredConfig()
 	pair, err := tls.X509KeyPair([]byte(certificate), []byte(privateKey))
 	if err != nil || len(pair.Certificate) == 0 {
-		return control.ErrInvalid
+		return &control.InputError{Code: "certificate_invalid", Field: "certificate"}
 	}
 	leaf, err := x509.ParseCertificate(pair.Certificate[0])
-	if err != nil || leaf.VerifyHostname(cfg.Server.Hostname) != nil {
-		return control.ErrInvalid
+	if err != nil {
+		return &control.InputError{Code: "certificate_invalid", Field: "certificate"}
+	}
+	if leaf.VerifyHostname(cfg.Server.Hostname) != nil {
+		return &control.InputError{Code: "certificate_hostname_mismatch", Field: "certificate"}
 	}
 	root := filepath.Join(cfg.Storage.StateDir, "certs")
 	if err := os.MkdirAll(root, 0700); err != nil {
@@ -270,4 +279,38 @@ func (d *Daemon) UploadCertificate(ctx context.Context, certificate, privateKey 
 	}
 	committed = true
 	return nil
+}
+
+func manualCertificateStatus(cfg config.Config) control.CertificateStatus {
+	status := control.CertificateStatus{State: "not_required"}
+	if cfg.Server.DERP.TLSMode != "passthrough" || cfg.Server.DERP.CertMode != "manual" {
+		return status
+	}
+	certPath := filepath.Join(cfg.Server.DERP.CertDir, cfg.Server.Hostname+".crt")
+	keyPath := filepath.Join(cfg.Server.DERP.CertDir, cfg.Server.Hostname+".key")
+	if _, err := os.Stat(certPath); os.IsNotExist(err) {
+		status.State = "missing"
+		return status
+	}
+	if _, err := os.Stat(keyPath); os.IsNotExist(err) {
+		status.State = "missing"
+		return status
+	}
+	pair, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil || len(pair.Certificate) == 0 {
+		status.State = "invalid"
+		return status
+	}
+	leaf, err := x509.ParseCertificate(pair.Certificate[0])
+	if err != nil {
+		status.State = "invalid"
+		return status
+	}
+	status.Hostname, status.NotAfter = cfg.Server.Hostname, leaf.NotAfter
+	if leaf.VerifyHostname(cfg.Server.Hostname) != nil {
+		status.State = "hostname_mismatch"
+		return status
+	}
+	status.State = "ready"
+	return status
 }

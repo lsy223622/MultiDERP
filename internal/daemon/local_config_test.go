@@ -29,6 +29,35 @@ func TestSaveSettingsInvalidHostnameReturnsInputError(t *testing.T) {
 	}
 }
 
+func TestManualTLSPreflightKeepsRunningRelayOnMissingCertificate(t *testing.T) {
+	d := localTestDaemon(t, true)
+	s, _ := d.Status(t.Context())
+	settings := s.Saved
+	settings.Role, settings.Hostname = "controller", "relay.example.com"
+	settings.TLSMode, settings.CertMode = "external", "none"
+	d.derper = &daemonFakeProcess{}
+	if err := d.SaveSettings(t.Context(), settings); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ApplySettings(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	settings.TLSMode, settings.CertMode = "passthrough", "manual"
+	if err := d.SaveSettings(t.Context(), settings); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ApplySettings(t.Context()); err == nil {
+		t.Fatal("missing certificate applied")
+	}
+	if !d.derper.Running() || d.activeConfig().Server.DERP.TLSMode != "external" {
+		t.Fatal("certificate preflight stopped the active relay")
+	}
+	after, _ := d.Status(t.Context())
+	if !after.PendingApply {
+		t.Fatal("saved repair configuration lost")
+	}
+}
+
 func localTestDaemon(t *testing.T, setup bool) *Daemon {
 	t.Helper()
 	dir := shortTempDir(t)

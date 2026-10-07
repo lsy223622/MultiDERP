@@ -9,14 +9,15 @@ import (
 )
 
 type localTestBackend struct {
-	role   string
-	writes int
-	err    error
+	role        string
+	writes      int
+	err         error
+	certificate CertificateStatus
 }
 
 func (b *localTestBackend) Role() string { return b.role }
 func (b *localTestBackend) Status(context.Context) (LocalStatus, error) {
-	return LocalStatus{Role: b.role}, nil
+	return LocalStatus{Role: b.role, Certificate: b.certificate}, nil
 }
 func (b *localTestBackend) SaveSettings(context.Context, LocalSettings) error {
 	b.writes++
@@ -41,6 +42,30 @@ func TestLocalSettingsInputErrorResponseDoesNotExposeSecrets(t *testing.T) {
 	w := accountRequest(h, cookie, csrf, "POST", "/api/v1/local/settings", LocalSettings{Hostname: "https://secret.example.com/"})
 	if w.Code != 400 || !strings.Contains(w.Body.String(), `"code":"invalid_hostname"`) || !strings.Contains(w.Body.String(), `"field":"hostname"`) || strings.Contains(w.Body.String(), "secret.example") {
 		t.Fatalf("unsafe or missing field response: %d %s", w.Code, w.Body)
+	}
+}
+
+func TestLocalCertificateStatusContainsNoSecrets(t *testing.T) {
+	s, _, _ := nodeTestStore(t)
+	h := NewLocalHTTPHandler(s, &localTestBackend{role: "controller", certificate: CertificateStatus{State: "ready", Hostname: "relay.example.com"}})
+	cookie, csrf := loginTest(t, h, "admin")
+	member, _ := loginTest(t, h, "alice")
+	anonymous := httptest.NewRecorder()
+	h.ServeHTTP(anonymous, httptest.NewRequest("GET", "https://controller.example.com/api/v1/local/status", nil))
+	if w := anonymous; w.Code != 401 {
+		t.Fatal(w.Code)
+	}
+	if w := accountRequest(h, member, "", "GET", "/api/v1/local/status", nil); w.Code != 403 {
+		t.Fatal(w.Code)
+	}
+	w := accountRequest(h, cookie, csrf, "GET", "/api/v1/local/status", nil)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"state":"ready"`) {
+		t.Fatal(w.Code, w.Body)
+	}
+	for _, secret := range []string{"PRIVATE KEY", "BEGIN CERTIFICATE", "private_key", "cert_dir"} {
+		if strings.Contains(w.Body.String(), secret) {
+			t.Fatal("secret in certificate status")
+		}
 	}
 }
 

@@ -236,10 +236,10 @@ async function events(){page('事件与审计','各展示最近 200 条可见记
 function localState(s) {
  const c=card('本机运行状态');
  table(c,['项目','状态'],[['角色',s.role==='setup'?'等待初始设置':s.role==='controller'?'主控':'成员节点'],['集群连接',s.joined?(s.control.connected?'已连接主控':'已注册，主控连接中断'):'尚未加入'],['中继许可',s.control.usable?'当前有有效许可':'当前没有有效许可'],['已接收 / 已应用策略',s.control.received_revision+' / '+s.control.applied_revision],['主控下发总预算',s.policy_budget_bps?s.policy_budget_bps/1000000+' Mbps':'尚无策略'],['本地总限速',s.active.max_budget_bps?s.active.max_budget_bps/1000000+' Mbps':'不另设上限'],['当前有效调度预算',s.effective_budget_bps?s.effective_budget_bps/1000000+' Mbps':'尚未应用'],['配置应用',s.pending_apply?'已保存，待应用':'已应用']]);
- if(s.apply_error)c.append(el('p','最近应用失败：'+s.apply_error,'error'));
- const fields=[['role','角色'],['hostname','公共 DERP 域名'],['derp_listen','DERP TCP 监听'],['stun_listen','STUN UDP 监听'],['tls_mode','TLS 模式'],['cert_mode','证书方式'],['derp_port','公开 DERP TCP 端口'],['stun_port','公开 STUN UDP 端口'],['max_budget_bps','本地总限速（bps）'],['logging_level','日志级别']];
+ if(s.apply_error)c.append(el('p','最近应用未成功，请检查已保存设置与证书后重试。','error'));
+ const fields=[['role','角色'],['hostname','公共 DERP 域名'],['derp_listen','DERP TCP 监听'],['stun_listen','STUN UDP 监听'],['tls_mode','TLS 模式'],['cert_mode','证书方式'],['derp_port','公开 DERP TCP 端口'],['stun_port','公开 STUN UDP 端口'],['max_budget_bps','本地总限速（Mbps）'],['logging_level','日志级别']];
  const differences=fields.filter(([key])=>s.saved[key]!==s.active[key]);
- if(differences.length)table(c,['待应用项目','运行中配置','已保存配置'],differences.map(([key,label])=>[label,String(s.active[key]),String(s.saved[key])]));
+ if(differences.length)table(c,['待应用项目','运行中配置','已保存配置'],differences.map(([key,label])=>[label,key==='max_budget_bps'?s.active[key]/1000000+' Mbps':String(s.active[key]),key==='max_budget_bps'?s.saved[key]/1000000+' Mbps':String(s.saved[key])]));
  table(c,['最后联系主控','流量采样时间','活动 DERP 连接'],[[time(s.control.last_contact),time(s.control.traffic_observed_at),s.control.active_connections]]);
  if(s.control.traffic?.length)table(c,['Tailnet','累计 RX / TX 载荷（字节）','排队载荷（字节）'],s.control.traffic.map(t=>[t.tailnet_id,t.rx_payload_bytes+' / '+t.tx_payload_bytes,t.queued_payload_bytes]));
  return c;
@@ -250,7 +250,11 @@ function localConfigForm(s,role,initial=false) {
  const q=s.saved;
  c.append(el('p','公开端口填写客户端访问的入口；监听地址填写容器或本机的实际地址。端口映射、DNS 和 HTTPS 反代需在宿主机配置。','muted'));
  const read=data=>({role,hostname:data.get('hostname'),derp_listen:data.get('derp_listen'),stun_listen:data.get('stun_listen'),tls_mode:data.get('tls_mode'),cert_mode:data.get('cert_mode'),derp_port:Number(data.get('derp_port')),stun_port:Number(data.get('stun_port')),max_budget_bps:Math.round(Number(data.get('limit'))*1000000),logging_level:data.get('logging_level')});
- const f=form(c,initial?'保存并应用初始设置':'保存配置',async data=>{await api('/local/settings','POST',read(data));if(initial){try{await api('/local/apply','POST',{});await session();}catch(e){await render();throw e;}}});
+ const f=form(c,initial?'保存初始设置':'保存配置',async data=>{
+  const settings=read(data);settings.hostname=settings.hostname.trim();await api('/local/settings','POST',settings);
+  if(initial&&!(settings.tls_mode==='passthrough'&&settings.cert_mode==='manual')){await api('/local/apply','POST',{});await session();return()=>{location.hash=settings.role==='controller'?'member':'member';};}
+ });
+ f.successMessage='配置已保存；运行中的配置要在应用后才会改变。';
  field(f,'hostname','公共 DERP 域名','text',true,q.hostname);
  field(f,'derp_listen','DERP TCP 监听地址','text',true,q.derp_listen);
  field(f,'stun_listen','STUN UDP 监听地址','text',true,q.stun_listen);
@@ -262,20 +266,28 @@ function localConfigForm(s,role,initial=false) {
  c.append(el('p','本地总限速独立保存，主控策略不会覆写它。RX 和 TX 各不超过本地限制与主控预算中的较小值；分组、Tailnet 权重和单独上限继续遵守主控策略。修改后需要应用配置。','muted'));
  const logging=select(f,'logging_level','日志级别',[['info','info'],['warn','warn'],['error','error'],['debug','debug']]);logging.value=q.logging_level;
  done(f);
- if(!initial)c.append(button('应用已保存配置',async()=>{try{await api('/local/apply','POST',{});await session();}catch(e){await render();throw e;}}));
- const certCard=card('上传手动证书');
+ const steps=el('p',initial?'手动 TLS：① 保存设置 → ② 保存匹配证书 → ③ 应用设置 → 注册或加入集群。':'保存设置和证书后，点击应用；应用前会检查证书。','steps');c.prepend(steps);
+ const certCard=card('② 上传手动证书');
+ certCard.id='manual-certificate';
+ const certificateNames={not_required:'此模式无需本机手动证书',missing:'证书或私钥尚未保存',invalid:'证书链与私钥无效',hostname_mismatch:'证书与保存域名不匹配',ready:'证书已就绪'};
+ certCard.append(el('p',(certificateNames[s.certificate?.state]||'尚无证书状态')+(s.certificate?.state==='ready'?' · '+s.certificate.hostname+' · 到期 '+time(s.certificate.not_after):''),'muted'));
  certCard.append(el('p','上传与已保存域名匹配的 PEM 证书链和私钥，上传后应用配置。独立管理入口的 HTTPS 由宿主机反代提供。','muted'));
  const upload=form(certCard,'保存证书',async(data,f)=>{const certificate=f.elements.certificate.files[0],key=f.elements.private_key.files[0];if(!certificate||!key)throw new Error('请选择证书链和私钥文件。');await api('/local/certificate','POST',{certificate:await certificate.text(),private_key:await key.text()});f.reset();});
  field(upload,'certificate','PEM 证书链','file');field(upload,'private_key','PEM 私钥','file');done(upload);
+ upload.successMessage='证书已保存，尚未应用。';
+ const apply=button('③ 应用已保存设置',async()=>{await api('/local/apply','POST',{});await session();notice('设置已应用；下一步注册本机节点或加入集群。');location.hash='member';});
+ apply.disabled=initial&&s.saved.role==='setup';c.append(apply);
+ const updateCertificate=()=>{const manual=tls.value==='passthrough'&&cert.value==='manual';certCard.hidden=!manual;steps.hidden=!manual;f.submitButton.textContent=initial?(manual?'① 保存初始设置':'保存并应用初始设置'):'保存配置';};
+ tls.addEventListener('change',updateCertificate);cert.addEventListener('change',updateCertificate);updateCertificate();
 }
 
 async function bootstrap(){
  const s=await api('/local/status');
  page('初始设置','选择本机角色。主控与各 DERP 节点使用各自的管理员账号，成员节点与主控失联时仍可登录本机管理面板。');
- localState(s);
  const chooser=card('选择角色');
  chooser.append(actions(button('配置为主控',()=>{document.querySelectorAll('#content .card').forEach(c=>{if(c!==chooser)c.remove();});localConfigForm(s,'controller',true);}),button('加入已有集群',()=>{document.querySelectorAll('#content .card').forEach(c=>{if(c!==chooser)c.remove();});localConfigForm(s,'member',true);})));
  if(s.saved.role!=='setup')localConfigForm(s,s.saved.role,true);
+ const extra=el('details',undefined,'state-disclosure');extra.append(el('summary','查看本机运行状态'));$('content').append(extra);const state=localState(s);extra.append(state);
 }
 
 async function localSettings(){const s=await api('/local/status');page('本机设置','保存配置后单独应用。应用会重启本机中继，管理面板保持可访问。');localState(s);localConfigForm(s,s.role);}

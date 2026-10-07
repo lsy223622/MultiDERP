@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/lsy223622/UniDERP/v2/internal/cluster"
 )
@@ -21,6 +22,7 @@ type LocalSettings struct {
 }
 
 type LocalStatus struct {
+	Certificate        CertificateStatus     `json:"certificate"`
 	Role               string                `json:"role"`
 	Joined             bool                  `json:"joined"`
 	ControllerURL      string                `json:"controller_url"`
@@ -34,6 +36,12 @@ type LocalStatus struct {
 	PolicyBudgetBPS    uint64                `json:"policy_budget_bps"`
 	EffectiveBudgetBPS uint64                `json:"effective_budget_bps"`
 	QoS                *cluster.QoSPolicy    `json:"qos,omitempty"`
+}
+
+type CertificateStatus struct {
+	State    string    `json:"state"`
+	Hostname string    `json:"hostname,omitempty"`
+	NotAfter time.Time `json:"not_after,omitempty"`
 }
 
 type LocalBackend interface {
