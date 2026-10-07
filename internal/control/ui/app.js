@@ -1,7 +1,7 @@
 'use strict';
 let actor, csrf, serverRole;
 let pageGeneration=0, currentPage='', refreshTimer;
-let resourceScope='mine', userNames=new Map();
+let resourceScope='mine', userNames=new Map(),visibleNodes=new Map();
 const $ = id => document.getElementById(id);
 function notice(message, error = false) { const n = $('notice'); n.textContent = message; n.classList.toggle('error',error); n.hidden = false; clearTimeout(notice.timer); notice.timer = setTimeout(() => n.hidden = true,7000); }
 async function api(path,method='GET',body) {
@@ -19,16 +19,43 @@ function el(tag,text,className) { const e=document.createElement(tag); if(text!=
 function button(label,run,className='quiet') { const b=el('button',label,className); b.type='button'; b.addEventListener('click',async()=>{b.disabled=true;try{await run();}catch(e){if(e.name!=='AbortError')notice(e.message,true);}finally{b.disabled=false;}});return b; }
 function page(title,hint) { $('content').replaceChildren(el('h1',title),el('p',hint,'muted')); }
 function card(title,parent=$('content')) { const c=el('section',undefined,'card');c.append(el('h2',title));parent.append(c);return c; }
-function detailCard(title,id){
- const trigger=document.activeElement,c=card(title);c.id=id;
- c.prepend(button('关闭详情',()=>{c.remove();if(trigger?.isConnected)trigger.focus();}));
- const heading=c.querySelector('h2');heading.tabIndex=-1;heading.focus();c.scrollIntoView({behavior:'smooth',block:'start'});return c;
+function pageLocation(hash,role){
+ const [name,query='']=hash.replace(/^#/,'').split('?'),source=new URLSearchParams(query),params=new URLSearchParams();
+ for(const key of ['node','q','state','scope','tailnet'])if(source.has(key))params.set(key,source.get(key));
+ if(params.has('node')&&!/^[a-f0-9]{64}$/.test(params.get('node')))params.delete('node');
+ if(params.has('scope'))params.set('scope',role==='admin'&&params.get('scope')==='all'?'all':'mine');
+ return {name,params};
 }
+function pageParams(){return pageLocation(location.hash,actor.role).params;}
+function updatePageParams(changes,refresh=false){
+ const params=pageParams();for(const [key,value]of Object.entries(changes)){if(value)params.set(key,value);else params.delete(key);}
+ const hash='#'+currentPage+(params.size?'?'+params.toString():'');
+ if(refresh)location.hash=hash;else history.pushState(null,'',hash);
+}
+function detailCard(title,id){
+ const nodeID=id.match(/^(?:state|qos|ports|domain|enrollment|request)-([a-f0-9]{64})$/)?.[1],entry=visibleNodes.get(nodeID);
+ if(entry&&['nodes','directory'].includes(currentPage)){
+  let root=$('node-detail');
+  if(!root||root.dataset.node!==nodeID){
+   const trigger=document.activeElement;if(root)root.closest('.node-detail-row')?.remove()||root.remove();root=card(entry.node.display_name);root.id='node-detail';root.dataset.node=nodeID;root.classList.add('node-detail');
+   const anchor=document.querySelector('[data-node-id="'+nodeID+'"]');if(anchor?.tagName==='TR'){const row=el('tr',undefined,'node-detail-row'),cell=el('td');cell.colSpan=anchor.children.length;cell.append(root);row.append(cell);anchor.after(row);}else if(anchor)anchor.after(root);
+   root.prepend(button('关闭详情',()=>{const row=root.closest('.node-detail-row');if(row)row.remove();else root.remove();updatePageParams({node:null});if(trigger?.isConnected)trigger.focus();else anchor?.querySelector('button')?.focus();}));
+   const nav=actions(button('概览',()=>openNode(entry.node)),button('使用授权',()=>nodeGrants(entry.node)),button('带宽规则',()=>entry.summary&&!entry.editable?sharedNodeInfo(entry):qos(entry.node,entry.editable)),...(entry.editable?[button('注册与维护',()=>nodeMaintenance(entry.node))]:[]));nav.classList.add('detail-tabs');root.append(nav,el('div',undefined,'detail-body'));
+  }
+  updatePageParams({node:nodeID});const body=root.querySelector('.detail-body');body.replaceChildren();body.id=id;const heading=el('h3',title);heading.tabIndex=-1;body.append(heading);heading.focus();root.scrollIntoView({behavior:'smooth',block:'nearest'});return body;
+ }
+ document.getElementById(id)?.remove();const trigger=document.activeElement,c=card(title);c.id=id;
+ c.prepend(button('关闭详情',()=>{c.remove();if(trigger?.isConnected)trigger.focus();}));const heading=c.querySelector('h2');heading.tabIndex=-1;heading.focus();c.scrollIntoView({behavior:'smooth',block:'start'});return c;
+}
+async function openNode(n){const entry=visibleNodes.get(n.id);if(entry?.summary&&!entry.editable)return sharedNodeInfo(entry);return nodeState(n);}
+function sharedNodeInfo(entry){const s=entry.summary,c=detailCard(entry.node.display_name+' · 概览','state-'+entry.node.id);c.append(el('p',entry.node.domain+' · 提供者 '+s.provider,'muted'));ruleSummary(c,s.qos);probeTable(c,s.probes,s.node);return c;}
+async function nodeGrants(n){const grants=await api('/grants'),c=detailCard(n.display_name+' · 使用授权','state-'+n.id);table(c,['Tailnet','共享关系','下一步'],grants.filter(g=>g.node_id===n.id).map(g=>[g.tailnet_name,status(g.state),el('a',g.node_owner_id===actor.id?'查看收到的申请':'查看我的使用授权')]));c.querySelectorAll('a').forEach(a=>a.href=a.textContent==='查看收到的申请'?'#requests':'#grants');}
+function nodeMaintenance(n){const c=detailCard(n.display_name+' · 注册与维护','state-'+n.id);c.append(el('p','注册、公开端口和域名会影响客户端入口；变更后需要更新 DERP map。','muted'));c.append(actions(button('公开端口',()=>nodePorts(n)),button('域名',()=>changeDomain(n)),button(n.state==='pending'?'注册码':'重新签发注册码',()=>enrollment(n)),button('删除节点',()=>deleteNode(n),'danger')));}
 async function scopeSelector(){
  if(actor.role!=='admin')return;
  const users=await api('/users');userNames=new Map(users.map(u=>[u.id,u.username]));
  const row=el('div',undefined,'row scope-selector'),input=select(row,'scope','资源范围',[['mine','我的'],['all','全部']]);input.value=resourceScope;
- input.addEventListener('change',()=>{resourceScope=input.value;render({preserveScroll:true});});$('content').append(row);
+ input.addEventListener('change',()=>{resourceScope=input.value;updatePageParams({scope:resourceScope,node:null},true);});$('content').append(row);
 }
 function managedLabel(owner){return owner!==actor.id?'代 '+(userNames.get(owner)||owner.slice(0,8))+' 管理':'';}
 function nextActions({actor,serverRole,local,nodes,tailnets,grants}){
@@ -163,13 +190,15 @@ async function nodes(){
   await scopeSelector();
   const items=(await api('/nodes')).filter(n=>actor.role!=='admin'||resourceScope==='all'||n.owner_id===actor.id),local=actor.role==='admin'?await api('/local/status'):null;
   if(local&&!local.joined)$('content').append(button('注册主控内置节点',async()=>{await api('/local/register','POST',{display_name:local.saved.hostname||'主控内置节点'});await render();},'primary'));
+  for(const n of items)visibleNodes.set(n.id,{node:n,editable:true});
   const list=card('DERP 节点');
   const nodeActions=n=>actions(button('状态',()=>nodeState(n)),...(n.state!=='pending'?[button('规则',()=>qos(n,true))]:[]),...(local?.node_id===n.id?[button('本机管理',()=>{location.hash='member';})]:[]),more(button('公开端口',()=>nodePorts(n)),button(n.state==='pending'?'注册码':'重新签发注册码',()=>enrollment(n)),button(n.enabled?'暂停':'启用',async()=>{await api('/nodes/'+n.id+'/enabled','POST',{enabled:!n.enabled});await render();}),...(n.state!=='pending'?[button('域名',()=>changeDomain(n))]:[]),button('删除节点',()=>deleteNode(n),'danger')));
   table(list,['名称','域名 / 公开端口','状态','最近心跳','操作'],items.map(n=>[
-    actions(el('span',n.display_name),...(actor.role==='admin'&&n.owner_id!==actor.id?[el('span',managedLabel(n.owner_id),'badge')]:[]),...(local?.node_id===n.id?[el('span','主控内置节点','badge')]:[])),el('code',n.domain+' · DERP TCP '+n.derp_port+' / STUN UDP '+n.stun_port),actions(status(n.state),...(!n.enabled?[status('paused')]:[])),time(n.last_heartbeat),
+    actions(button(n.display_name,()=>openNode(n),'resource-name'),...(actor.role==='admin'&&n.owner_id!==actor.id?[el('span',managedLabel(n.owner_id),'badge')]:[]),...(local?.node_id===n.id?[el('span','主控内置节点','badge')]:[])),el('code',n.domain+' · DERP TCP '+n.derp_port+' / STUN UDP '+n.stun_port),actions(status(n.state),...(!n.enabled?[status('paused')]:[])),time(n.last_heartbeat),
     nodeActions(n)
   ]));
-  if(items.some(n=>n.state==='pending'||n.state==='registered'))limitedRefresh(list,async()=>{const fresh=await api('/nodes');let pending=false;for(const [i,n]of items.entries()){const updated=fresh.find(x=>x.id===n.id);if(!updated)continue;const row=list.querySelectorAll('tbody tr')[i];const stateChanged=n.state!==updated.state||n.enabled!==updated.enabled;Object.assign(n,updated);row.children[2].replaceChildren(status(n.state),...(!n.enabled?[status('paused')]:[]));row.children[3].textContent=time(n.last_heartbeat);if(stateChanged)row.children[4].replaceChildren(nodeActions(n));if(updated.state==='pending'||updated.state==='registered')pending=true;}return pending;});
+  list.querySelectorAll('tbody tr').forEach((r,i)=>r.dataset.nodeId=items[i].id);
+  if(items.some(n=>n.state==='pending'||n.state==='registered'))limitedRefresh(list,async()=>{const fresh=await api('/nodes');let pending=false;for(const [i,n]of items.entries()){const updated=fresh.find(x=>x.id===n.id);if(!updated)continue;const row=list.querySelectorAll('tbody tr[data-node-id]')[i];const stateChanged=n.state!==updated.state||n.enabled!==updated.enabled;Object.assign(n,updated);row.children[2].replaceChildren(status(n.state),...(!n.enabled?[status('paused')]:[]));row.children[3].textContent=time(n.last_heartbeat);if(stateChanged)row.children[4].replaceChildren(nodeActions(n));if(updated.state==='pending'||updated.state==='registered')pending=true;}return pending;});
   const f=form(card('添加 DERP 节点'),'创建节点并签发注册码',async data=>{const result=await api('/nodes','POST',{display_name:data.get('name'),domain:data.get('domain').trim(),derp_port:Number(data.get('derp_port')),stun_port:Number(data.get('stun_port'))});return()=>showEnrollment(result.enrollment,result.node);});field(f,'name','显示名称');field(f,'domain','公共 DERP 域名');publicPortFields(f,{derp_port:443,stun_port:3478});done(f);
 }
 function publicPortFields(f,n) {
@@ -268,8 +297,8 @@ async function directory(){
     const heading=el('summary');heading.append(el('strong',title),el('span',items.length+' 个节点','muted'));
     const list=el('div',undefined,'resource-nodes');
     for(const s of items){
-      const n=s.node,usable=active.filter(g=>g.node_id===n.id),nodeCard=el('section',undefined,'resource-card node-card'),header=el('div',undefined,'resource-header'),disclosure=el('details',undefined,'resource-disclosure'),summary=el('summary');
-      summary.append(el('strong',n.display_name),el('span','提供者 '+s.provider,'muted'),el('span',usable.length+' 个可用 Tailnet','badge'));
+      const n=s.node;visibleNodes.set(n.id,{node:n,summary:s,editable:actor.role==='admin'||n.owner_id===actor.id});const usable=active.filter(g=>g.node_id===n.id),nodeCard=el('section',undefined,'resource-card node-card'),header=el('div',undefined,'resource-header'),disclosure=el('details',undefined,'resource-disclosure'),summary=el('summary');
+      summary.append(button(n.display_name,()=>openNode(n),'resource-name'),el('span','提供者 '+s.provider,'muted'),el('span',usable.length+' 个可用 Tailnet','badge'));
       const details=el('div',undefined,'resource-details');
       details.append(el('p',n.domain+' · DERP TCP '+n.derp_port+' / STUN UDP '+n.stun_port,'muted'),actions(status(n.state),el('span','最近心跳 '+time(n.last_heartbeat),'muted')));
       table(details,['Tailnet','授权截止 / 状态'],usable.map(g=>[
@@ -278,8 +307,8 @@ async function directory(){
       ]));
       disclosure.append(summary,details);
       const controls=el('div',undefined,'resource-actions');
-      controls.append(button('申请使用',()=>request(n,tailnets),'primary'),button('规则与探测',()=>{const c=card(n.display_name+' · 共享信息');ruleSummary(c,s.qos);c.append(el('p','域名注册验证：'+time(s.domain_verified_at)));probeTable(c,s.probes,n);c.scrollIntoView({behavior:'smooth'});}));
-      header.append(disclosure,controls);nodeCard.append(header);list.append(nodeCard);
+      controls.append(button('申请使用',()=>request(n,tailnets),'primary'),button('规则与探测',()=>sharedNodeInfo(visibleNodes.get(n.id))));
+      header.append(disclosure,controls);nodeCard.append(header);nodeCard.dataset.nodeId=n.id;list.append(nodeCard);
     }
     if(!items.length)list.append(el('p','暂无节点。','muted'));
     group.append(heading,list);$('content').append(group);
@@ -344,7 +373,7 @@ async function events(){
  table(card('站内事件'),['时间','资源','事件','状态'],events.map(e=>[time(e.created_at),shortIdentity(e.resource_id,resource(e.resource_type,e.resource_id)),e.message,e.resolved_at?'结束 / 恢复于 '+time(e.resolved_at):'待处理']));
  const c=card('操作审计'),filters=el('div',undefined,'forms');c.append(filters);const user=field(filters,'actor','操作者筛选','search',false),action=field(filters,'action','动作筛选','search',false),target=field(filters,'resource','资源筛选','search',false),count=el('p',undefined,'muted'),result=el('div');c.append(count,result);
  const update=()=>{const items=audit.filter(a=>(a.actor_username||a.actor_id).toLowerCase().includes(user.value.toLowerCase())&&(actionNames[a.action]||a.action).toLowerCase().includes(action.value.toLowerCase())&&(resource(a.resource_type,a.resource_id)+' '+a.resource_id).toLowerCase().includes(target.value.toLowerCase()));count.textContent='显示 '+items.length+' / '+audit.length+' 条（最近最多 200 条可见记录）';result.replaceChildren();table(result,['时间','实际操作者 / 操作','资源','详情'],items.map(a=>{
-  const name=resource(a.resource_type,a.resource_id),item=resources.get(a.resource_type+':'+a.resource_id),r=item?el('a',name):el('span',name);if(item)r.href='#'+item.href;
+  const name=resource(a.resource_type,a.resource_id),item=resources.get(a.resource_type+':'+a.resource_id),r=item?el('a',name):el('span',name);if(item)r.href='#'+item.href+(a.resource_type==='node'?'?node='+a.resource_id:'');
   const details=el('details',undefined,'identity');details.append(el('summary','代码与完整 ID'),el('code',a.action),el('code',a.resource_id),button('复制详情',()=>copyText(a.action+'\n'+a.resource_id)));
   return [time(a.created_at),(a.actor_username||a.actor_id)+' '+(actionNames[a.action]||a.action),r,details];
  }));};[user,action,target].forEach(input=>input.addEventListener('input',update));update();
@@ -497,7 +526,7 @@ const views={overview,tailnets,nodes,directory,grants,requests,account,users,set
 async function render(options={}){
  if(!actor)return false;
  const generation=++pageGeneration,scrollY=window.scrollY;clearTimeout(refreshTimer);
- let name=location.hash.slice(1),allowed;
+ const address=pageLocation(location.hash,actor.role);let name=address.name,allowed;visibleNodes=new Map();if(address.params.has('scope'))resourceScope=address.params.get('scope');
  if(serverRole==='setup')allowed=actor.role==='admin'?['bootstrap','account']:['account'];
  else if(serverRole==='member')allowed=actor.role==='admin'?['overview','member','local','account']:['account'];
  else {
@@ -506,18 +535,18 @@ async function render(options={}){
   if(actor.role==='admin')allowed.push('member','local','users','settings','events');
  }
  if(!allowed.includes(name))name=allowed[0];
- if(location.hash!=='#'+name)history.replaceState(null,'','#'+name);
+ if(name!==address.name)history.replaceState(null,'','#'+name);else if(location.hash!=='#'+name+(address.params.size?'?'+address.params.toString():''))history.replaceState(null,'','#'+name+(address.params.size?'?'+address.params.toString():''));
  const changed=currentPage!==name;currentPage=name;
  $('content').classList.toggle('wide',['overview','tailnets','nodes','directory','grants','requests','users','events'].includes(name));
  document.querySelectorAll('.navigation-links a,#account-menu a').forEach(a=>{a.hidden=!allowed.includes(a.hash.slice(1));if(a.hash==='#nodes')a.textContent=actor.role==='admin'?'节点管理':'我的节点';a.setAttribute('aria-current',a.hash==='#'+name?'page':'false');});
  document.querySelectorAll('[data-nav-group]').forEach(group=>{group.hidden=!Array.from(group.querySelectorAll('a')).some(a=>!a.hidden);if(group.querySelector('a[aria-current="page"]'))group.open=true;});
  positionNavMarker();
  document.body.classList.remove('nav-open');$('nav-toggle').setAttribute('aria-expanded','false');
- try{await views[name]();if(generation!==pageGeneration)return;if(serverRole==='controller'&&(actor.role==='admin'||actor.role==='provider')){const grants=await api('/grants');const link=document.querySelector('a[href="#requests"]'),count=grants.filter(g=>g.node_owner_id===actor.id&&g.state==='requested').length;link.textContent='收到的使用申请'+(count?' · '+count:'');}if(options.preserveScroll&&!changed)window.scrollTo(0,scrollY);else window.scrollTo(0,0);if(options.focusResource)document.getElementById(options.focusResource)?.focus();return generation===pageGeneration;}catch(e){if(e.name==='AbortError')return;notice(e.message,true);if(e.status===401)await session();}
+ try{await views[name]();if(generation!==pageGeneration)return;if(serverRole==='controller'&&(actor.role==='admin'||actor.role==='provider')){const grants=await api('/grants');const link=document.querySelector('a[href="#requests"]'),count=grants.filter(g=>g.node_owner_id===actor.id&&g.state==='requested').length;link.textContent='收到的使用申请'+(count?' · '+count:'');}const selected=address.params.get('node');if(selected&&['nodes','directory'].includes(name)){const entry=visibleNodes.get(selected);if(entry)await openNode(entry.node);else{const c=card('无法打开节点');c.append(el('p','节点不可见、已删除或不在当前资源范围。','muted'),button('返回列表',()=>updatePageParams({node:null},true)));}}if(generation!==pageGeneration)return;if(options.preserveScroll&&!changed)window.scrollTo(0,scrollY);else window.scrollTo(0,0);if(options.focusResource)document.getElementById(options.focusResource)?.focus();return generation===pageGeneration;}catch(e){if(e.name==='AbortError')return;notice(e.message,true);if(e.status===401)await session();}
 }
 async function session(){try{const result=await api('/session');actor=result.actor;csrf=result.csrf_token;serverRole=result.server_role;}catch(e){actor=csrf=serverRole=undefined;}const logged=!!actor;let needsSetup=false;if(!logged){try{needsSetup=(await api('/setup')).required;}catch(e){notice(e.message,true);}}document.body.classList.toggle('logged-in',logged);$('setup').hidden=logged||!needsSetup;$('login').hidden=logged||needsSetup;$('workspace').hidden=!logged;$('account').hidden=!logged;if(!logged)$('content').replaceChildren();if(logged){$('account-avatar').textContent=actor.username.slice(0,2).toUpperCase();$('account-name').textContent=actor.username;$('account-role').textContent=actor.role==='admin'&&serverRole!=='controller'?'节点管理员':roleNames[actor.role];await render();}}
 $('setup-form').addEventListener('submit',async e=>{e.preventDefault();const f=e.currentTarget;const data=new FormData(f);const body={username:data.get('username'),password:data.get('password')};if(body.password!==data.get('password_confirm')){notice('两次输入的密码不一致',true);return;}f.elements.password.value=f.elements.password_confirm.value='';const b=f.querySelector('button');b.disabled=true;try{await api('/setup','POST',body);await session();}catch(err){notice(err.message,true);if(err.status===409)await session();}finally{b.disabled=false;}});
-$('login-form').addEventListener('submit',async e=>{e.preventDefault();const f=e.currentTarget;const data=new FormData(f);const body={username:data.get('username'),password:data.get('password')};f.elements.password.value='';const b=f.querySelector('button');b.disabled=true;try{await api('/login','POST',body);resourceScope='mine';userNames=new Map();await session();}catch(err){notice(err.message,true);}finally{b.disabled=false;}});
+$('login-form').addEventListener('submit',async e=>{e.preventDefault();const f=e.currentTarget;const data=new FormData(f);const body={username:data.get('username'),password:data.get('password')};f.elements.password.value='';const b=f.querySelector('button');b.disabled=true;try{await api('/login','POST',body);resourceScope='mine';userNames=new Map();const address=pageLocation(location.hash,'member');address.params.delete('scope');address.params.delete('node');history.replaceState(null,'','#'+address.name+(address.params.size?'?'+address.params.toString():''));await session();}catch(err){notice(err.message,true);}finally{b.disabled=false;}});
 $('logout').addEventListener('click',async()=>{try{await api('/logout','POST',{});++pageGeneration;clearTimeout(refreshTimer);actor=csrf=undefined;$('content').replaceChildren();await session();}catch(e){notice(e.message,true);}});
 $('nav-toggle').addEventListener('click',()=>{const expanded=document.body.classList.toggle('nav-open');$('nav-toggle').setAttribute('aria-expanded',String(expanded));});
 configureMenu($('account-toggle'),$('account-menu'));
