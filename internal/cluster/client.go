@@ -78,7 +78,7 @@ func (c *EnrollmentClient) RunControl(ctx context.Context, path string, apply fu
 					c.mu.Unlock()
 				}
 			}
-			if session.InstanceID != c.instanceID {
+			if session.InstanceID != "" && session.InstanceID != c.instanceID {
 				// A committed heartbeat can outlive its lost response and persisted lease.
 				if err := waitControl(ctx, 90*time.Second); err != nil {
 					return err
