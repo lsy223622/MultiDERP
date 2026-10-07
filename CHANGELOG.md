@@ -27,6 +27,8 @@
   inline grant status and actual DERP map clipboard/download validation.
 - Keeps automatic certificate issuance, competing WAN traffic and complete
   backup restoration as separate candidate acceptance gates.
+- Allows first automatic certificate issuance to finish during DERP startup
+  instead of stopping the child at the short manual-certificate deadline.
 
 ## [1.0.3] - 2026-09-04
 

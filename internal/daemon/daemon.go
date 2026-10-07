@@ -230,9 +230,7 @@ func (d *Daemon) syncDerperConfig(ctx context.Context, cfg config.Config) error 
 	if err := d.derper.Start(ctx, cfg.Server, d.controllerListener.Addr().String(), keyPath); err != nil {
 		return err
 	}
-	readyCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
-	defer cancel()
-	if err := d.derper.WaitReady(readyCtx, cfg.Server); err != nil {
+	if err := d.derper.WaitReady(ctx, cfg.Server); err != nil {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Second)
 		_ = d.derper.Stop(cleanupCtx)
 		cleanupCancel()
