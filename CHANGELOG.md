@@ -1,5 +1,26 @@
 # Changelog
 
+## [2.0.0] - 2026-10-08
+
+- Releases the single-controller v2 platform: independent administrator,
+  provider and member accounts; encrypted read-only Tailnet OAuth; device
+  synchronization; controller/member enrollment; provider approval and
+  applicant confirmation; and per-Tailnet DERP map export.
+- Adds a grouped Web console with first-administrator setup, independent
+  member management, local bandwidth ceilings and System/Light/Dark appearance.
+- Enforces bounded policy and identity deadlines, online revocation and
+  owner/shared weighted RX/TX scheduling through the pinned patched derper.
+- Includes the restart lease and empty-traffic report fixes from the candidates.
+- Completes isolated public-image enrollment, two real Tailnets, stock-client
+  relay/revocation, full stopped backup restoration, real Let's Encrypt
+  issuance, certificate cache reuse and four-client WAN competition.
+  Controlled renewal tests and short WAN measurements do not establish
+  near-expiry production renewal or long-term availability guarantees.
+- Publishes Linux/amd64 images as ghcr.io/lsy223622/uniderp:2.0.0 and latest.
+  Windows binaries are build-tested; no Windows download package or ARM64
+  image is provided. Migration from v1 requires a separate v2 data directory,
+  new OAuth bindings and recreated grants; keep the original data for rollback.
+
 ## [2.0.0-rc.3] - 2026-10-08
 
 - Returns an empty array for a node runtime report with no traffic, so the
