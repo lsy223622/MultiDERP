@@ -277,6 +277,37 @@ func TestNodeTrafficRateUsesSuccessiveRuntimeSamples(t *testing.T) {
 	}
 }
 
+func TestNodeStatusEmptyTrafficIsAnArray(t *testing.T) {
+	s, admin, _, n, _, session := registeredTestNode(t)
+	now := time.Now().UTC().Truncate(time.Second).Add(time.Second)
+	s.now = func() time.Time { return now }
+	p, err := s.BuildPolicy(t.Context(), n.ID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := cluster.NodeReport{Revision: p.Revision, ObservedAt: now}
+	if _, err := s.NodeHeartbeat(t.Context(), session.Token, &report); err != nil {
+		t.Fatal(err)
+	}
+	h := NewHTTPHandler(s)
+	cookie, csrf := loginTest(t, h, admin.Username)
+	w := accountRequest(h, cookie, csrf, "GET", "/api/v1/nodes/"+n.ID+"/status", nil)
+	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	var body struct {
+		Report struct {
+			Traffic json.RawMessage `json:"traffic"`
+		} `json:"report"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if string(body.Report.Traffic) != "[]" {
+		t.Fatal("empty runtime traffic cannot be rendered as a list", string(body.Report.Traffic))
+	}
+}
+
 func TestNodeStatusSeparatesReceivedAppliedAndExpiredPermission(t *testing.T) {
 	s, admin, member, n, _, session := registeredTestNode(t)
 	now := time.Now().UTC().Truncate(time.Second).Add(time.Second)

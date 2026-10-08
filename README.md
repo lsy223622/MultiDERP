@@ -6,14 +6,16 @@ UniDERP shares self-hosted Tailscale DERP relays across independent tailnets. On
 
 The controller also runs a local relay, subject to the same registration and authorization rules as members. Members hold their node identity, policy and independent local administrator account; Tailnet OAuth credentials and shared resource accounts stay on the controller. Tailscale continues to manage peer identity, network policy and WireGuard encryption.
 
-This release candidate targets Linux/amd64. The Compose examples use `ghcr.io/lsy223622/uniderp:2.0.0-rc.2`; prereleases do not move stable `latest`. Windows binaries are build-tested, but this release does not provide a Windows download package or an ARM64 image.
+This release candidate targets Linux/amd64. The Compose examples use `ghcr.io/lsy223622/uniderp:2.0.0-rc.3`; prereleases do not move stable `latest`. Windows binaries are build-tested, but this release does not provide a Windows download package or an ARM64 image.
 
-Isolated acceptance has exercised two independent real Tailnets with read-only OAuth and stock Tailscale applications, confirmation-time admission, external/manual-certificate TLS forwarding, online revocation, scoped console workflows and actual DERP map clipboard/download contents. Automatic certificate issuance, sustained competing traffic and complete backup restoration are separate candidate acceptance gates; the current evidence does not establish a WAN throughput or availability guarantee.
+Isolated acceptance with published candidate images has exercised first-administrator Web setup, two independent real Tailnets with read-only OAuth and stock Tailscale applications, controller/member enrollment, confirmation-time admission, external/manual-certificate TLS forwarding, online revocation, scoped console workflows and actual DERP map clipboard/download contents. Complete stopped backups were restored with matching database, keys, node policy and certificates, then checked with fresh OAuth reads and stock relay connections. Real Let's Encrypt issuance and published-image cache reuse across restart were verified; renewal behavior was checked with controlled upstream tests rather than a near-expiry production renewal.
+
+Four ordinary clients transferred actual data over a forced WAN DERP path. With an 8 Mbps payload budget and 8:2 owner/shared weights, each RX/TX direction measured about 8 Mbps for shared traffic alone, 6.4/1.6 Mbps under contention, and 8 Mbps for shared traffic after the owner endpoints stopped. Application bytes were measured separately and had lower, variable throughput. These isolated observations do not establish a long-term WAN throughput or availability guarantee.
 
 ```sh
-docker pull ghcr.io/lsy223622/uniderp:2.0.0-rc.2
+docker pull ghcr.io/lsy223622/uniderp:2.0.0-rc.3
 docker run --rm --entrypoint /usr/local/bin/uniderp \
-  ghcr.io/lsy223622/uniderp:2.0.0-rc.2 version
+  ghcr.io/lsy223622/uniderp:2.0.0-rc.3 version
 ```
 
 Use the published image digest for immutable deployments. Source and CI are at [lsy223622/UniDERP](https://github.com/lsy223622/UniDERP); see [releases](https://github.com/lsy223622/UniDERP/releases) for version-specific results.
@@ -202,6 +204,6 @@ Version 1 configuration is rejected with a migration error. Old verifier state c
 
 CI builds patched derper for integration tests and runs Linux race checks on both the patched upstream data path and the controller/cluster packages. Local evidence includes scoped API/browser workflows, trusted local TLS and STUN, DERP library relay/revocation, deterministic and controlled byte-scheduling tests, and actual Linux race execution. Public DNS, real OAuth, stock applications and WAN behavior remain separate acceptance requirements.
 
-The image workflow accepts stable `vX.Y.Z` and prerelease tags such as `v2.0.0-rc.2`. A prerelease produces its explicit version image tag and does not update `latest`; stable tags update `latest` only in the new `ghcr.io/lsy223622/uniderp` package. Historical MultiDERP tags and the `ghcr.io/lsy223622/multiderp` package remain separate for v1 deployments and rollback.
+The image workflow accepts stable `vX.Y.Z` and prerelease tags such as `v2.0.0-rc.3`. A prerelease produces its explicit version image tag and does not update `latest`; stable tags update `latest` only in the new `ghcr.io/lsy223622/uniderp` package. Historical MultiDERP tags and the `ghcr.io/lsy223622/multiderp` package remain separate for v1 deployments and rollback.
 
 UniDERP is licensed under [GNU GPL v3](LICENSE). See [SECURITY.md](SECURITY.md) for trust and reporting, [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the patched upstream license, and [CHANGELOG.md](CHANGELOG.md) for release history.

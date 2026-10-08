@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.0.0-rc.3] - 2026-10-08
+
+- Returns an empty array for a node runtime report with no traffic, so the
+  management page can render newly registered nodes before their first transfer.
+- Completes published-candidate acceptance with a real first-administrator Web
+  setup, fresh controller/member enrollment, two read-only Tailnets, complete
+  stopped backups and restoration, and ordinary four-client WAN competition.
+  With an 8 Mbps budget and 8:2 weights, measured DERP payload schedules each
+  RX/TX direction at about 6.4/1.6 Mbps under contention and returns idle owner
+  capacity to the shared group. Application throughput is measured separately.
+- Records real Let's Encrypt issuance and published-image certificate cache
+  reuse across restart; renewal behavior is covered by controlled upstream tests,
+  rather than a near-expiry production renewal or long-term availability claim.
+
 ## [2.0.0-rc.2] - 2026-10-08
 
 - Waits for the complete prior instance lease on node process restart, including

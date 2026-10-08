@@ -6,14 +6,16 @@ UniDERP 让自建 Tailscale DERP 中继服务多个独立 tailnet。单个主控
 
 主控本机也可提供中继，注册和授权规则与成员节点相同。成员保存节点身份、策略和独立的本机管理员账号；Tailnet OAuth 凭据和共享资源账号留在主控。Tailscale 继续负责对端身份、网络策略和 WireGuard 加密。
 
-此候选版本面向 Linux/amd64。Compose 示例使用 `ghcr.io/lsy223622/uniderp:2.0.0-rc.2`，预发布不会更新稳定 `latest`。Windows 二进制有构建检查，本次不提供 Windows 下载包或 ARM64 镜像。
+此候选版本面向 Linux/amd64。Compose 示例使用 `ghcr.io/lsy223622/uniderp:2.0.0-rc.3`，预发布不会更新稳定 `latest`。Windows 二进制有构建检查，本次不提供 Windows 下载包或 ARM64 镜像。
 
-两个独立真实 Tailnet 的只读 OAuth 和原版 Tailscale 应用已完成隔离验收，包括确认时准入、external/手动证书 TLS 转发、在线撤销、分角色网页流程，以及真实 DERP map 剪贴板与下载文件内容。自动证书签发、持续竞争流量和完整备份恢复分别作为候选版本验收项；现有证据不构成公网吞吐或可用性保证。
+已使用公开候选镜像完成隔离验收，包括首次管理员网页设置、两个独立真实 Tailnet 的只读 OAuth 与原版 Tailscale 应用、主控/成员节点注册、确认时准入、external/手动证书 TLS 转发、在线撤销、分角色网页流程，以及真实 DERP map 剪贴板和下载内容。完整停机备份已恢复，并核对数据库、密钥、节点策略及证书，再通过新的 OAuth 身份读取和原版客户端中继连接验证。真实 Let's Encrypt 签发和公开镜像重启后的缓存复用已验证；续期行为使用上游受控测试验证，未宣称完成临近到期的生产续期。
+
+四个原版客户端通过强制公网 DERP 路径传输了实际数据。在 8 Mbps 载荷预算、自用/共享组权重 8:2 下，RX 与 TX 各方向测得共享组独占约 8 Mbps、争用时约 6.4/1.6 Mbps、自用端点停止后共享组恢复约 8 Mbps。另行计量的应用字节吞吐更低且有变化。这些隔离观测不构成长期公网吞吐或可用性保证。
 
 ```sh
-docker pull ghcr.io/lsy223622/uniderp:2.0.0-rc.2
+docker pull ghcr.io/lsy223622/uniderp:2.0.0-rc.3
 docker run --rm --entrypoint /usr/local/bin/uniderp \
-  ghcr.io/lsy223622/uniderp:2.0.0-rc.2 version
+  ghcr.io/lsy223622/uniderp:2.0.0-rc.3 version
 ```
 
 固定部署可使用已发布镜像的 digest。源码及 CI 位于 [lsy223622/UniDERP](https://github.com/lsy223622/UniDERP)，各版本实际验证结果见 [Release](https://github.com/lsy223622/UniDERP/releases)。
@@ -202,6 +204,6 @@ version 1 配置会以明确迁移错误停止。旧 verifier state 不能转换
 
 CI 构建 patched derper 后运行集成测试，分别对 patched 上游转发和主控/集群运行 Linux race 检查。本地已有权限 API/浏览器流程、可信本地 TLS/STUN、DERP library 转发/撤销、确定性和受控字节调度、真实 Linux race 证据。公网 DNS、真实 OAuth、原版应用和 WAN 行为仍是独立验收项。
 
-镜像 workflow 接受稳定 `vX.Y.Z` 和 `v2.0.0-rc.2` 等预发布 tag。预发布只生成明确版本的镜像 tag，不更新 `latest`；稳定 tag 仅更新新 `ghcr.io/lsy223622/uniderp` 包的 `latest`。旧 MultiDERP tags 与 `ghcr.io/lsy223622/multiderp` 包单独保留，供 v1 部署与回退使用。
+镜像 workflow 接受稳定 `vX.Y.Z` 和 `v2.0.0-rc.3` 等预发布 tag。预发布只生成明确版本的镜像 tag，不更新 `latest`；稳定 tag 仅更新新 `ghcr.io/lsy223622/uniderp` 包的 `latest`。旧 MultiDERP tags 与 `ghcr.io/lsy223622/multiderp` 包单独保留，供 v1 部署与回退使用。
 
 UniDERP 使用 [GNU GPL v3](LICENSE)。信任边界与漏洞报告见 [SECURITY.md](SECURITY.md)，patched 上游许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，发布历史见 [CHANGELOG.md](CHANGELOG.md)。

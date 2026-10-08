@@ -237,6 +237,9 @@ func (s *Store) NodeStatus(ctx context.Context, actor Actor, id string) (NodeSta
 		if err := json.Unmarshal(reportBody, state.Report); err != nil {
 			return state, err
 		}
+		if state.Report.Traffic == nil {
+			state.Report.Traffic = []cluster.TailnetTraffic{}
+		}
 		if !owner {
 			state.Report.ActiveConnections = nil
 			filtered := []cluster.TailnetTraffic{}
