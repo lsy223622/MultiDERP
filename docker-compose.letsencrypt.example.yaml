@@ -1,7 +1,7 @@
 services:
-  multiderp:
-    container_name: multiderp
-    image: ghcr.io/lsy223622/multiderp:latest
+  uniderp:
+    container_name: uniderp
+    image: ghcr.io/lsy223622/uniderp:2.0.0
     user: "10001:10001"
     restart: unless-stopped
     read_only: true
@@ -14,6 +14,7 @@ services:
     ports:
       - "443:443/tcp"
       - "80:80/tcp"
+      - "127.0.0.1:3378:3378/tcp"
       - "0.0.0.0:3478:3478/udp"
       - "[::]:3478:3478/udp"
 
@@ -21,4 +22,4 @@ services:
       - ./data:/data
 
     tmpfs:
-      - /run/multiderp:rw,noexec,nosuid,nodev,mode=0700,uid=10001,gid=10001
+      - /run/uniderp:rw,noexec,nosuid,nodev,mode=0700,uid=10001,gid=10001

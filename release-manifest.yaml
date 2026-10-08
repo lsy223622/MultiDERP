@@ -1,17 +1,20 @@
 format_version: 1
-project: multiderp
+project: uniderp
 
 upstream:
   module: tailscale.com
   version: v1.102.3
   commit: 53a0d659afa51835dd7a9283873cca44261454f8
   source: https://github.com/tailscale/tailscale
+  patch:
+    file: patches/tailscale/uniderp.patch
+    sha256: 2a1cf7513f6e1812f17acf561c6fb2967d338e4ab0f6b712018db19b6fa1cffd
 
 images:
   - name: build
     platform: linux/amd64
-    reference: golang:1.26.6
-    digest: sha256:0d1d3a794be25f809dd2cb3160d8c73276c4056a9f8242a138e908ddeee7b6b6
+    reference: golang:1.27.1
+    digest: sha256:e0174e51e81218523251d85d248a90d24c3d5e81543b4f07a5d66229397db190
   - name: runtime
     platform: linux/amd64
     reference: gcr.io/distroless/static-debian12:nonroot

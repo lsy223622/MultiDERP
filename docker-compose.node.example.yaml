@@ -1,0 +1,16 @@
+services:
+  uniderp-node:
+    container_name: uniderp-node
+    image: ghcr.io/lsy223622/uniderp:2.0.0
+    user: "10001:10001"
+    restart: unless-stopped
+    read_only: true
+    ports:
+      - "127.0.0.1:3377:3377/tcp"
+      - "127.0.0.1:3378:3378/tcp"
+      - "0.0.0.0:3478:3478/udp"
+      - "[::]:3478:3478/udp"
+    volumes:
+      - ./node-data:/data
+    tmpfs:
+      - /run/uniderp:rw,noexec,nosuid,nodev,mode=0700,uid=10001,gid=10001

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lsy223622/MultiDERP/internal/config"
+	"github.com/lsy223622/UniDERP/v2/internal/config"
 )
 
 func testServer(tlsMode string) config.ServerConfig {
@@ -28,8 +28,8 @@ func testServer(tlsMode string) config.ServerConfig {
 	}
 }
 
-func TestBuildArgsPinsAdmissionAndDisablesMesh(t *testing.T) {
-	args, err := BuildArgs(testServer("external"), "127.0.0.1:3340", "/data/derper/derper.key")
+func TestBuildArgsPinsLocalPolicyAndDisablesMesh(t *testing.T) {
+	args, err := BuildArgs(testServer("external"), "127.0.0.1:3341", "/data/derper/derper.key", PolicyClient{Path: "/data/node/policy.json", SocketPath: "/data/node/policy.sock"})
 	if err != nil {
 		t.Fatalf("BuildArgs() error = %v", err)
 	}
@@ -40,8 +40,10 @@ func TestBuildArgsPinsAdmissionAndDisablesMesh(t *testing.T) {
 		"-stun-port=3478",
 		"-http-port=-1",
 		"-verify-clients=false",
-		"-verify-client-url=http://127.0.0.1:3340/admit",
-		"-verify-client-url-fail-open=false",
+		"-uniderp-management-url=http://127.0.0.1:3341",
+		"-uniderp-policy-file=",
+		"-uniderp-policy-socket=",
+		"-uniderp-max-budget-bps=0",
 		"-mesh-psk-file=",
 	} {
 		if !strings.Contains(joined, want) {
@@ -59,7 +61,7 @@ func TestBuildArgsPinsAdmissionAndDisablesMesh(t *testing.T) {
 }
 
 func TestBuildArgsPassthroughUsesConfiguredCertificateFlags(t *testing.T) {
-	args, err := BuildArgs(testServer("passthrough"), "127.0.0.1:3340", "/data/derper/derper.key")
+	args, err := BuildArgs(testServer("passthrough"), "127.0.0.1:3341", "/data/derper/derper.key", PolicyClient{Path: "/data/node/policy.json", SocketPath: "/data/node/policy.sock"})
 	if err != nil {
 		t.Fatalf("BuildArgs() error = %v", err)
 	}
@@ -76,7 +78,7 @@ func TestBuildArgsLetsEncryptEnablesHTTPChallenge(t *testing.T) {
 	server := testServer("passthrough")
 	server.DERP.Listen = ":443"
 	server.DERP.CertMode = "letsencrypt"
-	args, err := BuildArgs(server, "127.0.0.1:3340", "/data/derper/derper.key")
+	args, err := BuildArgs(server, "127.0.0.1:3341", "/data/derper/derper.key", PolicyClient{Path: "/data/node/policy.json", SocketPath: "/data/node/policy.sock"})
 	if err != nil {
 		t.Fatalf("BuildArgs() error = %v", err)
 	}
@@ -89,16 +91,16 @@ func TestBuildArgsLetsEncryptEnablesHTTPChallenge(t *testing.T) {
 func TestBuildArgsRejectsGCPCertificateMode(t *testing.T) {
 	server := testServer("passthrough")
 	server.DERP.CertMode = "gcp"
-	if _, err := BuildArgs(server, "127.0.0.1:3340", "/data/derper/derper.key"); err == nil || !strings.Contains(err.Error(), "unsupported") || !strings.Contains(err.Error(), "gcp") {
+	if _, err := BuildArgs(server, "127.0.0.1:3341", "/data/derper/derper.key", PolicyClient{Path: "/data/node/policy.json", SocketPath: "/data/node/policy.sock"}); err == nil || !strings.Contains(err.Error(), "unsupported") || !strings.Contains(err.Error(), "gcp") {
 		t.Fatalf("BuildArgs() error = %v, want clear gcp unsupported error", err)
 	}
 }
 
-func TestBuildArgsRejectsNonLoopbackAdmission(t *testing.T) {
-	for _, address := range []string{":3340", "0.0.0.0:3340", "127.0.0.1:0", "127.0.0.1:not-a-port"} {
-		_, err := BuildArgs(testServer("external"), address, "/data/derper/derper.key")
+func TestBuildArgsRejectsNonLoopbackManagement(t *testing.T) {
+	for _, address := range []string{":3341", "0.0.0.0:3341", "127.0.0.1:0", "127.0.0.1:not-a-port"} {
+		_, err := BuildArgs(testServer("external"), address, "/data/derper/derper.key", PolicyClient{Path: "/data/node/policy.json", SocketPath: "/data/node/policy.sock"})
 		if err == nil {
-			t.Errorf("BuildArgs(%q) succeeded for invalid admission address", address)
+			t.Errorf("BuildArgs(%q) succeeded for invalid management address", address)
 		}
 	}
 }

@@ -44,7 +44,7 @@ func (c *recordingConn) SetWriteDeadline(deadline time.Time) error {
 func TestServerClientRoundTrip(t *testing.T) {
 	socket := filepath.Join(t.TempDir(), "admin.sock")
 	server := NewServer(socket, func(_ context.Context, request Request) Response {
-		if request.Action != "tailnet.list" {
+		if request.Action != "config.reload" {
 			return Failure("unexpected action")
 		}
 		return Success("ok", map[string]string{"name": "alice"})
@@ -57,7 +57,7 @@ func TestServerClientRoundTrip(t *testing.T) {
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- server.Serve(ctx) }()
 
-	response, err := (Client{SocketPath: socket, Timeout: time.Second}).Call(context.Background(), Request{Action: "tailnet.list"})
+	response, err := (Client{SocketPath: socket, Timeout: time.Second}).Call(context.Background(), Request{Action: "config.reload"})
 	if err != nil {
 		t.Fatalf("Client.Call() error = %v", err)
 	}
@@ -143,7 +143,7 @@ func TestHandleConnectionGivesHandlerTheRequestTimeout(t *testing.T) {
 		server.handleConnection(context.Background(), wrapped)
 		close(done)
 	}()
-	if err := WriteFrame(clientSide, Request{Action: "tailnet.list"}); err != nil {
+	if err := WriteFrame(clientSide, Request{Action: "config.reload"}); err != nil {
 		t.Fatalf("write request: %v", err)
 	}
 	select {

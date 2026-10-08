@@ -2,12 +2,13 @@ package config
 
 import (
 	"bytes"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
+	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -15,42 +16,60 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
-	configexample "github.com/lsy223622/MultiDERP"
+	configexample "github.com/lsy223622/UniDERP/v2"
 	"gopkg.in/yaml.v3"
-	"tailscale.com/tailcfg"
 )
 
-const CurrentVersion = 1
+const CurrentVersion = 2
 
 const (
-	DefaultDERPListen       = ":3377"
-	DefaultSTUNListen       = ":3478"
-	DefaultAdminSocket      = "/run/multiderp/admin.sock"
-	DefaultHealthListen     = "127.0.0.1:9090"
-	DefaultStateDir         = "/data"
-	DefaultTailnetStateDir  = "/data/tailnets"
-	DefaultOrphanStateDir   = "/data/orphans"
-	DefaultLoggingLevel     = "info"
-	DefaultTLSMode          = "external"
-	DefaultConfigPath       = "/data/config.yaml"
-	DefaultAdmissionAddress = "127.0.0.1:3340"
+	DefaultDERPListen   = ":3377"
+	DefaultSTUNListen   = ":3478"
+	DefaultAdminSocket  = "/run/uniderp/admin.sock"
+	DefaultHealthListen = "127.0.0.1:9090"
+	DefaultStateDir     = "/data"
+	DefaultLoggingLevel = "info"
+	DefaultTLSMode      = "external"
+	DefaultConfigPath   = "/data/config.yaml"
 )
 
 type Config struct {
-	Version  int             `yaml:"version"`
-	Server   ServerConfig    `yaml:"server"`
-	Storage  StorageConfig   `yaml:"storage"`
-	Logging  LoggingConfig   `yaml:"logging"`
-	Tailnets []TailnetConfig `yaml:"tailnets"`
+	SetupRequired bool              `yaml:"setup_required,omitempty"`
+	Controller    *ControllerConfig `yaml:"controller"`
+	Node          NodeConfig        `yaml:"node"`
+	Version       int               `yaml:"version"`
+	Server        ServerConfig      `yaml:"server"`
+	Storage       StorageConfig     `yaml:"storage"`
+	Logging       LoggingConfig     `yaml:"logging"`
+}
+
+type ControllerConfig struct {
+	Enabled          bool     `yaml:"enabled"`
+	Listen           string   `yaml:"listen"`
+	Database         string   `yaml:"database"`
+	KeyFile          string   `yaml:"key_file"`
+	AllowedNodeCIDRs []string `yaml:"allowed_node_cidrs,omitempty"`
+}
+
+type NodeConfig struct {
+	DERPPort      int    `yaml:"derp_port,omitempty"`
+	STUNPort      int    `yaml:"stun_port,omitempty"`
+	ControllerURL string `yaml:"controller_url,omitempty"`
+	StateDir      string `yaml:"state_dir"`
+	MaxBudgetBPS  uint64 `yaml:"max_budget_bps,omitempty"`
 }
 
 type ServerConfig struct {
-	Hostname string       `yaml:"hostname"`
-	DERP     DERPConfig   `yaml:"derp"`
-	Admin    AdminConfig  `yaml:"admin"`
-	Health   HealthConfig `yaml:"health"`
+	Management ManagementConfig `yaml:"management,omitempty"`
+	Hostname   string           `yaml:"hostname"`
+	DERP       DERPConfig       `yaml:"derp"`
+	Admin      AdminConfig      `yaml:"admin"`
+	Health     HealthConfig     `yaml:"health"`
+}
+
+type ManagementConfig struct {
+	Listen string `yaml:"listen,omitempty"`
 }
 
 type DERPConfig struct {
@@ -70,28 +89,11 @@ type HealthConfig struct {
 }
 
 type StorageConfig struct {
-	StateDir        string `yaml:"state_dir"`
-	TailnetStateDir string `yaml:"tailnet_state_dir"`
-	OrphanStateDir  string `yaml:"orphan_state_dir"`
+	StateDir string `yaml:"state_dir"`
 }
 
 type LoggingConfig struct {
 	Level string `yaml:"level"`
-}
-
-type TailnetConfig struct {
-	Name     string     `yaml:"name"`
-	Disabled bool       `yaml:"disabled"`
-	Required bool       `yaml:"required"`
-	Hostname string     `yaml:"hostname"`
-	Auth     AuthConfig `yaml:"auth"`
-}
-
-type AuthConfig struct {
-	Type             string   `yaml:"type"`
-	ClientSecretFile string   `yaml:"client_secret_file"`
-	AuthKeyFile      string   `yaml:"auth_key_file"`
-	Tags             []string `yaml:"tags"`
 }
 
 type ParseResult struct {
@@ -130,31 +132,40 @@ func (c *Config) Normalize() {
 	if c.Storage.StateDir == "" {
 		c.Storage.StateDir = DefaultStateDir
 	}
-	if c.Storage.TailnetStateDir == "" {
-		c.Storage.TailnetStateDir = DefaultTailnetStateDir
+	if c.Controller == nil {
+		c.Controller = &ControllerConfig{Enabled: true}
 	}
-	if c.Storage.OrphanStateDir == "" {
-		c.Storage.OrphanStateDir = DefaultOrphanStateDir
+	if c.Controller.Enabled {
+		if c.Controller.Listen == "" {
+			c.Controller.Listen = "127.0.0.1:3341"
+		}
+		if c.Controller.Database == "" {
+			c.Controller.Database = filepath.Join(c.Storage.StateDir, "controller.sqlite")
+		}
+		if c.Controller.KeyFile == "" {
+			c.Controller.KeyFile = filepath.Join(c.Storage.StateDir, "controller.key")
+		}
+	}
+	if c.Node.StateDir == "" {
+		c.Node.StateDir = filepath.Join(c.Storage.StateDir, "node")
+	}
+	if c.Node.DERPPort == 0 {
+		c.Node.DERPPort = 443
+	}
+	if c.Node.STUNPort == 0 {
+		c.Node.STUNPort = 3478
 	}
 	if c.Logging.Level == "" {
 		c.Logging.Level = DefaultLoggingLevel
-	}
-	for i := range c.Tailnets {
-		if c.Tailnets[i].Hostname == "" && c.Tailnets[i].Name != "" {
-			c.Tailnets[i].Hostname = "multiderp-" + c.Tailnets[i].Name
-		}
-		for j := range c.Tailnets[i].Auth.Tags {
-			c.Tailnets[i].Auth.Tags[j] = strings.TrimSpace(c.Tailnets[i].Auth.Tags[j])
-		}
 	}
 }
 
 func (c Config) Clone() Config {
 	clone := c
-	clone.Tailnets = make([]TailnetConfig, len(c.Tailnets))
-	copy(clone.Tailnets, c.Tailnets)
-	for i := range clone.Tailnets {
-		clone.Tailnets[i].Auth.Tags = append([]string(nil), c.Tailnets[i].Auth.Tags...)
+	if c.Controller != nil {
+		controller := *c.Controller
+		controller.AllowedNodeCIDRs = append([]string(nil), controller.AllowedNodeCIDRs...)
+		clone.Controller = &controller
 	}
 	return clone
 }
@@ -209,7 +220,13 @@ func Parse(data []byte) (ParseResult, error) {
 		return ParseResult{}, fmt.Errorf("config version must be an integer: %w", err)
 	}
 	if version != CurrentVersion {
+		if version == 1 {
+			return ParseResult{}, errors.New("config version 1 requires migration to version 2")
+		}
 		return ParseResult{}, fmt.Errorf("unsupported config version %d; expected %d", version, CurrentVersion)
+	}
+	if mappingValue(document, "tailnets") != nil {
+		return ParseResult{}, errors.New("tailnets must be managed through the controller; migrate local configuration to version 2")
 	}
 
 	warnings := make([]string, 0)
@@ -287,18 +304,55 @@ func (c Config) Validate() error {
 	if c.Version != CurrentVersion {
 		return fmt.Errorf("unsupported config version %d; expected %d", c.Version, CurrentVersion)
 	}
-	needsDERPHostname := false
-	for _, tailnet := range c.Tailnets {
-		if !tailnet.Disabled {
-			needsDERPHostname = true
-			break
+	if c.Controller == nil {
+		return errors.New("controller role is required")
+	}
+	if c.Controller.Enabled {
+		if c.Node.ControllerURL != "" {
+			return errors.New("controller cannot join another controller")
+		}
+		if strings.TrimSpace(c.Controller.Database) == "" || strings.TrimSpace(c.Controller.KeyFile) == "" {
+			return errors.New("controller database and key_file are required")
+		}
+		if err := validateListenAddress(c.Controller.Listen, "controller.listen"); err != nil {
+			return err
+		}
+		host, _, _ := net.SplitHostPort(c.Controller.Listen)
+		if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+			return errors.New("controller.listen must be loopback")
+		}
+		for _, cidr := range c.Controller.AllowedNodeCIDRs {
+			if _, err := netip.ParsePrefix(cidr); err != nil {
+				return errors.New("controller.allowed_node_cidrs contains an invalid range")
+			}
+		}
+	} else {
+		if c.Controller.Listen != "" || c.Controller.Database != "" || c.Controller.KeyFile != "" || len(c.Controller.AllowedNodeCIDRs) != 0 {
+			return errors.New("member node cannot configure controller storage or settings")
+		}
+		if c.Node.ControllerURL != "" {
+			u, err := url.Parse(c.Node.ControllerURL)
+			if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" {
+				return errors.New("node.controller_url must be an HTTPS origin")
+			}
 		}
 	}
-	if needsDERPHostname && strings.TrimSpace(c.Server.Hostname) == "" {
-		return errors.New("server.hostname is required when an enabled verifier is configured")
+	if c.Node.DERPPort < 1 || c.Node.DERPPort > 65535 || c.Node.STUNPort < 1 || c.Node.STUNPort > 65535 {
+		return errors.New("node public ports must be between 1 and 65535")
+	}
+	if c.Server.Management.Listen != "" {
+		if err := validateListenAddress(c.Server.Management.Listen, "server.management.listen"); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(c.Node.StateDir) == "" {
+		return errors.New("node.state_dir is required")
+	}
+	if c.Node.MaxBudgetBPS > math.MaxInt64 || (c.Node.MaxBudgetBPS != 0 && c.Node.MaxBudgetBPS < 8) {
+		return errors.New("node.max_budget_bps overflows the supported budget")
 	}
 	if c.Server.Hostname != "" {
-		if err := validateHostname(c.Server.Hostname); err != nil {
+		if err := ValidateHostname(c.Server.Hostname); err != nil {
 			return fmt.Errorf("server.hostname: %w", err)
 		}
 	}
@@ -319,7 +373,7 @@ func (c Config) Validate() error {
 	switch c.Server.DERP.CertMode {
 	case "", "none", "manual", "letsencrypt":
 	case "gcp":
-		return errors.New("server.derp.cert_mode: unsupported value \"gcp\" in V1; supported values are none, letsencrypt, or manual")
+		return errors.New("server.derp.cert_mode: unsupported value \"gcp\"; supported values are none, letsencrypt, or manual")
 	default:
 		return fmt.Errorf("server.derp.cert_mode: unsupported value %q; expected none, letsencrypt, or manual", c.Server.DERP.CertMode)
 	}
@@ -362,111 +416,10 @@ func (c Config) Validate() error {
 	if c.Logging.Level != "info" && c.Logging.Level != "warn" && c.Logging.Level != "error" && c.Logging.Level != "debug" {
 		return fmt.Errorf("logging.level: unsupported value %q", c.Logging.Level)
 	}
-	if strings.TrimSpace(c.Storage.StateDir) == "" || strings.TrimSpace(c.Storage.TailnetStateDir) == "" || strings.TrimSpace(c.Storage.OrphanStateDir) == "" {
+	if strings.TrimSpace(c.Storage.StateDir) == "" {
 		return errors.New("storage paths must not be empty")
 	}
 
-	seen := make(map[string]string, len(c.Tailnets))
-	for i, t := range c.Tailnets {
-		path := fmt.Sprintf("tailnets[%d]", i)
-		if err := validateName(t.Name); err != nil {
-			return fmt.Errorf("%s.name: %w", path, err)
-		}
-		key := strings.ToLower(t.Name)
-		if previous, ok := seen[key]; ok {
-			return fmt.Errorf("duplicate verifier name %q at %s and %s", t.Name, previous, path)
-		}
-		seen[key] = path
-		if t.Hostname != "" {
-			if err := validateHostname(t.Hostname); err != nil {
-				return fmt.Errorf("%s.hostname: %w", path, err)
-			}
-		}
-		switch t.Auth.Type {
-		case "web":
-			if t.Auth.ClientSecretFile != "" || t.Auth.AuthKeyFile != "" {
-				return fmt.Errorf("%s.auth: web authentication cannot specify a secret file", path)
-			}
-		case "oauth":
-			if strings.TrimSpace(t.Auth.ClientSecretFile) == "" {
-				return fmt.Errorf("%s.auth.client_secret_file is required for oauth authentication", path)
-			}
-			if t.Auth.AuthKeyFile != "" {
-				return fmt.Errorf("%s.auth: oauth authentication cannot specify auth_key_file", path)
-			}
-			if len(t.Auth.Tags) == 0 {
-				return fmt.Errorf("%s.auth: oauth authkeys require --advertise-tags", path)
-			}
-		case "auth_key":
-			if strings.TrimSpace(t.Auth.AuthKeyFile) == "" {
-				return fmt.Errorf("%s.auth.auth_key_file is required for auth_key authentication", path)
-			}
-			if t.Auth.ClientSecretFile != "" {
-				return fmt.Errorf("%s.auth: auth_key authentication cannot specify client_secret_file", path)
-			}
-		default:
-			return fmt.Errorf("%s.auth.type: unsupported value %q; expected web, oauth, or auth_key", path, t.Auth.Type)
-		}
-		seenTags := make(map[string]struct{}, len(t.Auth.Tags))
-		for j, rawTag := range t.Auth.Tags {
-			tag := strings.TrimSpace(rawTag)
-			if tag == "" {
-				return fmt.Errorf("%s.auth.tags[%d] must not be empty", path, j)
-			}
-			if err := tailcfg.CheckTag(tag); err != nil {
-				return fmt.Errorf("%s.auth.tags[%d]: %w", path, j, err)
-			}
-			if _, ok := seenTags[tag]; ok {
-				return fmt.Errorf("%s.auth.tags[%d] duplicates tag %q", path, j, tag)
-			}
-			seenTags[tag] = struct{}{}
-		}
-	}
-	return nil
-}
-
-func sameStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func ValidateReload(oldConfig, newConfig Config) error {
-	oldConfig.Normalize()
-	newConfig.Normalize()
-	if err := newConfig.Validate(); err != nil {
-		return err
-	}
-	oldByName := make(map[string]TailnetConfig, len(oldConfig.Tailnets))
-	for _, t := range oldConfig.Tailnets {
-		oldByName[strings.ToLower(t.Name)] = t
-	}
-	for _, t := range newConfig.Tailnets {
-		old, ok := oldByName[strings.ToLower(t.Name)]
-		if !ok {
-			continue
-		}
-		if old.Name != t.Name || old.Auth.Type != t.Auth.Type || old.Hostname != t.Hostname ||
-			old.Auth.ClientSecretFile != t.Auth.ClientSecretFile || old.Auth.AuthKeyFile != t.Auth.AuthKeyFile ||
-			!sameStrings(old.Auth.Tags, t.Auth.Tags) {
-			return fmt.Errorf("verifier %q identity/auth/hostname changed; use remove/reset and add instead of reusing state", t.Name)
-		}
-	}
-	newByName := make(map[string]struct{}, len(newConfig.Tailnets))
-	for _, t := range newConfig.Tailnets {
-		newByName[strings.ToLower(t.Name)] = struct{}{}
-	}
-	for _, t := range oldConfig.Tailnets {
-		if _, ok := newByName[strings.ToLower(t.Name)]; !ok {
-			return fmt.Errorf("verifier %q was removed from config; use tailnet remove to preserve its state as an orphan", t.Name)
-		}
-	}
 	return nil
 }
 
@@ -474,10 +427,12 @@ func RestartOnlyChanged(oldConfig, newConfig Config) bool {
 	oldConfig.Normalize()
 	newConfig.Normalize()
 	return oldConfig.Server.Hostname != newConfig.Server.Hostname ||
+		oldConfig.SetupRequired != newConfig.SetupRequired || oldConfig.Server.Management != newConfig.Server.Management ||
 		!reflect.DeepEqual(oldConfig.Server.DERP, newConfig.Server.DERP) ||
 		oldConfig.Server.Admin.Socket != newConfig.Server.Admin.Socket ||
 		oldConfig.Server.Health.Listen != newConfig.Server.Health.Listen ||
-		oldConfig.Storage != newConfig.Storage
+		oldConfig.Storage != newConfig.Storage ||
+		!reflect.DeepEqual(oldConfig.Controller, newConfig.Controller) || oldConfig.Node != newConfig.Node
 }
 
 func WriteAtomic(path string, cfg Config) error {
@@ -530,32 +485,9 @@ func writeAtomicBytes(path string, data []byte, pattern string) error {
 	return nil
 }
 
-func NewOrphanID() (string, error) {
-	var raw [16]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return "", fmt.Errorf("generate orphan id: %w", err)
-	}
-	return "orphan-" + hex.EncodeToString(raw[:]), nil
-}
-
-func validateName(name string) error {
-	if name == "" || name == "." || name == ".." {
-		return errors.New("must be a non-empty local identifier")
-	}
-	if len(name) > 64 || strings.ContainsAny(name, `/\\`) || strings.TrimSpace(name) != name {
-		return errors.New("must be a path-safe identifier of at most 64 characters")
-	}
-	for _, r := range name {
-		if !(r >= 'a' && r <= 'z') && !(r >= 'A' && r <= 'Z') && !(r >= '0' && r <= '9') && r != '-' && r != '_' && r != '.' {
-			return fmt.Errorf("contains unsupported character %q", r)
-		}
-	}
-	return nil
-}
-
 var hostnameLabel = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
 
-func validateHostname(hostname string) error {
+func ValidateHostname(hostname string) error {
 	if len(hostname) == 0 || len(hostname) > 253 || strings.ContainsAny(hostname, "/\\ \t\r\n") {
 		return errors.New("must be a valid DNS hostname")
 	}
@@ -622,22 +554,24 @@ func mappingValue(mapping *yaml.Node, key string) *yaml.Node {
 
 type schemaNode struct {
 	Fields map[string]*schemaNode
-	Item   *schemaNode
 }
 
 var (
 	rootSchema = &schemaNode{Fields: map[string]*schemaNode{
-		"version":  nil,
-		"server":   serverSchema,
-		"storage":  storageSchema,
-		"logging":  loggingSchema,
-		"tailnets": {Item: tailnetSchema},
+		"setup_required": nil,
+		"version":        nil,
+		"server":         serverSchema,
+		"storage":        storageSchema,
+		"logging":        loggingSchema,
+		"controller":     {Fields: map[string]*schemaNode{"enabled": nil, "listen": nil, "database": nil, "key_file": nil, "allowed_node_cidrs": nil}},
+		"node":           {Fields: map[string]*schemaNode{"controller_url": nil, "state_dir": nil, "max_budget_bps": nil, "derp_port": nil, "stun_port": nil}},
 	}}
 	serverSchema = &schemaNode{Fields: map[string]*schemaNode{
-		"hostname": nil,
-		"derp":     derpSchema,
-		"admin":    adminSchema,
-		"health":   healthSchema,
+		"management": {Fields: map[string]*schemaNode{"listen": nil}},
+		"hostname":   nil,
+		"derp":       derpSchema,
+		"admin":      adminSchema,
+		"health":     healthSchema,
 	}}
 	derpSchema = &schemaNode{Fields: map[string]*schemaNode{
 		"listen": nil, "stun_listen": nil, "tls_mode": nil, "cert_mode": nil, "cert_dir": nil,
@@ -645,32 +579,26 @@ var (
 	adminSchema   = &schemaNode{Fields: map[string]*schemaNode{"socket": nil}}
 	healthSchema  = &schemaNode{Fields: map[string]*schemaNode{"listen": nil}}
 	storageSchema = &schemaNode{Fields: map[string]*schemaNode{
-		"state_dir": nil, "tailnet_state_dir": nil, "orphan_state_dir": nil,
+		"state_dir": nil,
 	}}
 	loggingSchema = &schemaNode{Fields: map[string]*schemaNode{"level": nil}}
-	tailnetSchema = &schemaNode{Fields: map[string]*schemaNode{
-		"name": nil, "disabled": nil, "required": nil, "hostname": nil, "auth": authSchema,
-	}}
-	authSchema = &schemaNode{Fields: map[string]*schemaNode{
-		"type": nil, "client_secret_file": nil, "auth_key_file": nil, "tags": nil,
-	}}
 )
 
 var unsupportedFields = map[string]string{
-	"control_url":             "MultiDERP V1 only uses the official Tailscale control plane",
-	"controlurl":              "MultiDERP V1 only uses the official Tailscale control plane",
-	"derp_map":                "DERP maps belong to each Tailnet control plane, not MultiDERP",
-	"derpmap":                 "DERP maps belong to each Tailnet control plane, not MultiDERP",
-	"derp_map_file":           "DERP maps belong to each Tailnet control plane, not MultiDERP",
-	"derp_map_url":            "DERP maps belong to each Tailnet control plane, not MultiDERP",
-	"mesh_psk_file":           "DERP mesh is disabled in MultiDERP V1",
-	"mesh_with":               "DERP mesh is disabled in MultiDERP V1",
-	"secrets_url":             "DERP mesh is disabled in MultiDERP V1",
-	"verify_client_url":       "MultiDERP owns the admission callback",
-	"verify_clients":          "MultiDERP owns client admission and does not use local tailscaled verification",
-	"rate_config":             "MultiDERP V1 does not expose upstream experimental rate configuration",
-	"accept_connection_limit": "MultiDERP V1 does not expose upstream connection limits",
-	"accept_connection_burst": "MultiDERP V1 does not expose upstream connection limits",
+	"control_url":             "UniDERP identities use the official Tailscale device API",
+	"controlurl":              "UniDERP identities use the official Tailscale device API",
+	"derp_map":                "DERP maps belong to each Tailnet control plane, not UniDERP",
+	"derpmap":                 "DERP maps belong to each Tailnet control plane, not UniDERP",
+	"derp_map_file":           "DERP maps belong to each Tailnet control plane, not UniDERP",
+	"derp_map_url":            "DERP maps belong to each Tailnet control plane, not UniDERP",
+	"mesh_psk_file":           "DERP mesh is disabled in UniDERP",
+	"mesh_with":               "DERP mesh is disabled in UniDERP",
+	"secrets_url":             "DERP mesh is disabled in UniDERP",
+	"verify_client_url":       "UniDERP uses local node policy",
+	"verify_clients":          "UniDERP uses local node policy",
+	"rate_config":             "UniDERP does not expose upstream experimental rate configuration",
+	"accept_connection_limit": "UniDERP does not expose upstream connection limits",
+	"accept_connection_burst": "UniDERP does not expose upstream connection limits",
 }
 
 func collectUnknownFields(node *yaml.Node, path string, schema *schemaNode, warnings *[]string) error {
@@ -705,15 +633,6 @@ func collectUnknownFields(node *yaml.Node, path string, schema *schemaNode, warn
 			continue
 		}
 		if child == nil {
-			continue
-		}
-		if key == "tailnets" && valueNode.Kind == yaml.SequenceNode {
-			for index, item := range valueNode.Content {
-				itemPath := fmt.Sprintf("%s[%d]", fieldPath, index)
-				if err := collectUnknownFields(item, itemPath, child.Item, warnings); err != nil {
-					return err
-				}
-			}
 			continue
 		}
 		if err := collectUnknownFields(valueNode, fieldPath, child, warnings); err != nil {
@@ -800,56 +719,4 @@ func rejectDuplicateKeys(node *yaml.Node, path string) error {
 		}
 	}
 	return nil
-}
-
-func OrphanMetadataPath(dir string) string {
-	return filepath.Join(dir, "metadata.yaml")
-}
-
-type OrphanMetadata struct {
-	ID        string    `yaml:"id"`
-	Name      string    `yaml:"name"`
-	CreatedAt time.Time `yaml:"created_at"`
-}
-
-func WriteOrphanMetadata(dir string, metadata OrphanMetadata) error {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	if filepath.Clean(dir) != "." {
-		if err := os.Chmod(dir, 0o700); err != nil {
-			return err
-		}
-	}
-	data, err := yaml.Marshal(metadata)
-	if err != nil {
-		return err
-	}
-	return writeAtomicBytes(OrphanMetadataPath(dir), data, ".metadata.yaml.*.tmp")
-}
-
-func ReadOrphanMetadata(dir string) (OrphanMetadata, error) {
-	data, err := os.ReadFile(OrphanMetadataPath(dir))
-	if err != nil {
-		return OrphanMetadata{}, err
-	}
-	var metadata OrphanMetadata
-	if err := yaml.Unmarshal(data, &metadata); err != nil {
-		return OrphanMetadata{}, err
-	}
-	return metadata, nil
-}
-
-func IsWithin(parent, child string) bool {
-	rel, err := filepath.Rel(filepath.Clean(parent), filepath.Clean(child))
-	if err != nil {
-		return false
-	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
-}
-
-func ConfigsEqual(a, b Config) bool {
-	a.Normalize()
-	b.Normalize()
-	return reflect.DeepEqual(a, b)
 }

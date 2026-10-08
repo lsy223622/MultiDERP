@@ -12,7 +12,7 @@ import (
 )
 
 func TestFrameRoundTrip(t *testing.T) {
-	want := Request{Action: "tailnet.add", Name: "alice", AuthType: "web", Tags: []string{"tag:alice", "tag:relay"}, Confirm: true}
+	want := Request{Action: "controller.init", Username: "admin", Password: "fixture administrator password"}
 	var buffer bytes.Buffer
 	if err := WriteFrame(&buffer, want); err != nil {
 		t.Fatalf("WriteFrame() error = %v", err)
@@ -31,7 +31,7 @@ func TestFrameRejectsOversizeAndTrailingJSON(t *testing.T) {
 		t.Fatal("WriteFrame() accepted an oversized frame")
 	}
 
-	payload, err := json.Marshal(Request{Action: "tailnet.list"})
+	payload, err := json.Marshal(Request{Action: "config.reload"})
 	if err != nil {
 		t.Fatalf("marshal request: %v", err)
 	}

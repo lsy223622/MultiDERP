@@ -1,7 +1,7 @@
 services:
-  multiderp:
-    container_name: multiderp
-    image: ghcr.io/lsy223622/multiderp:latest
+  uniderp:
+    container_name: uniderp
+    image: ghcr.io/lsy223622/uniderp:2.0.0
     user: "10001:10001"
     restart: unless-stopped
     read_only: true
@@ -11,6 +11,7 @@ services:
     # STUN is UDP; publish it explicitly on both IPv4 and IPv6.
     ports:
       - "127.0.0.1:3377:3377/tcp"
+      - "127.0.0.1:3378:3378/tcp"
       - "0.0.0.0:3478:3478/udp"
       - "[::]:3478:3478/udp"
 
@@ -20,4 +21,4 @@ services:
     # The image must not depend on a directory created in its read-only layer:
     # this mount is intentionally owner-controlled at runtime.
     tmpfs:
-      - /run/multiderp:rw,noexec,nosuid,nodev,mode=0700,uid=10001,gid=10001
+      - /run/uniderp:rw,noexec,nosuid,nodev,mode=0700,uid=10001,gid=10001

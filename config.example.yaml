@@ -1,6 +1,20 @@
-version: 1
+version: 2
+
+controller:
+  enabled: true
+  listen: "127.0.0.1:3341"
+  database: /data/controller.sqlite
+  key_file: /data/controller.key
+
+node:
+  state_dir: /data/node
+  derp_port: 443
+  stun_port: 3478
+  max_budget_bps: 0
 
 server:
+  management:
+    listen: ":3378"
   # Replace this with the public DNS name used by your DERP map.
   hostname: derp.example.com
 
@@ -13,19 +27,13 @@ server:
     cert_mode: none
 
   admin:
-    socket: /run/multiderp/admin.sock
+    socket: /run/uniderp/admin.sock
 
   health:
     listen: "127.0.0.1:9090"
 
 storage:
   state_dir: /data
-  tailnet_state_dir: /data/tailnets
-  orphan_state_dir: /data/orphans
 
 logging:
   level: info
-
-# Add verifier entries with the CLI after the daemon starts.
-# Secret values never belong in this YAML file.
-tailnets: []

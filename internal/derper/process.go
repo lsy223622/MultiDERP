@@ -13,12 +13,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lsy223622/MultiDERP/internal/config"
+	"github.com/lsy223622/UniDERP/v2/internal/config"
 )
 
 type Process struct {
 	Binary string
 	Output io.Writer
+	Policy PolicyClient
 
 	mu       sync.Mutex
 	command  *exec.Cmd
@@ -36,7 +37,7 @@ func NewProcess(binary string, output io.Writer) *Process {
 	return &Process{Binary: binary, Output: output}
 }
 
-func (p *Process) Start(ctx context.Context, server config.ServerConfig, admissionAddress, keyPath string) error {
+func (p *Process) Start(ctx context.Context, server config.ServerConfig, managementAddress, keyPath string) error {
 	p.mu.Lock()
 	if p.command != nil {
 		p.mu.Unlock()
@@ -46,7 +47,7 @@ func (p *Process) Start(ctx context.Context, server config.ServerConfig, admissi
 		p.mu.Unlock()
 		return err
 	}
-	args, err := BuildArgs(server, admissionAddress, keyPath)
+	args, err := BuildArgs(server, managementAddress, keyPath, p.Policy)
 	if err != nil {
 		p.mu.Unlock()
 		return err
@@ -104,11 +105,15 @@ func (p *Process) WaitReady(ctx context.Context, server config.ServerConfig) err
 	transport := http.DefaultTransport
 	if server.DERP.TLSMode == "passthrough" {
 		scheme = "https"
-		transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}} // child certificate is deployment-owned.
+		transport = &http.Transport{TLSClientConfig: &tls.Config{ServerName: server.Hostname, InsecureSkipVerify: true}} // child certificate is deployment-owned.
 	}
-	client := &http.Client{Transport: transport, Timeout: 500 * time.Millisecond}
+	requestTimeout, readyTimeout := 500*time.Millisecond, 10*time.Second
+	if server.DERP.TLSMode == "passthrough" && server.DERP.CertMode == "letsencrypt" {
+		requestTimeout, readyTimeout = 10*time.Second, 2*time.Minute
+	}
+	client := &http.Client{Transport: transport, Timeout: requestTimeout}
 	url := scheme + "://" + net.JoinHostPort(host, portFromAddress(server.DERP.Listen)) + "/derp/probe"
-	deadline := time.NewTimer(10 * time.Second)
+	deadline := time.NewTimer(readyTimeout)
 	defer deadline.Stop()
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()

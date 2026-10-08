@@ -1,0 +1,2751 @@
+--- a/cmd/derper/derper.go
++++ b/cmd/derper/derper.go
+@@ -190,6 +190,11 @@
+ 	serveTLS := tsweb.IsProd443(*addr) || *certMode == "manual"
+ 
+ 	s := derpserver.New(cfg.PrivateKey, log.Printf)
++	closePolicy, err := startUniDERPPolicy(s, *uniderpPolicyFile, *uniderpPolicySocket, *uniderpMaxBudgetBPS)
++	if err != nil {
++		log.Fatalf("UniDERP policy setup: %v", err)
++	}
++	defer closePolicy()
+ 	s.SetVerifyClient(*verifyClients)
+ 	s.SetTailscaledSocketPath(*socket)
+ 	s.SetVerifyClientURL(*verifyClientURL)
+@@ -261,6 +266,9 @@
+ 	}
+ 
+ 	mux := http.NewServeMux()
++	if err := mountUniDERPRoutes(mux, *uniderpManagementURL); err != nil {
++		log.Fatal(err)
++	}
+ 	if *runDERP {
+ 		derpHandler := derpserver.Handler(s)
+ 		derpHandler = derpserver.AddWebSocketSupport(s, derpHandler)
+--- /dev/null
++++ b/cmd/derper/uniderp.go
+@@ -0,0 +1,34 @@
++package main
++
++import (
++	"errors"
++	"flag"
++	"net"
++	"net/http"
++	"net/http/httputil"
++	"net/url"
++	"strconv"
++)
++
++var uniderpManagementURL = flag.String("uniderp-management-url", "", "UniDERP loopback HTTP management backend")
++
++func mountUniDERPRoutes(mux *http.ServeMux, backend string) error {
++	if backend == "" {
++		return nil
++	}
++	u, err := url.Parse(backend)
++	if err != nil {
++		return err
++	}
++	ip := net.ParseIP(u.Hostname())
++	port, err := strconv.ParseUint(u.Port(), 10, 16)
++	if err != nil || port == 0 || ip == nil || !ip.IsLoopback() || u.Scheme != "http" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
++		return errors.New("UniDERP management backend must be a loopback HTTP origin with a numeric port")
++	}
++	proxy := httputil.NewSingleHostReverseProxy(u)
++	proxy.FlushInterval = -1
++	for _, path := range []string{"/cluster/v1/", "/api/v1/", "/manage/"} {
++		mux.Handle(path, proxy)
++	}
++	return nil
++}
+--- /dev/null
++++ b/cmd/derper/uniderp_policy.go
+@@ -0,0 +1,196 @@
++package main
++
++import (
++	"bufio"
++	"bytes"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"flag"
++	"io"
++	"math"
++	"net"
++	"os"
++	"path/filepath"
++	"sync"
++	"time"
++
++	"tailscale.com/derp/derpserver"
++)
++
++var uniderpPolicyFile = flag.String("uniderp-policy-file", "", "UniDERP authoritative policy cache")
++var uniderpPolicySocket = flag.String("uniderp-policy-socket", "", "UniDERP protected local policy notification socket")
++var uniderpMaxBudgetBPS = flag.Uint64("uniderp-max-budget-bps", 0, "Local host DERP budget ceiling in bits per second")
++
++type policyIPCRequest struct {
++	Revision uint64 `json:"revision"`
++	Digest   string `json:"digest"`
++}
++type policyIPCResponse struct {
++	EffectiveBudgetBPS uint64                             `json:"effective_budget_bps"`
++	Revision           uint64                             `json:"revision"`
++	Usable             bool                               `json:"usable"`
++	Error              string                             `json:"error"`
++	Traffic            []derpserver.UniDERPTailnetTraffic `json:"traffic,omitempty"`
++	TrafficObservedAt  time.Time                          `json:"traffic_observed_at"`
++	ActiveConnections  uint64                             `json:"active_connections"`
++}
++type policyWatermark struct {
++	ClusterID  string    `json:"cluster_id"`
++	NodeID     string    `json:"node_id"`
++	Revision   uint64    `json:"revision"`
++	Digest     string    `json:"digest"`
++	ObservedAt time.Time `json:"observed_at"`
++}
++
++func decodePolicyLocal(b []byte, dst any) error {
++	d := json.NewDecoder(bytes.NewReader(b))
++	d.DisallowUnknownFields()
++	if err := d.Decode(dst); err != nil {
++		return err
++	}
++	if d.Decode(new(any)) != io.EOF {
++		return errors.New("trailing policy data")
++	}
++	return nil
++}
++
++func readPolicyFile(path string, max int64) ([]byte, error) {
++	f, err := os.Open(path)
++	if err != nil {
++		return nil, err
++	}
++	defer f.Close()
++	b, err := io.ReadAll(io.LimitReader(f, max+1))
++	if err != nil || int64(len(b)) > max {
++		return nil, errors.New("policy file unreadable or oversized")
++	}
++	return b, nil
++}
++
++func loadUniDERPPolicy(s *derpserver.Server, path string, expected policyIPCRequest) error {
++	mark, err := readPolicyFile(path+".watermark", 4096)
++	if err != nil {
++		return err
++	}
++	var m policyWatermark
++	if decodePolicyLocal(mark, &m) != nil || m.Revision == 0 || m.ObservedAt.IsZero() || time.Now().Before(m.ObservedAt.Add(-5*time.Second)) {
++		return errors.New("invalid policy watermark")
++	}
++	body, err := readPolicyFile(path, derpserver.MaxUniDERPPolicyBytes)
++	if err != nil {
++		return err
++	}
++	h := sha256.Sum256(body)
++	digest := hex.EncodeToString(h[:])
++	if digest != m.Digest || (expected.Revision != 0 && (expected.Revision != m.Revision || expected.Digest != digest)) {
++		return errors.New("policy digest mismatch")
++	}
++	p, err := derpserver.DecodeUniDERPPolicy(bytes.NewReader(body), m.ClusterID, m.NodeID)
++	if err != nil || p.Revision != m.Revision {
++		return errors.New("policy binding mismatch")
++	}
++	_, err = s.ApplyUniDERPPolicy(body)
++	return err
++}
++
++func startUniDERPPolicy(s *derpserver.Server, path, socket string, maxBudget uint64) (func(), error) {
++	if !filepath.IsAbs(path) || !filepath.IsAbs(socket) || filepath.Dir(path) != filepath.Dir(socket) {
++		return nil, errors.New("UniDERP requires policy file and socket in the same protected directory")
++	}
++	if maxBudget > math.MaxInt64 || (maxBudget != 0 && maxBudget < 8) {
++		return nil, errors.New("invalid local budget")
++	}
++	s.EnableUniDERP(maxBudget)
++	dir := filepath.Dir(socket)
++	if err := os.MkdirAll(dir, 0700); err != nil {
++		return nil, err
++	}
++	if err := os.Chmod(dir, 0700); err != nil {
++		return nil, err
++	}
++	if info, err := os.Lstat(socket); err == nil {
++		if info.Mode()&os.ModeSocket == 0 {
++			return nil, errors.New("policy socket path is not a socket")
++		}
++		if err := os.Remove(socket); err != nil {
++			return nil, err
++		}
++	} else if !errors.Is(err, os.ErrNotExist) {
++		return nil, err
++	}
++	ln, err := net.Listen("unix", socket)
++	if err != nil {
++		return nil, err
++	}
++	if err := os.Chmod(socket, 0600); err != nil {
++		ln.Close()
++		return nil, err
++	}
++	lastError := ""
++	if err := loadUniDERPPolicy(s, path, policyIPCRequest{}); err != nil && !errors.Is(err, os.ErrNotExist) {
++		lastError = "invalid_cache"
++	}
++	done := make(chan struct{})
++	var mu sync.Mutex
++	var active net.Conn
++	stopping := false
++	go func() {
++		defer close(done)
++		defer os.Remove(socket)
++		for {
++			conn, err := ln.Accept()
++			if err != nil {
++				return
++			}
++			mu.Lock()
++			if stopping {
++				mu.Unlock()
++				conn.Close()
++				return
++			}
++			active = conn
++			mu.Unlock()
++			conn.SetDeadline(time.Now().Add(5 * time.Second))
++			b, readErr := bufio.NewReader(io.LimitReader(conn, 4097)).ReadBytes('\n')
++			var request policyIPCRequest
++			errorCode := ""
++			if readErr != nil || len(b) > 4096 || decodePolicyLocal(b, &request) != nil || (request.Revision == 0 && request.Digest != "") {
++				errorCode = "invalid_request"
++			} else if request.Revision != 0 {
++				if len(request.Digest) != 64 {
++					errorCode = "invalid_request"
++				} else if _, err := hex.DecodeString(request.Digest); err != nil {
++					errorCode = "invalid_request"
++				} else if err := loadUniDERPPolicy(s, path, request); err != nil {
++					lastError = "apply_failed"
++				} else {
++					lastError = ""
++				}
++			}
++			if errorCode == "" {
++				errorCode = lastError
++			}
++			state := s.UniDERPPolicyStatus()
++			json.NewEncoder(conn).Encode(policyIPCResponse{EffectiveBudgetBPS: state.EffectiveBudgetBPS, Revision: state.Revision, Usable: state.Usable, Error: errorCode, Traffic: state.Traffic, TrafficObservedAt: state.TrafficObservedAt, ActiveConnections: state.ActiveConnections})
++			mu.Lock()
++			active = nil
++			mu.Unlock()
++			conn.Close()
++		}
++	}()
++	var once sync.Once
++	return func() {
++		once.Do(func() {
++			ln.Close()
++			mu.Lock()
++			stopping = true
++			if active != nil {
++				active.Close()
++			}
++			mu.Unlock()
++			<-done
++		})
++	}, nil
++}
+--- /dev/null
++++ b/cmd/derper/uniderp_policy_test.go
+@@ -0,0 +1,131 @@
++package main
++
++import (
++	"bufio"
++	"bytes"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"net"
++	"os"
++	"path/filepath"
++	"testing"
++	"time"
++
++	"tailscale.com/derp/derpserver"
++	"tailscale.com/types/key"
++	"tailscale.com/types/logger"
++)
++
++func writeTestPolicyCache(t *testing.T, path string, p derpserver.UniDERPPolicy) string {
++	t.Helper()
++	body, err := json.Marshal(p)
++	if err != nil {
++		t.Fatal(err)
++	}
++	h := sha256.Sum256(body)
++	digest := hex.EncodeToString(h[:])
++	mark, _ := json.Marshal(map[string]any{"cluster_id": p.ClusterID, "node_id": p.NodeID, "revision": p.Revision, "digest": digest, "observed_at": time.Now().UTC()})
++	if err := os.WriteFile(path+".watermark", mark, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(path, body, 0600); err != nil {
++		t.Fatal(err)
++	}
++	return digest
++}
++
++func TestUniDERPPolicyFileIsAuthoritativeAndIPCOnlyNotifies(t *testing.T) {
++	dir, err := os.MkdirTemp("", "ud-ipc-")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer os.RemoveAll(dir)
++	path, socket := filepath.Join(dir, "policy.json"), filepath.Join(dir, "policy.sock")
++	s := derpserver.New(key.NewNode(), logger.Discard)
++	defer s.Close()
++	closeIPC, err := startUniDERPPolicy(s, path, socket, 0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer closeIPC()
++	if s.UniDERPPolicyStatus().Usable {
++		t.Fatal("missing cache opened relay")
++	}
++	now := time.Now().UTC()
++	p := derpserver.UniDERPPolicy{ClusterID: "cluster", NodeID: "node", Revision: 1, GeneratedAt: now, Grants: []derpserver.UniDERPGrantPolicy{}, QoS: derpserver.UniDERPQoSPolicy{BudgetBPS: 100000000, OwnerWeight: 8, SharedWeight: 2, Tailnets: []derpserver.UniDERPPolicyTailnetQoS{}}}
++	digest := writeTestPolicyCache(t, path, p)
++	call := func(body string) policyIPCResponse {
++		t.Helper()
++		c, err := net.DialTimeout("unix", socket, time.Second)
++		if err != nil {
++			t.Fatal(err)
++		}
++		defer c.Close()
++		c.SetDeadline(time.Now().Add(2 * time.Second))
++		c.Write([]byte(body + "\n"))
++		b, err := bufio.NewReader(c).ReadBytes('\n')
++		if err != nil {
++			t.Fatal(err)
++		}
++		var result policyIPCResponse
++		if err := json.Unmarshal(b, &result); err != nil {
++			t.Fatal(err)
++		}
++		return result
++	}
++	body, _ := json.Marshal(map[string]any{"revision": p.Revision, "digest": digest})
++	if result := call(string(body)); result.Error != "" || result.Revision != p.Revision || result.Usable {
++		t.Fatal("real empty-policy ACK wrong", result)
++	}
++	if result := call(`{"revision":2,"digest":"wrong","policy":{}}`); result.Error == "" || result.Revision != p.Revision {
++		t.Fatal("IPC accepted independent policy authority", result)
++	}
++	p.Revision++
++	digest = writeTestPolicyCache(t, path, p)
++	if err := os.WriteFile(path, []byte(`{}`), 0600); err != nil {
++		t.Fatal(err)
++	}
++	body, _ = json.Marshal(map[string]any{"revision": p.Revision, "digest": digest})
++	if result := call(string(body)); result.Error == "" || result.Revision != 1 {
++		t.Fatal("corrupt file claimed applied", result)
++	}
++}
++
++func TestLocalBudgetClampsCachedAndHotPolicy(t *testing.T) {
++	path := filepath.Join(t.TempDir(), "policy.json")
++	s := derpserver.New(key.NewNode(), logger.Discard)
++	defer s.Close()
++	s.EnableUniDERP(80000000)
++	p := derpserver.UniDERPPolicy{ClusterID: "cluster", NodeID: "node", Revision: 1, GeneratedAt: time.Now().UTC(), Grants: []derpserver.UniDERPGrantPolicy{}, QoS: derpserver.UniDERPQoSPolicy{BudgetBPS: 100000000, OwnerWeight: 8, SharedWeight: 2, Tailnets: []derpserver.UniDERPPolicyTailnetQoS{}}}
++	writeTestPolicyCache(t, path, p)
++	before, _ := os.ReadFile(path)
++	if err := loadUniDERPPolicy(s, path, policyIPCRequest{}); err != nil {
++		t.Fatal(err)
++	}
++	after, _ := os.ReadFile(path)
++	if !bytes.Equal(before, after) || s.UniDERPPolicyStatus().EffectiveBudgetBPS != 80000000 {
++		t.Fatal("cache changed or clamp missing")
++	}
++	p.Revision++
++	p.QoS.BudgetBPS = 200000000
++	digest := writeTestPolicyCache(t, path, p)
++	if err := loadUniDERPPolicy(s, path, policyIPCRequest{Revision: p.Revision, Digest: digest}); err != nil {
++		t.Fatal(err)
++	}
++	if status := s.UniDERPPolicyStatus(); status.Revision != p.Revision || status.EffectiveBudgetBPS != 80000000 {
++		t.Fatal(status)
++	}
++}
++
++func TestLocalBudgetRejectsInvalidStartLimit(t *testing.T) {
++	dir := t.TempDir()
++	for _, cap := range []uint64{1, 7, 1 << 63} {
++		s := derpserver.New(key.NewNode(), logger.Discard)
++		if close, err := startUniDERPPolicy(s, filepath.Join(dir, "policy.json"), filepath.Join(dir, "policy.sock"), cap); err == nil {
++			close()
++			t.Fatal("invalid local cap", cap)
++		}
++		s.Close()
++	}
++}
+--- /dev/null
++++ b/cmd/derper/uniderp_relay_test.go
+@@ -0,0 +1,117 @@
++package main
++
++import (
++	"context"
++	cryptotls "crypto/tls"
++	"crypto/x509"
++	"encoding/json"
++	"io"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++	"time"
++
++	"tailscale.com/derp"
++	"tailscale.com/derp/derphttp"
++	"tailscale.com/derp/derpserver"
++	"tailscale.com/net/netmon"
++	"tailscale.com/net/stun"
++	"tailscale.com/net/stunserver"
++	"tailscale.com/types/key"
++	"tailscale.com/types/logger"
++)
++
++func TestUniDERPHTTPUpgradeRelayAndSTUN(t *testing.T) {
++	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
++	defer cancel()
++	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "cluster") }))
++	defer backend.Close()
++	udp := stunserver.New(ctx)
++	if err := udp.Listen("127.0.0.1:0"); err != nil {
++		t.Fatal(err)
++	}
++	go udp.Serve()
++	uc, err := net.Dial("udp", udp.LocalAddr().String())
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer uc.Close()
++	uc.SetDeadline(time.Now().Add(2 * time.Second))
++	tx := stun.NewTxID()
++	if _, err := uc.Write(stun.Request(tx)); err != nil {
++		t.Fatal(err)
++	}
++	buf := make([]byte, 1500)
++	n, err := uc.Read(buf)
++	if err != nil {
++		t.Fatal(err)
++	}
++	got, _, err := stun.ParseResponse(buf[:n])
++	if err != nil || got != tx {
++		t.Fatalf("STUN response: %v", err)
++	}
++	for _, tls := range []bool{false, true} {
++		s := derpserver.New(key.NewNode(), logger.Discard)
++		a, b := key.NewNode(), key.NewNode()
++		now := time.Now()
++		p := derpserver.UniDERPPolicy{ClusterID: "cluster", NodeID: "node", Revision: 1, GeneratedAt: now, Grants: []derpserver.UniDERPGrantPolicy{{GrantID: "a", GrantRevision: 1, TailnetID: "a", LastIdentitySuccess: now, IdentityUntil: now.Add(time.Hour), ControlUntil: now.Add(time.Hour), Keys: []derpserver.UniDERPDeviceKey{{NodePublic: a.Public().String()}, {NodePublic: b.Public().String()}}}}, QoS: derpserver.UniDERPQoSPolicy{BudgetBPS: 8000000000, OwnerWeight: 8, SharedWeight: 2, Tailnets: []derpserver.UniDERPPolicyTailnetQoS{{TailnetID: "a", Group: "owner", Weight: 1}}}}
++		body, _ := json.Marshal(p)
++		if _, err := s.ApplyUniDERPPolicy(body); err != nil {
++			t.Fatal(err)
++		}
++		mux := http.NewServeMux()
++		mux.Handle("/derp", derpserver.Handler(s))
++		mux.HandleFunc("/derp/probe", derpserver.ProbeHandler)
++		if err := mountUniDERPRoutes(mux, backend.URL); err != nil {
++			t.Fatal(err)
++		}
++		var server *httptest.Server
++		if tls {
++			server = httptest.NewTLSServer(mux)
++		} else {
++			server = httptest.NewServer(mux)
++		}
++		ca, err := derphttp.NewClient(a, server.URL+"/derp", logger.Discard, netmon.NewStatic())
++		if err != nil {
++			t.Fatal(err)
++		}
++		cb, err := derphttp.NewClient(b, server.URL+"/derp", logger.Discard, netmon.NewStatic())
++		if err != nil {
++			t.Fatal(err)
++		}
++		if tls {
++			roots := x509.NewCertPool()
++			roots.AddCert(server.Certificate())
++			ca.TLSConfig = &cryptotls.Config{RootCAs: roots}
++			cb.TLSConfig = ca.TLSConfig
++		}
++		for _, c := range []*derphttp.Client{ca, cb} {
++			if err := c.Connect(ctx); err != nil {
++				t.Fatal(err)
++			}
++			if _, err := c.Recv(); err != nil {
++				t.Fatal(err)
++			}
++		}
++		if err := ca.Send(b.Public(), []byte("uniderp relay")); err != nil {
++			t.Fatal(err)
++		}
++		for {
++			msg, err := cb.Recv()
++			if err != nil {
++				t.Fatal(err)
++			}
++			if p, ok := msg.(derp.ReceivedPacket); ok {
++				if p.Source != a.Public() || string(p.Data) != "uniderp relay" {
++					t.Fatal("payload mismatch")
++				}
++				break
++			}
++		}
++		ca.Close()
++		cb.Close()
++		s.Close()
++		server.Close()
++	}
++}
+--- /dev/null
++++ b/cmd/derper/uniderp_test.go
+@@ -0,0 +1,58 @@
++package main
++
++import (
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++)
++
++func TestUniDERPRoutesPreserveDERP(t *testing.T) {
++	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, r.URL.Path) }))
++	defer backend.Close()
++	for _, tls := range []bool{false, true} {
++		mux := http.NewServeMux()
++		mux.HandleFunc("/derp", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "derp") })
++		mux.HandleFunc("/derp/probe", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
++		mux.HandleFunc("/generate_204", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
++		if err := mountUniDERPRoutes(mux, backend.URL); err != nil {
++			t.Fatal(err)
++		}
++		var server *httptest.Server
++		if tls {
++			server = httptest.NewTLSServer(mux)
++		} else {
++			server = httptest.NewServer(mux)
++		}
++		for path, want := range map[string]string{"/derp": "derp", "/cluster/v1/challenge": "/cluster/v1/challenge", "/api/v1/users": "/api/v1/users", "/manage/": "/manage/"} {
++			resp, err := server.Client().Get(server.URL + path)
++			if err != nil {
++				t.Fatal(err)
++			}
++			body, err := io.ReadAll(resp.Body)
++			resp.Body.Close()
++			if err != nil || resp.StatusCode != 200 || string(body) != want {
++				t.Fatalf("%s: %d %s %v", path, resp.StatusCode, body, err)
++			}
++		}
++		for _, path := range []string{"/derp/probe", "/generate_204"} {
++			resp, err := server.Client().Get(server.URL + path)
++			if err != nil {
++				t.Fatal(err)
++			}
++			resp.Body.Close()
++			if resp.StatusCode != 204 {
++				t.Fatalf("probe %s: %d", path, resp.StatusCode)
++			}
++		}
++		server.Close()
++	}
++}
++
++func TestUniDERPManagementBackendOnlyLoopback(t *testing.T) {
++	for _, url := range []string{"http://example.com:80", "https://127.0.0.1:1234", "http://127.0.0.1:1234/path", "http://user@127.0.0.1:1234", "http://127.0.0.1:1234?x=1", "http://127.0.0.1:1234#x", "http://127.0.0.1"} {
++		if err := mountUniDERPRoutes(http.NewServeMux(), url); err == nil {
++			t.Fatalf("accepted backend %s", url)
++		}
++	}
++}
+--- a/derp/derpserver/derpserver.go
++++ b/derp/derpserver/derpserver.go
+@@ -126,6 +126,15 @@
+ 
+ // Server is a DERP server.
+ type Server struct {
++	uniderpPolicy          *uniderpPolicyState
++	uniderpLocalBudgetBPS  uint64
++	uniderpGroupQueued     [2]atomic.Int64
++	uniderpTrafficSequence uint64
++	uniderpTimer           tstime.TimerController
++	uniderpObserved        time.Time
++	uniderpClockBad        bool
++	uniderpRX              atomic.Pointer[uniderpScheduler]
++	uniderpTX              atomic.Pointer[uniderpScheduler]
+ 	// WriteTimeout, if non-zero, specifies how long to wait
+ 	// before failing when writing to a client.
+ 	WriteTimeout time.Duration
+@@ -393,6 +402,7 @@
+ 		clock:               tstime.StdClock{},
+ 		tcpWriteTimeout:     DefaultTCPWiteTimeout,
+ 	}
++	s.uniderpTrafficSequence = rand.Uint64()
+ 	s.initMetacert()
+ 	s.packetsRecvDisco = s.packetsRecvByKind.Get(string(packetKindDisco))
+ 	s.packetsRecvOther = s.packetsRecvByKind.Get(string(packetKindOther))
+@@ -473,6 +483,11 @@
+ //
+ // It must be called before serving begins.
+ func (s *Server) SetMeshKey(v string) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	if s.uniderpPolicy != nil {
++		return errors.New("mesh is unavailable with UniDERP policy")
++	}
+ 	k, err := key.ParseDERPMesh(v)
+ 	if err != nil {
+ 		return err
+@@ -608,9 +623,18 @@
+ 	s.mu.Lock()
+ 	wasClosed := s.closed
+ 	s.closed = true
++	if s.uniderpTimer != nil {
++		s.uniderpTimer.Stop()
++	}
+ 	s.mu.Unlock()
+ 	if wasClosed {
+ 		return nil
++	}
++	if scheduler := s.uniderpRX.Swap(nil); scheduler != nil {
++		scheduler.close()
++	}
++	if scheduler := s.uniderpTX.Swap(nil); scheduler != nil {
++		scheduler.close()
+ 	}
+ 
+ 	var closedChs []chan struct{}
+@@ -761,10 +785,13 @@
+ // placed in a non-active state where we read from them (primarily to
+ // observe EOFs/timeouts) but won't send them frames on the assumption
+ // that they're dead.
+-func (s *Server) registerClient(c *sclient) {
++func (s *Server) registerClient(c *sclient) error {
+ 	s.mu.Lock()
+ 	defer s.mu.Unlock()
+ 
++	if !s.uniderpClientAllowedLocked(c) {
++		return errors.New("UniDERP authorization changed during handshake")
++	}
+ 	c.setRateLimit(s.rateConfig.PerClientRateLimitBytesPerSec, s.rateConfig.PerClientRateBurstBytes)
+ 
+ 	cs, ok := s.clients.Load(c.key)
+@@ -814,6 +841,7 @@
+ 		s.curClientsNotIdeal.Add(1)
+ 	}
+ 	s.broadcastPeerStateChangeLocked(c.key, c.remoteIPPort, c.presentFlags(), true)
++	return nil
+ }
+ 
+ // broadcastPeerStateChangeLocked enqueues a message to all watchers
+@@ -1028,6 +1056,12 @@
+ 	if err := s.verifyClient(ctx, clientKey, clientInfo, remoteIPPort.Addr()); err != nil {
+ 		return fmt.Errorf("client %v rejected: %v", clientKey, err)
+ 	}
++	s.mu.Lock()
++	binding, allowed := s.uniderpBindingLocked(clientKey)
++	s.mu.Unlock()
++	if !allowed {
++		return errors.New("UniDERP key not authorized")
++	}
+ 
+ 	// At this point we trust the client so we don't time out.
+ 	nc.SetDeadline(time.Time{})
+@@ -1036,6 +1070,9 @@
+ 	defer cancel()
+ 
+ 	c := &sclient{
++		uniderpTailnet: binding.tailnet,
++		uniderpGrant:   binding.grant,
++		uniderpCancel:  cancel,
+ 		connNum:        connNum,
+ 		s:              s,
+ 		key:            clientKey,
+@@ -1071,7 +1108,9 @@
+ 		f(clientKey, c.info)
+ 	}
+ 
+-	s.registerClient(c)
++	if err := s.registerClient(c); err != nil {
++		return err
++	}
+ 	defer s.unregisterClient(c)
+ 
+ 	err = s.sendServerInfo(c.bw, clientKey)
+@@ -1130,6 +1169,17 @@
+ 			}
+ 			return fmt.Errorf("client %s: readFrameHeader: %w", c.key.ShortString(), err)
+ 		}
++		if scheduler := c.s.uniderpRX.Load(); scheduler != nil && ft == derp.FrameSendPacket {
++			if fl < derp.KeyLen || fl-derp.KeyLen > derp.MaxPacketSize {
++				return errors.New("invalid UniDERP send frame length")
++			}
++			if err := scheduler.wait(ctx, c.uniderpTailnet, int(fl-derp.KeyLen)); err != nil {
++				return err
++			}
++		}
++		if !c.s.uniderpClientAllowed(c) {
++			return errors.New("UniDERP authorization expired")
++		}
+ 		// Rate-limit by DERP frame length (fl), which excludes TLS protocol and
+ 		// DERP frame length field overheads.
+ 		// Note: meshed clients are exempt from rate limits.
+@@ -1329,6 +1379,7 @@
+ 	if err != nil {
+ 		return fmt.Errorf("client %v: recvPacket: %v", c.key, err)
+ 	}
++	c.recordUniDERPTraffic(len(contents), true)
+ 
+ 	dst, fwd, dstLen := c.lookupDest(dstKey)
+ 
+@@ -1452,13 +1503,14 @@
+ type dropReason string
+ 
+ const (
+-	dropReasonUnknownDest      dropReason = "unknown_dest"        // unknown destination pubkey
+-	dropReasonUnknownDestOnFwd dropReason = "unknown_dest_on_fwd" // unknown destination pubkey on a derp-forwarded packet
+-	dropReasonGoneDisconnected dropReason = "gone_disconnected"   // destination tailscaled disconnected before we could send
+-	dropReasonQueueHead        dropReason = "queue_head"          // destination queue is full, dropped packet at queue head
+-	dropReasonQueueTail        dropReason = "queue_tail"          // destination queue is full, dropped packet at queue tail
+-	dropReasonWriteError       dropReason = "write_error"         // OS write() failed
+-	dropReasonDupClient        dropReason = "dup_client"          // the public key is connected 2+ times (active/active, fighting)
++	dropReasonUnknownDest        dropReason = "unknown_dest"        // unknown destination pubkey
++	dropReasonUnknownDestOnFwd   dropReason = "unknown_dest_on_fwd" // unknown destination pubkey on a derp-forwarded packet
++	dropReasonGoneDisconnected   dropReason = "gone_disconnected"   // destination tailscaled disconnected before we could send
++	dropReasonQueueHead          dropReason = "queue_head"          // destination queue is full, dropped packet at queue head
++	dropReasonQueueTail          dropReason = "queue_tail"          // destination queue is full, dropped packet at queue tail
++	dropReasonWriteError         dropReason = "write_error"         // OS write() failed
++	dropReasonDupClient          dropReason = "dup_client"          // the public key is connected 2+ times (active/active, fighting)
++	dropReasonUniDERPQueueBudget dropReason = "tailnet_queue_budget"
+ )
+ 
+ func (s *Server) recordDrop(packetBytes []byte, srcKey, dstKey key.NodePublic, reason dropReason) {
+@@ -1487,7 +1539,20 @@
+ 
+ func (c *sclient) sendPkt(dst *sclient, p pkt) error {
+ 	s := c.s
++	// Keep reservation and enqueue atomic with sender shutdown and policy revocation.
++	s.mu.Lock()
++	defer s.mu.Unlock()
+ 	dstKey := dst.key
++	if !s.uniderpReservePacketLocked(dst, &p) {
++		s.recordDrop(p.bs, c.key, dstKey, dropReasonUniDERPQueueBudget)
++		return nil
++	}
++	enqueued := false
++	defer func() {
++		if !enqueued {
++			p.uniderpRelease()
++		}
++	}()
+ 
+ 	// Attempt to queue for sending up to 3 times. On each attempt, if
+ 	// the queue is full, try to drop from queue head to prioritize
+@@ -1506,6 +1571,7 @@
+ 		}
+ 		select {
+ 		case sendQueue <- p:
++			enqueued = true
+ 			dst.debugLogf("sendPkt attempt %d enqueued", attempt)
+ 			return nil
+ 		default:
+@@ -1513,6 +1579,7 @@
+ 
+ 		select {
+ 		case pkt := <-sendQueue:
++			pkt.uniderpRelease()
+ 			s.recordDrop(pkt.bs, c.key, dstKey, dropReasonQueueHead)
+ 			c.recordQueueTime(pkt.enqueuedAt)
+ 		default:
+@@ -1579,6 +1646,16 @@
+ // verifyClient checks whether the client is allowed to connect to the derper,
+ // depending on how & whether the server's been configured to verify.
+ func (s *Server) verifyClient(ctx context.Context, clientKey key.NodePublic, info *derp.ClientInfo, clientIP netip.Addr) error {
++	s.mu.Lock()
++	enabled := s.uniderpPolicy != nil
++	_, allowed := s.uniderpBindingLocked(clientKey)
++	s.mu.Unlock()
++	if enabled {
++		if s.isMeshPeer(info) || !allowed {
++			return errors.New("UniDERP key not authorized")
++		}
++		return nil
++	}
+ 	if s.isMeshPeer(info) {
+ 		// Trusted mesh peer. No need to verify further. In fact, verifying
+ 		// further wouldn't work: it's not part of the tailnet so tailscaled and
+@@ -1821,6 +1898,9 @@
+ //
+ // (The "s" prefix is to more explicitly distinguish it from Client in derp_client.go)
+ type sclient struct {
++	uniderpTailnet string
++	uniderpGrant   string
++	uniderpCancel  context.CancelFunc
+ 	// Static after construction.
+ 	connNum        int64 // process-wide unique counter, incremented each Accept
+ 	s              *Server
+@@ -1862,7 +1942,8 @@
+ 	// DERP servers) and contains records that need to be sent to
+ 	// the client for them to update their map of who's connected
+ 	// to this node.
+-	peerStateChange []peerConnState
++	peerStateChange   []peerConnState
++	uniderpSendClosed bool
+ 
+ 	// peerGoneLimiter limits how often the server will inform a
+ 	// client that it's trying to establish a direct connection
+@@ -1908,6 +1989,8 @@
+ 
+ // pkt is a request to write a data frame to an sclient.
+ type pkt struct {
++	uniderpTraffic     *uniderpTraffic
++	uniderpGroupQueued *atomic.Int64
+ 	// enqueuedAt is when a packet was put onto a queue before it was sent,
+ 	// and is used for reporting metrics on the duration of packets in the queue.
+ 	enqueuedAt time.Time
+@@ -1985,11 +2068,16 @@
+ 	}
+ 
+ 	// Drain the send queue to count dropped packets
++	c.s.mu.Lock()
++	defer c.s.mu.Unlock()
++	c.uniderpSendClosed = true
+ 	for {
+ 		select {
+ 		case pkt := <-c.sendQueue:
++			pkt.uniderpRelease()
+ 			c.s.recordDrop(pkt.bs, pkt.src, c.key, dropReasonGoneDisconnected)
+ 		case pkt := <-c.discoSendQueue:
++			pkt.uniderpRelease()
+ 			c.s.recordDrop(pkt.bs, pkt.src, c.key, dropReasonGoneDisconnected)
+ 		default:
+ 			return
+@@ -2026,11 +2114,11 @@
+ 			werr = c.sendMeshUpdates()
+ 			continue
+ 		case msg := <-c.sendQueue:
+-			werr = c.sendPacket(msg.src, msg.bs)
++			werr = c.sendQueuedPacket(msg)
+ 			c.recordQueueTime(msg.enqueuedAt)
+ 			continue
+ 		case msg := <-c.discoSendQueue:
+-			werr = c.sendPacket(msg.src, msg.bs)
++			werr = c.sendQueuedPacket(msg)
+ 			c.recordQueueTime(msg.enqueuedAt)
+ 			continue
+ 		case msg := <-c.sendPongCh:
+@@ -2060,10 +2148,10 @@
+ 		case <-c.meshUpdate:
+ 			werr = c.sendMeshUpdates()
+ 		case msg := <-c.sendQueue:
+-			werr = c.sendPacket(msg.src, msg.bs)
++			werr = c.sendQueuedPacket(msg)
+ 			c.recordQueueTime(msg.enqueuedAt)
+ 		case msg := <-c.discoSendQueue:
+-			werr = c.sendPacket(msg.src, msg.bs)
++			werr = c.sendQueuedPacket(msg)
+ 			c.recordQueueTime(msg.enqueuedAt)
+ 		case msg := <-c.sendPongCh:
+ 			werr = c.sendPong(msg)
+@@ -2207,6 +2295,14 @@
+ // returns, do not retain slices.
+ // It does not flush its bufio.Writer.
+ func (c *sclient) sendPacket(srcKey key.NodePublic, contents []byte) (err error) {
++	if scheduler := c.s.uniderpTX.Load(); scheduler != nil {
++		if err := scheduler.wait(c.ctx, c.uniderpTailnet, len(contents)); err != nil {
++			return err
++		}
++	}
++	if !c.s.uniderpClientAllowed(c) {
++		return errors.New("UniDERP authorization expired")
++	}
+ 	defer func() {
+ 		// Stats update.
+ 		if err != nil {
+@@ -2214,6 +2310,7 @@
+ 		} else {
+ 			c.s.packetsSent.Add(1)
+ 			c.s.bytesSent.Add(int64(len(contents)))
++			c.recordUniDERPTraffic(len(contents), false)
+ 		}
+ 		c.debugLogf("sendPacket from %s: %v", srcKey.ShortString(), err)
+ 	}()
+--- /dev/null
++++ b/derp/derpserver/testdata/uniderp-policy.json
+@@ -0,0 +1 @@
++{"cluster_id":"cluster","node_id":"node","revision":7,"generated_at":"2026-10-03T00:00:00Z","grants":[{"grant_id":"grant","grant_revision":3,"tailnet_id":"tailnet","last_identity_success":"2026-10-03T00:00:00Z","identity_until":"2026-10-03T06:00:00Z","control_until":"2026-10-03T03:00:00Z","explicit_until":"2026-10-03T04:00:00Z","keys":[{"node_public":"nodekey:0101010101010101010101010101010101010101010101010101010101010101","not_after":"2026-10-03T02:00:00Z"},{"node_public":"nodekey:0202020202020202020202020202020202020202020202020202020202020202","not_after":"0001-01-01T00:00:00Z"}]}],"qos":{"budget_bps":100000000,"owner_weight":8,"shared_weight":2,"shared_max_bps":40000000,"tailnets":[{"tailnet_id":"tailnet","group":"owner","weight":2,"max_bps":20000000}]}}
+\ No newline at end of file
+--- /dev/null
++++ b/derp/derpserver/uniderp.go
+@@ -0,0 +1,261 @@
++package derpserver
++
++import (
++	"bytes"
++	"crypto/sha256"
++	"encoding/json"
++	"errors"
++	"reflect"
++	"time"
++
++	"tailscale.com/types/key"
++)
++
++type UniDERPAppliedPolicy struct {
++	EffectiveBudgetBPS uint64                  `json:"effective_budget_bps"`
++	Revision           uint64                  `json:"revision"`
++	Usable             bool                    `json:"usable"`
++	Traffic            []UniDERPTailnetTraffic `json:"traffic,omitempty"`
++	TrafficObservedAt  time.Time               `json:"traffic_observed_at"`
++	ActiveConnections  uint64                  `json:"active_connections"`
++}
++
++type uniderpBinding struct {
++	tailnet  string
++	grant    string
++	until    time.Time
++	deadline time.Time
++}
++
++type uniderpPolicyState struct {
++	policy  UniDERPPolicy
++	digest  [32]byte
++	keys    map[key.NodePublic]uniderpBinding
++	traffic map[string]*uniderpTraffic
++}
++
++func (s *Server) EnableUniDERP(maxBudgetBPS uint64) {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	if s.uniderpPolicy == nil {
++		s.uniderpLocalBudgetBPS = maxBudgetBPS
++		s.uniderpPolicy = &uniderpPolicyState{keys: make(map[key.NodePublic]uniderpBinding)}
++		s.uniderpObserved = s.clock.Now()
++		s.uniderpScheduleLocked()
++	}
++}
++
++func (s *Server) ApplyUniDERPPolicy(body []byte) (UniDERPAppliedPolicy, error) {
++	if len(body) > MaxUniDERPPolicyBytes {
++		return UniDERPAppliedPolicy{}, errors.New("UniDERP policy too large")
++	}
++	var identity struct {
++		ClusterID string `json:"cluster_id"`
++		NodeID    string `json:"node_id"`
++	}
++	if err := json.Unmarshal(body, &identity); err != nil {
++		return UniDERPAppliedPolicy{}, err
++	}
++	p, err := DecodeUniDERPPolicy(bytes.NewReader(body), identity.ClusterID, identity.NodeID)
++	if err != nil {
++		return UniDERPAppliedPolicy{}, err
++	}
++	digest := sha256.Sum256(body)
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	if s.closed || s.uniderpClockBad {
++		return UniDERPAppliedPolicy{}, errors.New("UniDERP policy unavailable")
++	}
++	now := s.clock.Now()
++	if !s.uniderpClockValidLocked(now) {
++		return UniDERPAppliedPolicy{}, errors.New("UniDERP clock rollback")
++	}
++	old := s.uniderpPolicy
++	if old != nil && old.policy.Revision != 0 {
++		if old.policy.ClusterID != p.ClusterID || old.policy.NodeID != p.NodeID || p.Revision < old.policy.Revision || (p.Revision == old.policy.Revision && digest != old.digest) {
++			return UniDERPAppliedPolicy{}, errors.New("UniDERP policy revision conflict")
++		}
++		if p.Revision == old.policy.Revision {
++			return s.uniderpStatusLocked(now), nil
++		}
++	}
++	keys := make(map[key.NodePublic]uniderpBinding)
++	for _, g := range p.Grants {
++		for _, k := range g.Keys {
++			var pub key.NodePublic
++			pub.UnmarshalText([]byte(k.NodePublic))
++			until := UniDERPEffectiveUntil(g, k)
++			deadline := now.Add(until.Sub(now))
++			if old != nil {
++				if previous, ok := old.keys[pub]; ok && !until.After(previous.until) && previous.deadline.Before(deadline) {
++					deadline = previous.deadline
++				}
++			}
++			keys[pub] = uniderpBinding{tailnet: g.TailnetID, grant: g.GrantID, until: until, deadline: deadline}
++		}
++	}
++	if old == nil || !reflect.DeepEqual(old.policy.QoS, p.QoS) {
++		rules := make([]UniDERPTailnetQoS, 0, len(p.QoS.Tailnets))
++		for _, r := range p.QoS.Tailnets {
++			rules = append(rules, UniDERPTailnetQoS{TailnetID: r.TailnetID, Group: r.Group, Weight: r.Weight, MaxBytesPerSec: r.MaxBPS / 8})
++		}
++		budget := p.QoS.BudgetBPS
++		if s.uniderpLocalBudgetBPS != 0 {
++			budget = min(budget, s.uniderpLocalBudgetBPS)
++		}
++		s.SetUniDERPQoS(budget/8, p.QoS.OwnerWeight, p.QoS.SharedWeight, p.QoS.SharedMaxBPS/8, rules)
++	}
++	traffic := make(map[string]*uniderpTraffic, len(p.QoS.Tailnets))
++	for _, rule := range p.QoS.Tailnets {
++		var counters *uniderpTraffic
++		if old != nil {
++			counters = old.traffic[rule.TailnetID]
++		}
++		if counters == nil {
++			counters = new(uniderpTraffic)
++			s.uniderpTrafficSequence++
++			if s.uniderpTrafficSequence == 0 {
++				s.uniderpTrafficSequence++
++			}
++			counters.id = s.uniderpTrafficSequence
++		}
++		counters.group = 0
++		if rule.Group == "shared" {
++			counters.group = 1
++		}
++		traffic[rule.TailnetID] = counters
++	}
++	s.uniderpPolicy = &uniderpPolicyState{policy: p, digest: digest, keys: keys, traffic: traffic}
++	s.uniderpReapLocked(now)
++	s.uniderpScheduleLocked()
++	return s.uniderpStatusLocked(now), nil
++}
++
++func (s *Server) uniderpClockValidLocked(now time.Time) bool {
++	if now.Before(s.uniderpObserved.Add(-5 * time.Second)) {
++		s.uniderpClockBad = true
++	}
++	if now.After(s.uniderpObserved) {
++		s.uniderpObserved = now
++	}
++	return !s.uniderpClockBad
++}
++
++func (s *Server) uniderpBindingLocked(k key.NodePublic) (uniderpBinding, bool) {
++	if s.uniderpPolicy == nil {
++		return uniderpBinding{}, true
++	}
++	now := s.clock.Now()
++	if !s.uniderpClockValidLocked(now) {
++		return uniderpBinding{}, false
++	}
++	b, ok := s.uniderpPolicy.keys[k]
++	return b, ok && now.Before(b.until) && now.Before(b.deadline)
++}
++
++func (s *Server) uniderpClientAllowedLocked(c *sclient) bool {
++	if s.uniderpPolicy == nil {
++		return true
++	}
++	b, ok := s.uniderpBindingLocked(c.key)
++	return ok && b.tailnet == c.uniderpTailnet && b.grant == c.uniderpGrant
++}
++
++func (s *Server) uniderpClientAllowed(c *sclient) bool {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	return s.uniderpClientAllowedLocked(c)
++}
++
++func (s *Server) uniderpReapLocked(now time.Time) {
++	s.uniderpClockValidLocked(now)
++	for _, set := range s.clients.All() {
++		set.ForeachClient(func(c *sclient) {
++			if s.uniderpClientAllowedLocked(c) {
++				return
++			}
++			if c.uniderpCancel != nil {
++				c.uniderpCancel()
++			}
++			c.nc.Close()
++			for {
++				select {
++				case p := <-c.sendQueue:
++					p.uniderpRelease()
++				default:
++					goto disco
++				}
++			}
++		disco:
++			for {
++				select {
++				case p := <-c.discoSendQueue:
++					p.uniderpRelease()
++				default:
++					return
++				}
++			}
++		})
++	}
++}
++
++func (s *Server) uniderpScheduleLocked() {
++	if s.closed {
++		return
++	}
++	if s.uniderpTimer != nil {
++		s.uniderpTimer.Stop()
++	}
++	now := s.clock.Now()
++	delay := time.Second
++	for _, b := range s.uniderpPolicy.keys {
++		if d := b.deadline.Sub(now); d > 0 && d < delay {
++			delay = d
++		}
++	}
++	s.uniderpTimer = s.clock.AfterFunc(delay, func() {
++		// Test clocks can fire callbacks while holding their own clock mutex.
++		go func() {
++			s.mu.Lock()
++			defer s.mu.Unlock()
++			if s.closed {
++				return
++			}
++			s.uniderpReapLocked(s.clock.Now())
++			s.uniderpScheduleLocked()
++		}()
++	})
++}
++
++func (s *Server) uniderpStatusLocked(now time.Time) UniDERPAppliedPolicy {
++	if s.uniderpPolicy == nil {
++		return UniDERPAppliedPolicy{}
++	}
++	result := UniDERPAppliedPolicy{Revision: s.uniderpPolicy.policy.Revision, Traffic: s.uniderpTrafficLocked(), TrafficObservedAt: now.UTC()}
++	if scheduler := s.uniderpRX.Load(); scheduler != nil {
++		scheduler.mu.Lock()
++		result.EffectiveBudgetBPS = scheduler.budget.rate * 8
++		scheduler.mu.Unlock()
++	}
++	result.ActiveConnections = uint64(max(s.curClients.Value(), 0))
++	if !s.uniderpClockValidLocked(now) {
++		return result
++	}
++	for _, b := range s.uniderpPolicy.keys {
++		if now.Before(b.until) && now.Before(b.deadline) {
++			result.Usable = true
++			break
++		}
++	}
++	return result
++}
++
++func (s *Server) UniDERPPolicyStatus() UniDERPAppliedPolicy {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	now := s.clock.Now()
++	if s.uniderpPolicy != nil {
++		s.uniderpReapLocked(now)
++	}
++	return s.uniderpStatusLocked(now)
++}
+--- /dev/null
++++ b/derp/derpserver/uniderp_policy_test.go
+@@ -0,0 +1,230 @@
++package derpserver
++
++import (
++	"bytes"
++	"encoding/json"
++	"errors"
++	"net"
++	"os"
++	"reflect"
++	"sort"
++	"testing"
++	"time"
++
++	"tailscale.com/derp"
++	"tailscale.com/tstest"
++	"tailscale.com/types/key"
++	"tailscale.com/types/logger"
++)
++
++func TestUniDERPSharedWireFixture(t *testing.T) {
++	b, err := os.ReadFile("testdata/uniderp-policy.json")
++	if err != nil {
++		t.Fatal(err)
++	}
++	p, err := DecodeUniDERPPolicy(bytes.NewReader(b), "cluster", "node")
++	if err != nil {
++		t.Fatal(err)
++	}
++	encoded, err := json.Marshal(p)
++	if err != nil || !bytes.Equal(encoded, b) || p.Revision != 7 || p.Grants[0].GrantRevision != 3 || p.QoS.SharedMaxBPS != 40000000 {
++		t.Fatal("wire semantics changed", err)
++	}
++	for i, hour := range []int{2, 3} {
++		if !UniDERPEffectiveUntil(p.Grants[0], p.Grants[0].Keys[i]).Equal(p.GeneratedAt.Add(time.Duration(hour) * time.Hour)) {
++			t.Fatal("wire deadline changed", i)
++		}
++	}
++}
++
++func testUniDERPPolicy(keys map[key.NodePublic]string, now time.Time) UniDERPPolicy {
++	p := UniDERPPolicy{ClusterID: "cluster", NodeID: "node", Revision: 1, GeneratedAt: now, Grants: []UniDERPGrantPolicy{}, QoS: UniDERPQoSPolicy{BudgetBPS: 8000000000, OwnerWeight: 8, SharedWeight: 2, Tailnets: []UniDERPPolicyTailnetQoS{}}}
++	byTailnet := make(map[string][]UniDERPDeviceKey)
++	for k, tn := range keys {
++		byTailnet[tn] = append(byTailnet[tn], UniDERPDeviceKey{NodePublic: k.String()})
++	}
++	var ids []string
++	for id := range byTailnet {
++		ids = append(ids, id)
++	}
++	sort.Strings(ids)
++	for _, id := range ids {
++		sort.Slice(byTailnet[id], func(i, j int) bool { return byTailnet[id][i].NodePublic < byTailnet[id][j].NodePublic })
++		p.Grants = append(p.Grants, UniDERPGrantPolicy{GrantID: id, GrantRevision: 1, TailnetID: id, LastIdentitySuccess: now, IdentityUntil: now.Add(time.Hour), ControlUntil: now.Add(time.Hour), Keys: byTailnet[id]})
++		p.QoS.Tailnets = append(p.QoS.Tailnets, UniDERPPolicyTailnetQoS{TailnetID: id, Group: "shared", Weight: 1})
++	}
++	return p
++}
++
++func installTestPolicy(t *testing.T, s *Server, p UniDERPPolicy) {
++	t.Helper()
++	b, err := json.Marshal(p)
++	if err != nil {
++		t.Fatal(err)
++	}
++	result, err := s.ApplyUniDERPPolicy(b)
++	if err != nil || result.Revision != p.Revision {
++		t.Fatal("policy not applied", result, err)
++	}
++}
++
++func assertDERPClosed(t *testing.T, c *derp.Client) {
++	t.Helper()
++	for {
++		_, err := c.Recv()
++		if err == nil {
++			continue
++		}
++		var networkError net.Error
++		if errors.As(err, &networkError) && networkError.Timeout() {
++			t.Fatal("connection did not close before read deadline", err)
++		}
++		return
++	}
++}
++
++func TestRevocationClosesExistingConnection(t *testing.T) {
++	s := New(key.NewNode(), logger.Discard)
++	t.Cleanup(func() { s.Close() })
++	a, b := key.NewNode(), key.NewNode()
++	p := testUniDERPPolicy(map[key.NodePublic]string{a.Public(): "a", b.Public(): "a"}, time.Now().UTC())
++	installTestPolicy(t, s, p)
++	ca, cb := uniderpClient(t, s, a), uniderpClient(t, s, b)
++	if _, err := ca.Recv(); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := cb.Recv(); err != nil {
++		t.Fatal(err)
++	}
++	p.Revision++
++	p.Grants[0].Keys = []UniDERPDeviceKey{{NodePublic: b.Public().String()}}
++	installTestPolicy(t, s, p)
++	assertDERPClosed(t, ca)
++	if !s.IsClientConnectedForTest(b.Public()) {
++		t.Fatal("unaffected connection dropped")
++	}
++}
++
++func TestExpiryClosesWithoutUpdate(t *testing.T) {
++	clock := tstest.NewClock(tstest.ClockOpts{Start: time.Now()})
++	s := New(key.NewNode(), logger.Discard)
++	s.clock = clock
++	t.Cleanup(func() { s.Close() })
++	k := key.NewNode()
++	p := testUniDERPPolicy(map[key.NodePublic]string{k.Public(): "a"}, clock.Now())
++	p.Grants[0].ControlUntil = clock.Now().Add(time.Minute)
++	installTestPolicy(t, s, p)
++	c := uniderpClient(t, s, k)
++	if _, err := c.Recv(); err != nil {
++		t.Fatal(err)
++	}
++	clock.Advance(2 * time.Minute)
++	assertDERPClosed(t, c)
++	if c := uniderpClient(t, s, k); c != nil {
++		if _, err := c.Recv(); err == nil {
++			t.Fatal("expired key reconnected")
++		}
++	}
++}
++
++func TestReplayCannotRestoreRevokedKey(t *testing.T) {
++	s := New(key.NewNode(), logger.Discard)
++	t.Cleanup(func() { s.Close() })
++	k := key.NewNode()
++	p := testUniDERPPolicy(map[key.NodePublic]string{k.Public(): "a"}, time.Now().UTC())
++	installTestPolicy(t, s, p)
++	old, _ := json.Marshal(p)
++	p.Revision++
++	p.Grants = []UniDERPGrantPolicy{}
++	p.QoS.Tailnets = []UniDERPPolicyTailnetQoS{}
++	installTestPolicy(t, s, p)
++	if _, err := s.ApplyUniDERPPolicy(old); err == nil {
++		t.Fatal("lower revision accepted")
++	}
++	p.QoS.BudgetBPS++
++	changed, _ := json.Marshal(p)
++	if _, err := s.ApplyUniDERPPolicy(changed); err == nil {
++		t.Fatal("same revision changed content")
++	}
++	c := uniderpClient(t, s, k)
++	if _, err := c.Recv(); err == nil {
++		t.Fatal("revoked key restored")
++	}
++}
++
++func TestInvalidUpdateKeepsOnlyValidOldPolicy(t *testing.T) {
++	s := New(key.NewNode(), logger.Discard)
++	t.Cleanup(func() { s.Close() })
++	k := key.NewNode()
++	p := testUniDERPPolicy(map[key.NodePublic]string{k.Public(): "a"}, time.Now().UTC())
++	installTestPolicy(t, s, p)
++	if _, err := s.ApplyUniDERPPolicy([]byte(`{"revision":2}`)); err == nil {
++		t.Fatal("invalid policy applied")
++	}
++	c := uniderpClient(t, s, k)
++	if _, err := c.Recv(); err != nil {
++		t.Fatal("valid old policy lost", err)
++	}
++	p.Revision++
++	p.NodeID = "other"
++	b, _ := json.Marshal(p)
++	if _, err := s.ApplyUniDERPPolicy(b); err == nil {
++		t.Fatal("wrong node policy applied")
++	}
++}
++
++func TestPolicyClockRollbackCannotExtendAuthorization(t *testing.T) {
++	clock := tstest.NewClock(tstest.ClockOpts{Start: time.Now()})
++	s := New(key.NewNode(), logger.Discard)
++	s.clock = clock
++	t.Cleanup(func() { s.Close() })
++	k := key.NewNode()
++	p := testUniDERPPolicy(map[key.NodePublic]string{k.Public(): "a"}, clock.Now())
++	installTestPolicy(t, s, p)
++	c := uniderpClient(t, s, k)
++	if _, err := c.Recv(); err != nil {
++		t.Fatal(err)
++	}
++	clock.Advance(10 * time.Minute)
++	s.UniDERPPolicyStatus()
++	clock.Advance(-time.Minute)
++	if s.UniDERPPolicyStatus().Usable {
++		t.Fatal("clock rollback retained usable policy")
++	}
++	assertDERPClosed(t, c)
++}
++
++func TestLocalBudgetPreservesPolicyAndPriority(t *testing.T) {
++	for _, cap := range []uint64{0, 80000000} {
++		s := New(key.NewNode(), logger.Discard)
++		s.EnableUniDERP(cap)
++		p := testUniDERPPolicy(map[key.NodePublic]string{key.NewNode().Public(): "a"}, time.Now().UTC())
++		p.QoS.Tailnets[0].Weight = 7
++		p.QoS.Tailnets[0].MaxBPS = 20000000
++		for _, budget := range []uint64{100000000, 200000000, 40000000} {
++			p.Revision++
++			p.QoS.BudgetBPS = budget
++			body, _ := json.Marshal(p)
++			applied, err := s.ApplyUniDERPPolicy(body)
++			effective := budget
++			if cap != 0 {
++				effective = min(budget, cap)
++			}
++			if err != nil || !applied.Usable || applied.EffectiveBudgetBPS != effective || applied.Revision != p.Revision {
++				t.Fatal(applied, err)
++			}
++			if !reflect.DeepEqual(s.uniderpPolicy.policy, p) {
++				t.Fatal("controller policy changed")
++			}
++			for _, scheduler := range []*uniderpScheduler{s.uniderpRX.Load(), s.uniderpTX.Load()} {
++				scheduler.mu.Lock()
++				rate := scheduler.budget.rate
++				scheduler.mu.Unlock()
++				if rate != effective/8 {
++					t.Fatal("scheduler budget", rate)
++				}
++			}
++		}
++		s.Close()
++	}
++}
+--- /dev/null
++++ b/derp/derpserver/uniderp_protocol.go
+@@ -0,0 +1,153 @@
++package derpserver
++
++import (
++	"bytes"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"math"
++	"strings"
++	"time"
++
++	"tailscale.com/types/key"
++)
++
++const MaxUniDERPPolicyBytes = 8 << 20
++
++type UniDERPPolicy struct {
++	ClusterID   string               `json:"cluster_id"`
++	NodeID      string               `json:"node_id"`
++	Revision    uint64               `json:"revision"`
++	GeneratedAt time.Time            `json:"generated_at"`
++	Grants      []UniDERPGrantPolicy `json:"grants"`
++	QoS         UniDERPQoSPolicy     `json:"qos"`
++}
++
++type UniDERPGrantPolicy struct {
++	GrantID             string             `json:"grant_id"`
++	GrantRevision       uint64             `json:"grant_revision"`
++	TailnetID           string             `json:"tailnet_id"`
++	LastIdentitySuccess time.Time          `json:"last_identity_success"`
++	IdentityUntil       time.Time          `json:"identity_until"`
++	ControlUntil        time.Time          `json:"control_until"`
++	ExplicitUntil       time.Time          `json:"explicit_until"`
++	Keys                []UniDERPDeviceKey `json:"keys"`
++}
++
++type UniDERPDeviceKey struct {
++	NodePublic string    `json:"node_public"`
++	NotAfter   time.Time `json:"not_after"`
++}
++
++type UniDERPQoSPolicy struct {
++	BudgetBPS    uint64                    `json:"budget_bps"`
++	OwnerWeight  uint32                    `json:"owner_weight"`
++	SharedWeight uint32                    `json:"shared_weight"`
++	SharedMaxBPS uint64                    `json:"shared_max_bps"`
++	Tailnets     []UniDERPPolicyTailnetQoS `json:"tailnets"`
++}
++
++type UniDERPPolicyTailnetQoS struct {
++	TailnetID string `json:"tailnet_id"`
++	Group     string `json:"group"`
++	Weight    uint32 `json:"weight"`
++	MaxBPS    uint64 `json:"max_bps"`
++}
++
++func UniDERPEffectiveUntil(g UniDERPGrantPolicy, k UniDERPDeviceKey) time.Time {
++	until := g.IdentityUntil
++	for _, d := range []time.Time{g.ControlUntil, g.ExplicitUntil, k.NotAfter} {
++		if !d.IsZero() && d.Before(until) {
++			until = d
++		}
++	}
++	return until
++}
++
++func DecodeUniDERPPolicy(r io.Reader, clusterID, nodeID string) (UniDERPPolicy, error) {
++	body, err := io.ReadAll(io.LimitReader(r, MaxUniDERPPolicyBytes+1))
++	if err != nil || len(body) > MaxUniDERPPolicyBytes {
++		return UniDERPPolicy{}, errors.New("policy unreadable or too large")
++	}
++	dec := json.NewDecoder(bytes.NewReader(body))
++	dec.DisallowUnknownFields()
++	var p UniDERPPolicy
++	if err := dec.Decode(&p); err != nil {
++		return UniDERPPolicy{}, fmt.Errorf("decode policy: %w", err)
++	}
++	if err := dec.Decode(new(any)); err != io.EOF {
++		return UniDERPPolicy{}, errors.New("trailing policy data")
++	}
++	if err := ValidateUniDERPPolicy(p, clusterID, nodeID); err != nil {
++		return UniDERPPolicy{}, err
++	}
++	return p, nil
++}
++
++func ValidateUniDERPPolicy(p UniDERPPolicy, clusterID, nodeID string) error {
++	validID := func(id string) bool { return id != "" && len(id) <= 128 && strings.TrimSpace(id) == id }
++	if !validID(p.ClusterID) || !validID(p.NodeID) || p.ClusterID != clusterID || p.NodeID != nodeID || p.Revision == 0 || p.GeneratedAt.IsZero() {
++		return errors.New("invalid policy identity or revision")
++	}
++	q := p.QoS
++	if err := ValidateUniDERPQoS(q); err != nil {
++		return err
++	}
++	if len(p.Grants) > 4096 || len(q.Tailnets) > 4096 {
++		return errors.New("too many policy tailnets")
++	}
++	tailnets := make(map[string]bool, len(p.Grants))
++	grants := make(map[string]bool, len(p.Grants))
++	keys := make(map[key.NodePublic]bool)
++	for _, g := range p.Grants {
++		if !validID(g.GrantID) || !validID(g.TailnetID) || g.GrantRevision == 0 || tailnets[g.TailnetID] || grants[g.GrantID] {
++			return errors.New("invalid or duplicate grant identity")
++		}
++		if g.LastIdentitySuccess.IsZero() || g.IdentityUntil.IsZero() || g.ControlUntil.IsZero() || g.IdentityUntil.Before(g.LastIdentitySuccess) {
++			return errors.New("invalid grant identity deadlines")
++		}
++		tailnets[g.TailnetID] = true
++		grants[g.GrantID] = true
++		for _, k := range g.Keys {
++			var public key.NodePublic
++			if public.UnmarshalText([]byte(k.NodePublic)) != nil || public.IsZero() || keys[public] {
++				return errors.New("invalid or duplicate device public key")
++			}
++			keys[public] = true
++			if len(keys) > 65536 {
++				return errors.New("too many policy device keys")
++			}
++		}
++	}
++	seen := make(map[string]bool, len(q.Tailnets))
++	for _, t := range q.Tailnets {
++		if !tailnets[t.TailnetID] || seen[t.TailnetID] {
++			return errors.New("invalid tailnet bandwidth rule")
++		}
++		seen[t.TailnetID] = true
++	}
++	if len(seen) != len(tailnets) {
++		return errors.New("missing tailnet bandwidth rule")
++	}
++	return nil
++}
++
++func ValidateUniDERPQoS(q UniDERPQoSPolicy) error {
++	validWeight := func(w uint32) bool { return w > 0 && w <= 1024 }
++	validCeiling := func(bps uint64) bool { return bps == 0 || (bps >= 8 && bps <= math.MaxInt64) }
++	if q.BudgetBPS < 8 || q.BudgetBPS > math.MaxInt64 || !validCeiling(q.SharedMaxBPS) || !validWeight(q.OwnerWeight) || !validWeight(q.SharedWeight) {
++		return errors.New("invalid policy budget or group weight")
++	}
++	if len(q.Tailnets) > 4096 {
++		return errors.New("too many bandwidth rules")
++	}
++	seen := make(map[string]bool, len(q.Tailnets))
++	for _, t := range q.Tailnets {
++		if t.TailnetID == "" || len(t.TailnetID) > 128 || strings.TrimSpace(t.TailnetID) != t.TailnetID || seen[t.TailnetID] || (t.Group != "owner" && t.Group != "shared") || !validWeight(t.Weight) || !validCeiling(t.MaxBPS) {
++			return errors.New("invalid tailnet bandwidth rule")
++		}
++		seen[t.TailnetID] = true
++	}
++	return nil
++}
+--- /dev/null
++++ b/derp/derpserver/uniderp_qos.go
+@@ -0,0 +1,281 @@
++package derpserver
++
++import (
++	"context"
++	"errors"
++	"sync"
++	"sync/atomic"
++	"time"
++)
++
++type UniDERPTailnetQoS struct {
++	TailnetID      string
++	Group          string
++	Weight         uint32
++	MaxBytesPerSec uint64
++}
++
++func (s *Server) SetUniDERPQoS(budget uint64, ownerWeight, sharedWeight uint32, sharedMax uint64, tailnets []UniDERPTailnetQoS) {
++	for _, slot := range []*atomic.Pointer[uniderpScheduler]{&s.uniderpRX, &s.uniderpTX} {
++		if current := slot.Load(); current != nil {
++			current.update(budget, ownerWeight, sharedWeight, sharedMax, tailnets)
++		} else {
++			slot.Store(newUniDERPScheduler(budget, ownerWeight, sharedWeight, sharedMax, tailnets))
++		}
++	}
++}
++
++type uniderpBucket struct {
++	rate   uint64
++	tokens float64
++	last   time.Time
++}
++
++func (b *uniderpBucket) available(now time.Time, n int) bool {
++	if b.rate == 0 {
++		return true
++	}
++	if !b.last.IsZero() {
++		b.tokens += now.Sub(b.last).Seconds() * float64(b.rate)
++	}
++	b.last = now
++	if b.tokens > 65536 {
++		b.tokens = 65536
++	}
++	return b.tokens >= float64(n)
++}
++
++func (b *uniderpBucket) consume(n int) {
++	if b.rate != 0 {
++		b.tokens -= float64(n)
++	}
++}
++
++type uniderpRequest struct {
++	ctx  context.Context
++	size int
++	done chan error
++}
++type uniderpTailnetQueue struct {
++	id          string
++	weight      int64
++	deficit     int64
++	credit      bool
++	bucket      uniderpBucket
++	requests    []*uniderpRequest
++	queuedBytes int
++	idleSince   time.Time
++}
++type uniderpGroupQueue struct {
++	weight   int64
++	deficit  int64
++	credit   bool
++	bucket   uniderpBucket
++	tailnets []*uniderpTailnetQueue
++	next     int
++}
++type uniderpScheduler struct {
++	mu       sync.Mutex
++	groups   [2]uniderpGroupQueue
++	next     int
++	budget   uniderpBucket
++	wake     chan struct{}
++	stop     chan struct{}
++	stopped  chan struct{}
++	stopOnce sync.Once
++}
++
++func newUniDERPScheduler(budget uint64, ownerWeight, sharedWeight uint32, sharedMax uint64, tailnets []UniDERPTailnetQoS) *uniderpScheduler {
++	s := &uniderpScheduler{budget: uniderpBucket{rate: budget}, wake: make(chan struct{}, 1), stop: make(chan struct{}), stopped: make(chan struct{})}
++	s.groups[0].weight = int64(ownerWeight)
++	s.groups[1].weight = int64(sharedWeight)
++	s.groups[1].bucket.rate = sharedMax
++	for _, t := range tailnets {
++		g := 0
++		if t.Group == "shared" {
++			g = 1
++		}
++		s.groups[g].tailnets = append(s.groups[g].tailnets, &uniderpTailnetQueue{id: t.TailnetID, weight: int64(t.Weight), bucket: uniderpBucket{rate: t.MaxBytesPerSec}})
++	}
++	go s.run()
++	return s
++}
++
++func (s *uniderpScheduler) close() { s.stopOnce.Do(func() { close(s.stop) }); <-s.stopped }
++
++func (s *uniderpScheduler) update(budget uint64, ownerWeight, sharedWeight uint32, sharedMax uint64, tailnets []UniDERPTailnetQoS) {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	previous := make(map[string]*uniderpTailnetQueue)
++	for _, g := range s.groups {
++		for _, t := range g.tailnets {
++			previous[t.id] = t
++		}
++	}
++	sharedBucket := s.groups[1].bucket
++	sharedBucket.rate = sharedMax
++	s.groups = [2]uniderpGroupQueue{{weight: int64(ownerWeight)}, {weight: int64(sharedWeight), bucket: sharedBucket}}
++	s.budget.rate = budget
++	s.next = 0
++	for _, rule := range tailnets {
++		queue := previous[rule.TailnetID]
++		if queue == nil {
++			queue = &uniderpTailnetQueue{id: rule.TailnetID}
++		}
++		delete(previous, rule.TailnetID)
++		queue.weight, queue.bucket.rate, queue.deficit, queue.credit = int64(rule.Weight), rule.MaxBytesPerSec, 0, false
++		group := 0
++		if rule.Group == "shared" {
++			group = 1
++		}
++		s.groups[group].tailnets = append(s.groups[group].tailnets, queue)
++	}
++	for _, queue := range previous {
++		for _, request := range queue.requests {
++			request.done <- errors.New("UniDERP tailnet authorization removed")
++		}
++	}
++}
++
++func (s *uniderpScheduler) wait(ctx context.Context, id string, size int) error {
++	if size < 0 || size > 65536 {
++		return errors.New("UniDERP invalid payload size")
++	}
++	r := &uniderpRequest{ctx: ctx, size: size, done: make(chan error, 1)}
++	s.mu.Lock()
++	var q *uniderpTailnetQueue
++	for i := range s.groups {
++		for _, t := range s.groups[i].tailnets {
++			if t.id == id {
++				q = t
++				break
++			}
++		}
++	}
++	if q == nil || len(q.requests) >= 256 || q.queuedBytes+size > uniderpTailnetQueueBytes {
++		s.mu.Unlock()
++		return errors.New("UniDERP tailnet queue unavailable")
++	}
++	q.requests = append(q.requests, r)
++	q.queuedBytes += size
++	q.idleSince = time.Time{}
++	s.mu.Unlock()
++	select {
++	case s.wake <- struct{}{}:
++	default:
++	}
++	select {
++	case err := <-r.done:
++		return err
++	case <-ctx.Done():
++		return ctx.Err()
++	case <-s.stop:
++		return errors.New("UniDERP scheduler stopped")
++	}
++}
++
++func (s *uniderpScheduler) run() {
++	defer close(s.stopped)
++	tick := time.NewTicker(time.Millisecond)
++	defer tick.Stop()
++	for {
++		select {
++		case <-s.stop:
++			return
++		case <-s.wake:
++		case <-tick.C:
++		}
++		s.mu.Lock()
++		for s.step(time.Now()) {
++		}
++		s.mu.Unlock()
++	}
++}
++
++func (s *uniderpScheduler) step(now time.Time) bool {
++	for tries := 0; tries < 512; tries++ {
++		g := &s.groups[s.next]
++		if len(g.tailnets) == 0 {
++			s.next = 1 - s.next
++			continue
++		}
++		if g.credit && g.deficit == 0 {
++			g.credit = false
++			s.next = 1 - s.next
++			continue
++		}
++		t := g.tailnets[g.next]
++		if t.credit && t.deficit == 0 {
++			t.credit = false
++			g.next = (g.next + 1) % len(g.tailnets)
++			continue
++		}
++		for len(t.requests) > 0 && t.requests[0].ctx.Err() != nil {
++			t.queuedBytes -= t.requests[0].size
++			t.requests = t.requests[1:]
++		}
++		if len(t.requests) == 0 {
++			if t.idleSince.IsZero() {
++				t.idleSince = now
++			}
++			grace := min(2*time.Millisecond, time.Duration(1200*uint64(time.Second)/max(s.budget.rate, 1)))
++			if g.credit && g.deficit > 0 && now.Sub(t.idleSince) < grace {
++				return false
++			}
++			t.deficit = 0
++			t.credit = false
++			g.next = (g.next + 1) % len(g.tailnets)
++			active := false
++			for _, q := range g.tailnets {
++				if len(q.requests) > 0 {
++					active = true
++					break
++				}
++			}
++			if !active {
++				g.deficit = 0
++				g.credit = false
++				s.next = 1 - s.next
++			}
++			continue
++		}
++		if !g.credit {
++			g.deficit += 1200 * g.weight
++			g.credit = true
++		}
++		if !t.credit {
++			t.deficit += 1200 * t.weight
++			t.credit = true
++		}
++		n := t.requests[0].size
++		if g.deficit < int64(n) {
++			g.credit = false
++			s.next = 1 - s.next
++			continue
++		}
++		if t.deficit < int64(n) {
++			t.credit = false
++			g.next = (g.next + 1) % len(g.tailnets)
++			continue
++		}
++		if !g.bucket.available(now, n) || !t.bucket.available(now, n) {
++			g.next = (g.next + 1) % len(g.tailnets)
++			s.next = 1 - s.next
++			continue
++		}
++		if !s.budget.available(now, n) {
++			return false
++		}
++		s.budget.consume(n)
++		g.bucket.consume(n)
++		t.bucket.consume(n)
++		g.deficit -= int64(n)
++		t.deficit -= int64(n)
++		r := t.requests[0]
++		t.queuedBytes -= r.size
++		t.requests = t.requests[1:]
++		r.done <- nil
++		return true
++	}
++	return false
++}
+--- /dev/null
++++ b/derp/derpserver/uniderp_qos_deterministic_test.go
+@@ -0,0 +1,166 @@
++package derpserver
++
++import (
++	"context"
++	"fmt"
++	"testing"
++	"time"
++)
++
++type qosTestFlow struct {
++	id     string
++	group  string
++	weight uint32
++	size   int
++	demand uint64
++}
++
++func TestUniDERPQoSOwnerReturnAndGuestCount(t *testing.T) {
++	flows := []qosTestFlow{{"owner", "owner", 1, 1200, 0}}
++	for i := range 10 {
++		flows = append(flows, qosTestFlow{fmt.Sprintf("guest-%d", i), "shared", 1, 300, 0})
++	}
++	counts, window, first := deterministicQoS(t, flows, 0, time.Second)
++	if first["owner"] > time.Second+2*time.Millisecond {
++		t.Fatal("owner did not recover service promptly", first["owner"])
++	}
++	owner := float64(counts["owner"]) * 8 / window.Seconds() / 1000000
++	var shared uint64
++	for _, f := range flows[1:] {
++		shared += counts[f.id]
++		if counts[f.id] == 0 {
++			t.Fatal("positive-weight guest starved", f.id)
++		}
++	}
++	if owner < 78.4 || owner > 81.6 || float64(shared)*8/window.Seconds()/1000000 < 19.6 {
++		t.Fatal("guest count diluted owner group", owner, shared)
++	}
++}
++
++func TestUniDERPQoSHotUpdatePreservesPendingAndRateCredit(t *testing.T) {
++	now := time.Date(2026, 10, 3, 0, 0, 0, 0, time.UTC)
++	r := &uniderpRequest{ctx: context.Background(), size: 1200, done: make(chan error, 1)}
++	q := &uniderpTailnetQueue{id: "a", weight: 1, requests: []*uniderpRequest{r}, queuedBytes: 1200, bucket: uniderpBucket{rate: 100000, tokens: 500, last: now}}
++	s := &uniderpScheduler{budget: uniderpBucket{rate: 12500000, tokens: 1000, last: now}}
++	s.groups[1] = uniderpGroupQueue{weight: 2, bucket: uniderpBucket{rate: 5000000, tokens: 700, last: now}, tailnets: []*uniderpTailnetQueue{q}}
++	s.update(12500000, 16, 2, 2500000, []UniDERPTailnetQoS{{"a", "shared", 2, 500000}})
++	if s.budget.tokens != 1000 || s.groups[1].bucket.tokens != 700 || q.bucket.tokens != 500 || len(q.requests) != 1 || q.requests[0] != r || q.queuedBytes != 1200 {
++		t.Fatal("hot update reset rate credit or pending request")
++	}
++	if s.step(now) {
++		t.Fatal("hot update replenished burst")
++	}
++	q.requests = append(q.requests, &uniderpRequest{ctx: context.Background(), size: 65536, done: make(chan error, 1)})
++	q.queuedBytes += 65536
++	if !s.step(now.Add(8 * time.Hour)) {
++		t.Fatal("idle bucket did not resume service")
++	}
++	<-r.done
++	if s.step(now.Add(8 * time.Hour)) {
++		t.Fatal("eight hours idle accumulated unbounded burst")
++	}
++}
++
++func deterministicQoS(t *testing.T, flows []qosTestFlow, sharedMax uint64, ownerStart time.Duration) (map[string]uint64, time.Duration, map[string]time.Duration) {
++	t.Helper()
++	s := &uniderpScheduler{budget: uniderpBucket{rate: 12500000}}
++	s.groups[0].weight, s.groups[1].weight = 8, 2
++	s.groups[1].bucket.rate = sharedMax
++	queues := make([]*uniderpTailnetQueue, len(flows))
++	requests := make([][]*uniderpRequest, len(flows))
++	all := make([][]*uniderpRequest, len(flows))
++	for i, f := range flows {
++		group := 0
++		if f.group == "shared" {
++			group = 1
++		}
++		q := &uniderpTailnetQueue{id: f.id, weight: int64(f.weight)}
++		queues[i] = q
++		s.groups[group].tailnets = append(s.groups[group].tailnets, q)
++		for range 64 {
++			requests[i] = append(requests[i], &uniderpRequest{ctx: context.Background(), size: f.size, done: make(chan error, 1)})
++		}
++		all[i] = append([]*uniderpRequest(nil), requests[i]...)
++	}
++	counts, baseline := map[string]uint64{}, map[string]uint64{}
++	first := make(map[string]time.Duration)
++	var offered = make([]float64, len(flows))
++	start := time.Date(2026, 10, 3, 0, 0, 0, 0, time.UTC)
++	const tick = 200 * time.Microsecond
++	const warmup = time.Second
++	const duration = 4 * time.Second
++	for elapsed := time.Duration(0); elapsed <= warmup+duration; elapsed += tick {
++		for i, f := range flows {
++			if f.group == "owner" && elapsed < ownerStart {
++				continue
++			}
++			if f.demand == 0 {
++				offered[i] = float64(f.size * 64)
++			} else {
++				offered[i] += float64(f.demand) * tick.Seconds()
++			}
++			for len(requests[i]) > 0 && offered[i] >= float64(f.size) {
++				r := requests[i][len(requests[i])-1]
++				requests[i] = requests[i][:len(requests[i])-1]
++				queues[i].requests = append(queues[i].requests, r)
++				queues[i].queuedBytes += r.size
++				queues[i].idleSince = time.Time{}
++				offered[i] -= float64(f.size)
++			}
++		}
++		for s.step(start.Add(elapsed)) {
++			for i, f := range flows {
++				for _, r := range all[i] {
++					select {
++					case err := <-r.done:
++						if err != nil {
++							t.Fatal(err)
++						}
++						if _, ok := first[f.id]; !ok {
++							first[f.id] = elapsed
++						}
++						counts[f.id] += uint64(f.size)
++						requests[i] = append(requests[i], r)
++					default:
++					}
++				}
++			}
++		}
++		if elapsed == warmup {
++			for _, f := range flows {
++				baseline[f.id] = counts[f.id]
++			}
++		}
++	}
++	for _, f := range flows {
++		counts[f.id] -= baseline[f.id]
++	}
++	return counts, duration, first
++}
++
++func TestUniDERPQoSDeterministicDemandAndByteShares(t *testing.T) {
++	for _, test := range []struct {
++		name      string
++		flows     []qosTestFlow
++		sharedMax uint64
++		want      map[string]float64
++	}{
++		{"full demand", []qosTestFlow{{"owner", "owner", 1, 1200, 0}, {"a", "shared", 2, 300, 0}, {"b", "shared", 1, 1200, 0}}, 0, map[string]float64{"owner": 80, "a": 40.0 / 3, "b": 20.0 / 3}},
++		{"owner small demand", []qosTestFlow{{"owner", "owner", 1, 1200, 1250000}, {"a", "shared", 1, 300, 0}}, 0, map[string]float64{"owner": 10, "a": 90}},
++		{"owner only", []qosTestFlow{{"owner", "owner", 1, 1200, 0}}, 0, map[string]float64{"owner": 100}},
++		{"shared only", []qosTestFlow{{"a", "shared", 1, 300, 0}}, 0, map[string]float64{"a": 100}},
++		{"shared peer small demand", []qosTestFlow{{"owner", "owner", 1, 1200, 0}, {"a", "shared", 2, 300, 250000}, {"b", "shared", 1, 1200, 0}}, 0, map[string]float64{"owner": 80, "a": 2, "b": 18}},
++		{"shared small demand", []qosTestFlow{{"owner", "owner", 1, 1200, 0}, {"a", "shared", 1, 300, 625000}}, 0, map[string]float64{"owner": 95, "a": 5}},
++		{"shared hard ceiling", []qosTestFlow{{"a", "shared", 1, 300, 0}}, 5000000, map[string]float64{"a": 40}},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			counts, window, _ := deterministicQoS(t, test.flows, test.sharedMax, 0)
++			for id, want := range test.want {
++				mbps := float64(counts[id]) * 8 / window.Seconds() / 1000000
++				if mbps < want*0.98 || mbps > want*1.02 {
++					t.Errorf("%s %.3f Mbps, want %.3f ±2%%", id, mbps, want)
++				}
++			}
++		})
++	}
++}
+--- /dev/null
++++ b/derp/derpserver/uniderp_qos_test.go
+@@ -0,0 +1,275 @@
++package derpserver
++
++import (
++	"context"
++	"encoding/binary"
++	"runtime"
++	"sync"
++	"sync/atomic"
++	"tailscale.com/derp"
++	"tailscale.com/types/key"
++	"tailscale.com/types/logger"
++	"testing"
++	"time"
++)
++
++func TestUniDERPQoSBytesGroupsAndConnections(t *testing.T) {
++	s := newUniDERPScheduler(1000000, 8, 2, 0, []UniDERPTailnetQoS{{"owner", "owner", 1, 0}, {"a", "shared", 2, 0}, {"b", "shared", 1, 0}})
++	s.close()
++	var counts [3]int64
++	type connection struct {
++		queue   *uniderpTailnetQueue
++		request *uniderpRequest
++		index   int
++	}
++	var connections []connection
++	for _, flow := range []struct {
++		id                       string
++		index, size, connections int
++	}{{"owner", 0, 1200, 1}, {"a", 1, 300, 1}, {"b", 2, 1200, 16}} {
++		for _, group := range s.groups {
++			for _, queue := range group.tailnets {
++				if queue.id != flow.id {
++					continue
++				}
++				for range flow.connections {
++					request := &uniderpRequest{ctx: t.Context(), size: flow.size, done: make(chan error, 1)}
++					queue.requests = append(queue.requests, request)
++					queue.queuedBytes += request.size
++					connections = append(connections, connection{queue, request, flow.index})
++				}
++			}
++		}
++	}
++	// Keep every connection backlogged so OS scheduling cannot mimic idle demand.
++	start := time.Date(2026, 10, 3, 0, 0, 0, 0, time.UTC)
++	for elapsed := time.Duration(0); elapsed <= 2*time.Second; elapsed += 200 * time.Microsecond {
++		for s.step(start.Add(elapsed)) {
++			for _, c := range connections {
++				select {
++				case err := <-c.request.done:
++					if err != nil {
++						t.Fatal(err)
++					}
++					counts[c.index] += int64(c.request.size)
++					c.queue.requests = append(c.queue.requests, c.request)
++					c.queue.queuedBytes += c.request.size
++				default:
++				}
++			}
++		}
++	}
++	o, a, b := counts[0], counts[1], counts[2]
++	t.Logf("served bytes owner=%d a=%d b=%d", o, a, b)
++	if o == 0 || a == 0 || b == 0 {
++		t.Fatal("backlogged tailnet received no service")
++	}
++	if float64(o)/float64(a+b) < 3.5 || float64(o)/float64(a+b) > 4.5 {
++		t.Fatal("group byte ratio incorrect")
++	}
++	if float64(a)/float64(b) < 1.7 || float64(a)/float64(b) > 2.3 {
++		t.Fatal("tailnet byte ratio incorrect")
++	}
++}
++
++func TestUniDERPQoSOnRelayDataPath(t *testing.T) {
++	s := New(key.NewNode(), logger.Discard)
++	t.Cleanup(func() { s.Close() })
++	keys := map[key.NodePublic]string{}
++	type flow struct {
++		a, b        key.NodePrivate
++		id          string
++		index, size int
++	}
++	var flows []flow
++	for _, f := range []struct {
++		id                       string
++		index, size, connections int
++	}{{"owner", 0, 1200, 1}, {"a", 1, 300, 1}, {"b", 2, 1200, 8}} {
++		for range f.connections {
++			a, b := key.NewNode(), key.NewNode()
++			keys[a.Public()] = f.id
++			keys[b.Public()] = f.id
++			flows = append(flows, flow{a, b, f.id, f.index, f.size})
++		}
++	}
++	installTestPolicy(t, s, testUniDERPPolicy(keys, time.Now()))
++	s.SetUniDERPQoS(400000, 8, 2, 0, []UniDERPTailnetQoS{{"owner", "owner", 1, 0}, {"a", "shared", 2, 0}, {"b", "shared", 1, 0}})
++	var counts [3]atomic.Int64
++	var maxLatency atomic.Int64
++	var wg sync.WaitGroup
++	var memoryBefore runtime.MemStats
++	runtime.ReadMemStats(&memoryBefore)
++	for _, f := range flows {
++		a, b := uniderpClient(t, s, f.a), uniderpClient(t, s, f.b)
++		for _, c := range []*derp.Client{a, b} {
++			if _, err := c.Recv(); err != nil {
++				t.Fatal(err)
++			}
++		}
++		for _, direction := range []struct {
++			sender, receiver *derp.Client
++			destination      key.NodePublic
++		}{{a, b, f.b.Public()}, {b, a, f.a.Public()}} {
++			wg.Go(func() {
++				for {
++					m, err := direction.receiver.Recv()
++					if err != nil {
++						return
++					}
++					if p, ok := m.(derp.ReceivedPacket); ok {
++						counts[f.index].Add(int64(len(p.Data)))
++						delay := time.Now().UnixNano() - int64(binary.LittleEndian.Uint64(p.Data))
++						for {
++							previous := maxLatency.Load()
++							if delay <= previous || maxLatency.CompareAndSwap(previous, delay) {
++								break
++							}
++						}
++					}
++				}
++			})
++			wg.Go(func() {
++				payload := make([]byte, f.size)
++				for {
++					binary.LittleEndian.PutUint64(payload, uint64(time.Now().UnixNano()))
++					if direction.sender.Send(direction.destination, payload) != nil {
++						return
++					}
++				}
++			})
++		}
++	}
++	deadline := time.Now().Add(2 * time.Second)
++	var peakQueue uint64
++	var sampled UniDERPAppliedPolicy
++	for time.Now().Before(deadline) {
++		sampled = s.UniDERPPolicyStatus()
++		var queued uint64
++		for _, counter := range sampled.Traffic {
++			if counter.QueuedPayloadBytes > uniderpTailnetQueueBytes {
++				t.Fatal("data path exceeded tailnet byte budget", counter)
++			}
++			queued += counter.QueuedPayloadBytes
++		}
++		if queued > peakQueue {
++			peakQueue = queued
++		}
++		time.Sleep(10 * time.Millisecond)
++	}
++	var memoryAfter runtime.MemStats
++	runtime.ReadMemStats(&memoryAfter)
++	t.Logf("bidirectional stats=%+v peak queued payload=%d bytes heap before=%d after=%d max end-to-end packet delay=%s", sampled.Traffic, peakQueue, memoryBefore.HeapAlloc, memoryAfter.HeapAlloc, time.Duration(maxLatency.Load()))
++	s.Close()
++	wg.Wait()
++	o, a, b := counts[0].Load(), counts[1].Load(), counts[2].Load()
++	t.Logf("received payload bytes owner=%d a=%d b=%d", o, a, b)
++	if float64(o)/float64(a+b) < 3.3 || float64(o)/float64(a+b) > 4.7 {
++		t.Fatal("data-path group ratio incorrect")
++	}
++	if float64(a)/float64(b) < 1.5 || float64(a)/float64(b) > 2.5 {
++		t.Fatal("data-path tailnet ratio incorrect")
++	}
++	if o+a+b < 600000 || o+a+b > 900000 {
++		t.Fatal("RX/TX budget not applied independently or throughput too low")
++	}
++}
++
++func TestUniDERPQoSBorrowingAndCeiling(t *testing.T) {
++	for _, ceiling := range []uint64{0, 200000} {
++		s := newUniDERPScheduler(1000000, 8, 2, ceiling, []UniDERPTailnetQoS{{"a", "shared", 1, 0}})
++		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
++		var n int64
++		for s.wait(ctx, "a", 1200) == nil {
++			n += 1200
++		}
++		cancel()
++		s.close()
++		if ceiling == 0 && n < 800000 {
++			t.Fatalf("idle capacity not borrowed: %d", n)
++		}
++		if ceiling != 0 && n > 200000+2*65536 {
++			t.Fatalf("ceiling exceeded beyond bounded burst: %d", n)
++		}
++	}
++}
++
++func TestUniDERPSlowReceiverDoesNotBlockOtherFlow(t *testing.T) {
++	s := New(key.NewNode(), logger.Discard)
++	t.Cleanup(func() { s.Close() })
++	ka, ks, kf := key.NewNode(), key.NewNode(), key.NewNode()
++	installTestPolicy(t, s, testUniDERPPolicy(map[key.NodePublic]string{ka.Public(): "a", ks.Public(): "b", kf.Public(): "a"}, time.Now()))
++	s.SetUniDERPQoS(16000000, 8, 2, 0, []UniDERPTailnetQoS{{"a", "owner", 1, 0}, {"b", "shared", 1, 0}})
++	a, slow, fast := uniderpClient(t, s, ka), uniderpClient(t, s, ks), uniderpClient(t, s, kf)
++	for _, c := range []*derp.Client{a, slow, fast} {
++		if _, err := c.Recv(); err != nil {
++			t.Fatal(err)
++		}
++	}
++	var wg sync.WaitGroup
++	wg.Go(func() {
++		payload := make([]byte, 60000)
++		for a.Send(ks.Public(), payload) == nil {
++		}
++	})
++	var received atomic.Int64
++	wg.Go(func() {
++		for {
++			m, err := fast.Recv()
++			if err != nil {
++				return
++			}
++			if _, ok := m.(derp.ReceivedPacket); ok {
++				received.Add(1)
++			}
++		}
++	})
++	wg.Go(func() {
++		for fast.Send(kf.Public(), []byte("fast")) == nil {
++			time.Sleep(10 * time.Millisecond)
++		}
++	})
++	time.Sleep(600 * time.Millisecond)
++	s.mu.Lock()
++	cs, _ := s.clients.Load(ks.Public())
++	q := cs.activeClient.Load()
++	queued := len(q.sendQueue)
++	limit := s.perClientSendQueueDepth
++	s.mu.Unlock()
++	if queued > limit {
++		t.Fatalf("slow receiver queue exceeded bound %d > %d", queued, limit)
++	}
++	if received.Load() < 10 {
++		t.Fatalf("other flow stalled: %d packets", received.Load())
++	}
++	s.Close()
++	wg.Wait()
++}
++
++func TestUniDERPQoSQueueIsBoundedAndCancellationReleases(t *testing.T) {
++	s := newUniDERPScheduler(1, 8, 2, 0, []UniDERPTailnetQoS{{"a", "shared", 1, 0}})
++	defer s.close()
++	ctx, cancel := context.WithCancel(t.Context())
++	var wg sync.WaitGroup
++	for range 512 {
++		wg.Go(func() { s.wait(ctx, "a", 65536) })
++	}
++	time.Sleep(30 * time.Millisecond)
++	s.mu.Lock()
++	queued := len(s.groups[1].tailnets[0].requests)
++	bytes := 0
++	for _, r := range s.groups[1].tailnets[0].requests {
++		bytes += r.size
++	}
++	s.mu.Unlock()
++	if queued > 256 {
++		t.Fatalf("unbounded pending queue: %d", queued)
++	}
++	if bytes > 1<<20 {
++		cancel()
++		wg.Wait()
++		t.Fatalf("pending scheduler work exceeds 1MiB: %d bytes", bytes)
++	}
++	cancel()
++	wg.Wait()
++}
+--- /dev/null
++++ b/derp/derpserver/uniderp_queue_test.go
+@@ -0,0 +1,163 @@
++package derpserver
++
++import (
++	"context"
++	"fmt"
++	"net"
++	"runtime"
++	"testing"
++	"time"
++
++	"tailscale.com/types/key"
++	"tailscale.com/types/logger"
++)
++
++func TestUniDERPQueuedPayloadBytesBoundedAcrossConnections(t *testing.T) {
++	s := New(key.NewNode(), logger.Discard)
++	defer s.Close()
++	source := &sclient{s: s, key: key.NewNode().Public()}
++	keys := map[key.NodePublic]string{source.key: "a"}
++	var destinations []*sclient
++	for range 64 {
++		c := &sclient{s: s, key: key.NewNode().Public(), ctx: context.Background(), uniderpTailnet: "a", sendQueue: make(chan pkt, 32), discoSendQueue: make(chan pkt, 32)}
++		keys[c.key] = "a"
++		destinations = append(destinations, c)
++	}
++	installTestPolicy(t, s, testUniDERPPolicy(keys, time.Now()))
++	for _, c := range destinations {
++		c.uniderpGrant = s.uniderpPolicy.keys[c.key].grant
++	}
++	for _, c := range destinations {
++		for range 32 {
++			if err := source.sendPkt(c, pkt{src: source.key, bs: make([]byte, 60000)}); err != nil {
++				t.Fatal(err)
++			}
++		}
++	}
++	var bytes int
++	for _, c := range destinations {
++		for len(c.sendQueue) > 0 {
++			p := <-c.sendQueue
++			bytes += len(p.bs)
++			p.uniderpRelease()
++		}
++	}
++	if bytes == 0 {
++		t.Fatal("all authorized payloads dropped")
++	}
++	if queued := s.uniderpPolicy.traffic["a"].queued.Load(); queued != 0 {
++		t.Fatal("drain retained queue budget", queued)
++	}
++	if bytes > 1<<20 {
++		t.Fatalf("one tailnet retained %d queued payload bytes across 64 connections, limit 1MiB", bytes)
++	}
++	c := destinations[0]
++	for range 40 {
++		source.sendPkt(c, pkt{src: source.key, bs: make([]byte, 1000)})
++	}
++	if got := s.uniderpPolicy.traffic["a"].queued.Load(); got != 32000 {
++		t.Fatal("queue head drop leaked byte budget", got)
++	}
++	ctx, cancel := context.WithCancel(t.Context())
++	cancel()
++	c.ctx = ctx
++	for len(c.sendQueue) > 0 {
++		if err := c.sendQueuedPacket(<-c.sendQueue); err == nil {
++			t.Fatal("cancelled writer accepted packet")
++		}
++	}
++	if got := s.uniderpPolicy.traffic["a"].queued.Load(); got != 0 {
++		t.Fatal("cancelled writer leaked payload bytes", got)
++	}
++}
++
++func TestUniDERPConcurrentSenderAndCloseReleasesBudget(t *testing.T) {
++	s := New(key.NewNode(), logger.Discard)
++	defer s.Close()
++	source := &sclient{s: s, key: key.NewNode().Public()}
++	destKey := key.NewNode().Public()
++	installTestPolicy(t, s, testUniDERPPolicy(map[key.NodePublic]string{source.key: "a", destKey: "a"}, time.Now()))
++	payload := make([]byte, 1024)
++	for i := range 1000 {
++		ctx, cancel := context.WithCancel(t.Context())
++		conn, peer := net.Pipe()
++		c := &sclient{s: s, nc: conn, key: destKey, ctx: ctx, uniderpTailnet: "a", uniderpGrant: "a", sendQueue: make(chan pkt, 32), discoSendQueue: make(chan pkt, 32)}
++		done := make(chan struct{})
++		go func() {
++			defer close(done)
++			for range 256 {
++				source.sendPkt(c, pkt{src: source.key, bs: payload})
++			}
++		}()
++		runtime.Gosched()
++		cancel()
++		c.onSendLoopDone()
++		<-done
++		peer.Close()
++		if got := s.uniderpPolicy.traffic["a"].queued.Load(); got != 0 {
++			t.Fatalf("concurrent close leaked %d bytes on iteration %d", got, i)
++		}
++	}
++}
++
++func TestUniDERPSenderAfterCloseDoesNotReserveBudget(t *testing.T) {
++	s := New(key.NewNode(), logger.Discard)
++	defer s.Close()
++	source := &sclient{s: s, key: key.NewNode().Public()}
++	destKey := key.NewNode().Public()
++	installTestPolicy(t, s, testUniDERPPolicy(map[key.NodePublic]string{source.key: "a", destKey: "a"}, time.Now()))
++	conn, peer := net.Pipe()
++	defer peer.Close()
++	c := &sclient{s: s, nc: conn, key: destKey, ctx: t.Context(), uniderpTailnet: "a", uniderpGrant: "a", sendQueue: make(chan pkt, 32), discoSendQueue: make(chan pkt, 32)}
++	c.onSendLoopDone()
++	source.sendPkt(c, pkt{src: source.key, bs: make([]byte, 1024)})
++	if got := s.uniderpPolicy.traffic["a"].queued.Load(); got != 0 {
++		t.Fatal("closed sender retained payload budget", got)
++	}
++}
++
++func TestUniDERPGroupQueueBoundsProtectOwnerCapacity(t *testing.T) {
++	s := New(key.NewNode(), logger.Discard)
++	defer s.Close()
++	source := &sclient{s: s, key: key.NewNode().Public()}
++	keys := map[key.NodePublic]string{source.key: "owner"}
++	var destinations []*sclient
++	for i := range 17 {
++		id := fmt.Sprintf("guest-%d", i)
++		if i == 16 {
++			id = "owner"
++		}
++		c := &sclient{s: s, key: key.NewNode().Public(), ctx: context.Background(), uniderpTailnet: id, uniderpGrant: id, sendQueue: make(chan pkt, 32), discoSendQueue: make(chan pkt, 32)}
++		keys[c.key] = id
++		destinations = append(destinations, c)
++	}
++	p := testUniDERPPolicy(keys, time.Now())
++	for i := range p.QoS.Tailnets {
++		if p.QoS.Tailnets[i].TailnetID == "owner" {
++			p.QoS.Tailnets[i].Group = "owner"
++		}
++	}
++	installTestPolicy(t, s, p)
++	for _, c := range destinations {
++		for range 32 {
++			source.sendPkt(c, pkt{src: source.key, bs: make([]byte, 60000)})
++		}
++	}
++	var guestBytes int
++	for _, c := range destinations[:16] {
++		for len(c.sendQueue) > 0 {
++			p := <-c.sendQueue
++			guestBytes += len(p.bs)
++			p.uniderpRelease()
++		}
++	}
++	if guestBytes > 8<<20 {
++		t.Fatal("guest tailnets exceeded shared aggregate queue budget", guestBytes)
++	}
++	if len(destinations[16].sendQueue) == 0 {
++		t.Fatal("guests consumed owner queue capacity")
++	}
++	for len(destinations[16].sendQueue) > 0 {
++		(<-destinations[16].sendQueue).uniderpRelease()
++	}
++}
+--- /dev/null
++++ b/derp/derpserver/uniderp_test.go
+@@ -0,0 +1,113 @@
++package derpserver
++
++import (
++	"bufio"
++	"bytes"
++	"context"
++	"net"
++	"testing"
++	"time"
++
++	"tailscale.com/derp"
++	"tailscale.com/tstest"
++	"tailscale.com/types/key"
++	"tailscale.com/types/logger"
++)
++
++func uniderpClient(t *testing.T, s *Server, k key.NodePrivate) *derp.Client {
++	t.Helper()
++	ln, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer ln.Close()
++	conn, err := net.Dial("tcp", ln.Addr().String())
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { conn.Close() })
++	in, err := ln.Accept()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, fakeClock := s.clock.(*tstest.Clock); fakeClock {
++		// Linux TCP statistics reschedule inside fake-clock callbacks.
++		in = struct{ net.Conn }{in}
++	}
++	go s.Accept(context.Background(), in, bufio.NewReadWriter(bufio.NewReader(in), bufio.NewWriter(in)), "127.0.0.1:12345")
++	conn.SetDeadline(time.Now().Add(3 * time.Second))
++	c, err := derp.NewClient(k, conn, bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn)), logger.Discard)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return c
++}
++
++func TestKnownKeysAndUnknownKeyDenied(t *testing.T) {
++	s := New(key.NewNode(), logger.Discard)
++	t.Cleanup(func() { s.Close() })
++	a, b := key.NewNode(), key.NewNode()
++	installTestPolicy(t, s, testUniDERPPolicy(map[key.NodePublic]string{a.Public(): "tailnet-a", b.Public(): "tailnet-a"}, time.Now()))
++	ca, cb := uniderpClient(t, s, a), uniderpClient(t, s, b)
++	for _, c := range []*derp.Client{ca, cb} {
++		if _, err := c.Recv(); err != nil {
++			t.Fatal(err)
++		}
++	}
++	unknown := uniderpClient(t, s, key.NewNode())
++	if _, err := unknown.Recv(); err == nil {
++		t.Fatal("unknown key admitted")
++	}
++	for _, size := range []int{64, 1200, 60000} {
++		payload := bytes.Repeat([]byte{42}, size)
++		if err := ca.Send(b.Public(), payload); err != nil {
++			t.Fatal(err)
++		}
++		for {
++			msg, err := cb.Recv()
++			if err != nil {
++				t.Fatal(err)
++			}
++			if p, ok := msg.(derp.ReceivedPacket); ok {
++				if p.Source != a.Public() || !bytes.Equal(p.Data, payload) {
++					t.Fatal("relay payload mismatch")
++				}
++				break
++			}
++		}
++	}
++	s.mu.Lock()
++	cs, _ := s.clients.Load(a.Public())
++	got := cs.activeClient.Load().uniderpTailnet
++	s.mu.Unlock()
++	if got != "tailnet-a" {
++		t.Fatalf("binding = %q", got)
++	}
++}
++
++func TestUniDERPEmptyPolicyRejects(t *testing.T) {
++	s := New(key.NewNode(), logger.Discard)
++	t.Cleanup(func() { s.Close() })
++	installTestPolicy(t, s, testUniDERPPolicy(map[key.NodePublic]string{}, time.Now()))
++	c := uniderpClient(t, s, key.NewNode())
++	if _, err := c.Recv(); err == nil {
++		t.Fatal("empty policy opened admission")
++	}
++}
++
++func TestKnownKeyRequiresPrivateProof(t *testing.T) {
++	s := New(key.NewNode(), logger.Discard)
++	t.Cleanup(func() { s.Close() })
++	claimed, attacker := key.NewNode(), key.NewNode()
++	installTestPolicy(t, s, testUniDERPPolicy(map[key.NodePublic]string{claimed.Public(): "tailnet-a"}, time.Now()))
++	var frame bytes.Buffer
++	w := bufio.NewWriter(&frame)
++	sealed := attacker.SealTo(s.PublicKey(), []byte(`{"version":2}`))
++	derp.WriteFrameHeader(w, derp.FrameClientInfo, uint32(key.NodePublicRawLen+len(sealed)))
++	claimed.Public().WriteRawWithoutAllocating(w)
++	w.Write(sealed)
++	w.Flush()
++	if _, _, err := s.recvClientKey(bufio.NewReader(&frame)); err == nil {
++		t.Fatal("forged private key proof accepted")
++	}
++}
+--- /dev/null
++++ b/derp/derpserver/uniderp_traffic.go
+@@ -0,0 +1,87 @@
++package derpserver
++
++import "sync/atomic"
++
++const uniderpTailnetQueueBytes = 1 << 20
++const uniderpGroupQueueBytes = 8 << 20
++
++type uniderpTraffic struct {
++	id     uint64
++	queued atomic.Int64
++	rx     atomic.Uint64
++	tx     atomic.Uint64
++	group  int
++}
++
++type UniDERPTailnetTraffic struct {
++	CounterID           uint64 `json:"counter_id"`
++	TailnetID           string `json:"tailnet_id"`
++	RXPayloadBytes      uint64 `json:"rx_payload_bytes"`
++	TXPayloadBytes      uint64 `json:"tx_payload_bytes"`
++	RelayedPayloadBytes uint64 `json:"relayed_payload_bytes"`
++	QueuedPayloadBytes  uint64 `json:"queued_payload_bytes"`
++}
++
++func (c *sclient) recordUniDERPTraffic(bytes int, receive bool) {
++	c.s.mu.Lock()
++	defer c.s.mu.Unlock()
++	if c.s.uniderpPolicy == nil {
++		return
++	}
++	traffic := c.s.uniderpPolicy.traffic[c.uniderpTailnet]
++	if traffic == nil {
++		return
++	}
++	if receive {
++		traffic.rx.Add(uint64(bytes))
++	} else {
++		traffic.tx.Add(uint64(bytes))
++	}
++}
++
++func (s *Server) uniderpTrafficLocked() []UniDERPTailnetTraffic {
++	result := make([]UniDERPTailnetTraffic, 0, len(s.uniderpPolicy.traffic))
++	for _, rule := range s.uniderpPolicy.policy.QoS.Tailnets {
++		traffic := s.uniderpPolicy.traffic[rule.TailnetID]
++		tx := traffic.tx.Load()
++		result = append(result, UniDERPTailnetTraffic{CounterID: traffic.id, TailnetID: rule.TailnetID, RXPayloadBytes: traffic.rx.Load(), TXPayloadBytes: tx, RelayedPayloadBytes: tx, QueuedPayloadBytes: uint64(traffic.queued.Load())})
++	}
++	return result
++}
++
++func (s *Server) uniderpReservePacketLocked(dst *sclient, p *pkt) bool {
++	if dst.uniderpSendClosed {
++		return false
++	}
++	if s.uniderpPolicy == nil {
++		return true
++	}
++	if !s.uniderpClientAllowedLocked(dst) {
++		return false
++	}
++	traffic := s.uniderpPolicy.traffic[dst.uniderpTailnet]
++	if traffic == nil {
++		return false
++	}
++	groupQueued := &s.uniderpGroupQueued[traffic.group]
++	n := int64(len(p.bs))
++	if traffic.queued.Load()+n > uniderpTailnetQueueBytes || groupQueued.Load()+n > uniderpGroupQueueBytes {
++		return false
++	}
++	traffic.queued.Add(n)
++	groupQueued.Add(n)
++	p.uniderpTraffic, p.uniderpGroupQueued = traffic, groupQueued
++	return true
++}
++
++func (p pkt) uniderpRelease() {
++	if p.uniderpTraffic != nil {
++		p.uniderpTraffic.queued.Add(-int64(len(p.bs)))
++		p.uniderpGroupQueued.Add(-int64(len(p.bs)))
++	}
++}
++
++func (c *sclient) sendQueuedPacket(p pkt) error {
++	defer p.uniderpRelease()
++	return c.sendPacket(p.src, p.bs)
++}
+--- /dev/null
++++ b/derp/derpserver/uniderp_traffic_test.go
+@@ -0,0 +1,100 @@
++package derpserver
++
++import (
++	"encoding/json"
++	"testing"
++	"time"
++
++	"tailscale.com/derp"
++	"tailscale.com/types/key"
++	"tailscale.com/types/logger"
++)
++
++func TestUniDERPTrafficCountsPayloadDirectionsOnce(t *testing.T) {
++	s := New(key.NewNode(), logger.Discard)
++	defer s.Close()
++	a, b := key.NewNode(), key.NewNode()
++	p := testUniDERPPolicy(map[key.NodePublic]string{a.Public(): "a", b.Public(): "a"}, time.Now())
++	installTestPolicy(t, s, p)
++	ca, cb := uniderpClient(t, s, a), uniderpClient(t, s, b)
++	for _, c := range []*derp.Client{ca, cb} {
++		if _, err := c.Recv(); err != nil {
++			t.Fatal(err)
++		}
++	}
++	payload := []byte("actual traffic")
++	if err := ca.Send(b.Public(), payload); err != nil {
++		t.Fatal(err)
++	}
++	for {
++		msg, err := cb.Recv()
++		if err != nil {
++			t.Fatal(err)
++		}
++		if _, ok := msg.(derp.ReceivedPacket); ok {
++			break
++		}
++	}
++	read := func() map[string]any {
++		t.Helper()
++		body, _ := json.Marshal(s.UniDERPPolicyStatus())
++		var state map[string]any
++		json.Unmarshal(body, &state)
++		if state["active_connections"] != float64(2) {
++			t.Fatal("actual active connection count missing", string(body))
++		}
++		traffic, ok := state["traffic"].([]any)
++		if !ok || len(traffic) != 1 {
++			t.Fatal("missing bounded tailnet traffic", string(body))
++		}
++		return traffic[0].(map[string]any)
++	}
++	tally := read()
++	id := s.UniDERPPolicyStatus().Traffic[0].CounterID
++	if id == 0 {
++		t.Fatal("traffic counter identity missing", tally)
++	}
++	for _, field := range []string{"rx_payload_bytes", "tx_payload_bytes", "relayed_payload_bytes"} {
++		if tally[field] != float64(len(payload)) {
++			t.Fatal("direction double-counted or missing", field, tally)
++		}
++	}
++	if tally["tailnet_id"] != "a" || tally["queued_payload_bytes"] != float64(0) {
++		t.Fatal(tally)
++	}
++	p.Revision++
++	p.QoS.OwnerWeight = 9
++	installTestPolicy(t, s, p)
++	if after := read(); after["relayed_payload_bytes"] != tally["relayed_payload_bytes"] || s.UniDERPPolicyStatus().Traffic[0].CounterID != id {
++		t.Fatal("hot policy reset traffic", after)
++	}
++	kept := p
++	p.Revision++
++	p.Grants = []UniDERPGrantPolicy{}
++	p.QoS.Tailnets = []UniDERPPolicyTailnetQoS{}
++	installTestPolicy(t, s, p)
++	kept.Revision = p.Revision + 1
++	installTestPolicy(t, s, kept)
++	body, _ := json.Marshal(s.UniDERPPolicyStatus())
++	var state map[string]any
++	json.Unmarshal(body, &state)
++	if s.UniDERPPolicyStatus().Traffic[0].CounterID == id {
++		t.Fatal("rebuilt counter reused identity", string(body))
++	}
++}
++
++func TestUniDERPTrafficIdentityChangesAfterRestart(t *testing.T) {
++	private := key.NewNode()
++	p := testUniDERPPolicy(map[key.NodePublic]string{key.NewNode().Public(): "a"}, time.Now())
++	var first uint64
++	for i := 0; i < 2; i++ {
++		s := New(private, logger.Discard)
++		installTestPolicy(t, s, p)
++		id := s.UniDERPPolicyStatus().Traffic[0].CounterID
++		s.Close()
++		if id == 0 || id == first {
++			t.Fatal("server restart reused traffic identity", id)
++		}
++		first = id
++	}
++}

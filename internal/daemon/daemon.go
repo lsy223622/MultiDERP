@@ -10,28 +10,24 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
-	"github.com/lsy223622/MultiDERP/internal/admin"
-	"github.com/lsy223622/MultiDERP/internal/admission"
-	"github.com/lsy223622/MultiDERP/internal/config"
-	"github.com/lsy223622/MultiDERP/internal/derper"
-	"github.com/lsy223622/MultiDERP/internal/health"
-	"github.com/lsy223622/MultiDERP/internal/logging"
-	"github.com/lsy223622/MultiDERP/internal/verifier"
+	"github.com/lsy223622/UniDERP/v2/internal/admin"
+	"github.com/lsy223622/UniDERP/v2/internal/cluster"
+	"github.com/lsy223622/UniDERP/v2/internal/config"
+	"github.com/lsy223622/UniDERP/v2/internal/control"
+	"github.com/lsy223622/UniDERP/v2/internal/derper"
+	"github.com/lsy223622/UniDERP/v2/internal/health"
+	"github.com/lsy223622/UniDERP/v2/internal/logging"
 )
 
 type Options struct {
-	ConfigPath       string
-	ConfigTemplate   []byte
-	DerperBinary     string
-	DerperOutput     io.Writer
-	AdmissionAddress string
-	Factory          verifier.Factory
-	Logger           *log.Logger
+	ConfigPath     string
+	ConfigTemplate []byte
+	DerperBinary   string
+	DerperOutput   io.Writer
+	Logger         *log.Logger
 }
 
 type derperProcess interface {
@@ -46,7 +42,6 @@ type derperProcess interface {
 type Daemon struct {
 	mu                 sync.RWMutex
 	opMu               sync.Mutex
-	pendingOperationMu sync.Mutex
 	derperMu           sync.Mutex
 	started            bool
 	starting           bool
@@ -54,43 +49,47 @@ type Daemon struct {
 	stopping           bool
 	childOK            bool
 	childGeneration    uint64
-	barrierEpoch       uint64
 	expectedChildStops map[uint64]struct{}
 
-	configPath       string
-	configTemplate   []byte
-	derperBinary     string
-	derperOutput     io.Writer
-	admissionAddress string
-	logFilter        *logging.Filter
-	logf             func(string, ...any)
+	configPath     string
+	configTemplate []byte
+	derperBinary   string
+	derperOutput   io.Writer
+	logFilter      *logging.Filter
+	logf           func(string, ...any)
 
 	current        config.Config
 	desired        config.Config
 	pendingRestart bool
-	manager        *VerifierManager
-	admission      *admission.Controller
+	applyError     string
+	runCtx         context.Context
 	derper         derperProcess
 
 	adminServer          *admin.Server
 	adminListenerStarted bool
 	healthServer         *http.Server
 	healthListener       net.Listener
-	admissionServer      *http.Server
-	admissionListener    net.Listener
+	controllerStore      *control.Store
+	controllerServer     *http.Server
+	controllerListener   net.Listener
+	managementServer     *http.Server
+	managementListener   net.Listener
+	controllerCancel     context.CancelFunc
+	controllerDone       chan struct{}
+	nodeClient           *cluster.EnrollmentClient
+	policyClient         derper.PolicyClient
+	nodeCancel           context.CancelFunc
+	nodeDone             chan struct{}
+	nodeConflict         bool
 
-	fatal            chan error
-	fatalOnce        sync.Once
-	closeOnce        sync.Once
-	admissionServing atomic.Bool
+	fatal     chan error
+	fatalOnce sync.Once
+	closeOnce sync.Once
 }
 
 func New(parent context.Context, options Options) *Daemon {
 	if options.ConfigPath == "" {
 		options.ConfigPath = config.DefaultConfigPath
-	}
-	if options.AdmissionAddress == "" {
-		options.AdmissionAddress = config.DefaultAdmissionAddress
 	}
 	if options.DerperBinary == "" {
 		options.DerperBinary = "derper"
@@ -99,35 +98,23 @@ func New(parent context.Context, options Options) *Daemon {
 		options.DerperOutput = io.Discard
 	}
 	if options.Logger == nil {
-		options.Logger = log.New(os.Stderr, "multiderp: ", log.LstdFlags|log.Lmicroseconds)
+		options.Logger = log.New(os.Stderr, "uniderp: ", log.LstdFlags|log.Lmicroseconds)
 	}
 	if len(options.ConfigTemplate) == 0 {
-		options.ConfigTemplate = config.ExampleYAML()
+		options.ConfigTemplate = config.BootstrapYAML()
 	}
 	logFilter := logging.New(options.Logger, config.DefaultLoggingLevel)
-	pool := admission.NewPool()
 	d := &Daemon{
 		configPath:         options.ConfigPath,
 		configTemplate:     append([]byte(nil), options.ConfigTemplate...),
 		derperBinary:       options.DerperBinary,
 		derperOutput:       options.DerperOutput,
-		admissionAddress:   options.AdmissionAddress,
 		logFilter:          logFilter,
 		logf:               logFilter.Printf,
-		admission:          admission.NewController(pool, admission.DefaultLimits()),
 		fatal:              make(chan error, 1),
 		expectedChildStops: make(map[uint64]struct{}),
 	}
 	d.derper = derper.NewProcess(d.derperBinary, d.derperOutput)
-	d.manager = NewVerifierManager(parent, ManagerOptions{
-		Pool:    pool,
-		Factory: options.Factory,
-		Logger:  options.Logger,
-		Logf:    d.logf,
-		OnChange: func(int) {
-			d.poolChanged(parent)
-		},
-	})
 	return d
 }
 
@@ -146,12 +133,6 @@ func (d *Daemon) Start(ctx context.Context) error {
 	if createdConfig {
 		d.logf("INFO created missing configuration file %s from the bundled example", d.configPath)
 	}
-	d.pendingOperationMu.Lock()
-	err = d.recoverPendingOperationLocked(ctx)
-	d.pendingOperationMu.Unlock()
-	if err != nil {
-		return d.abortStart(err)
-	}
 	parsed, err := config.LoadFile(d.configPath)
 	if err != nil {
 		return d.abortStart(err)
@@ -166,9 +147,12 @@ func (d *Daemon) Start(ctx context.Context) error {
 	d.desired = parsed.Config.Clone()
 	d.pendingRestart = false
 	d.mu.Unlock()
-	d.denyAdmission()
-	if err := d.startAdmissionServer(); err != nil {
+	d.runCtx = ctx
+	if err := d.startManagement(parsed.Config); err != nil {
 		return d.abortStart(err)
+	}
+	if err := d.prepareRole(ctx, parsed.Config); err != nil {
+		d.setApplyError(err)
 	}
 	if err := d.startAdminServer(parsed.Config.Server.Admin.Socket); err != nil {
 		return d.abortStart(err)
@@ -176,21 +160,18 @@ func (d *Daemon) Start(ctx context.Context) error {
 	if err := d.startHealthServer(parsed.Config.Server.Health.Listen); err != nil {
 		return d.abortStart(err)
 	}
-	if err := d.manager.Reconcile(ctx, parsed.Config); err != nil {
-		return d.abortStart(err)
-	}
-	if err := d.syncDerper(ctx); err != nil {
-		return d.abortStart(err)
+	if d.applyError == "" {
+		if err := d.syncDerper(ctx); err != nil {
+			d.setApplyError(err)
+		}
 	}
 	d.mu.Lock()
 	d.started = true
 	d.starting = false
 	d.startup = true
 	d.mu.Unlock()
-	if d.manager.EligibleCount() > 0 && !d.derper.Running() {
-		if err := d.syncDerper(ctx); err != nil {
-			return d.abortStart(err)
-		}
+	if d.nodeClient != nil && d.derper.Running() {
+		d.startNodeControl(ctx)
 	}
 	return nil
 }
@@ -216,22 +197,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 	return errors.Join(runErr, shutdownErr)
 }
 
-func (d *Daemon) poolChanged(parent context.Context) {
-	d.mu.RLock()
-	started := d.started && !d.stopping
-	d.mu.RUnlock()
-	if !started {
-		return
-	}
-	d.denyAdmission()
-	go func() {
-		if err := d.syncDerper(parent); err != nil {
-			d.reportFatal(err)
-		}
-	}()
+func (d *Daemon) syncDerper(ctx context.Context) error {
+	return d.syncDerperConfig(ctx, d.activeConfig())
 }
 
-func (d *Daemon) syncDerper(ctx context.Context) error {
+func (d *Daemon) syncDerperConfig(ctx context.Context, cfg config.Config) error {
 	d.derperMu.Lock()
 	defer d.derperMu.Unlock()
 	d.mu.RLock()
@@ -239,40 +209,28 @@ func (d *Daemon) syncDerper(ctx context.Context) error {
 		d.mu.RUnlock()
 		return errors.New("daemon is stopping")
 	}
-	cfg := d.current.Clone()
-	barrierEpoch := d.barrierEpoch
-	childGeneration := d.childGeneration
+	nodeConflict := d.nodeConflict
 	d.mu.RUnlock()
-	if d.manager.EligibleCount() == 0 {
-		d.denyAdmission()
+	if cfg.SetupRequired || cfg.Server.Hostname == "" || nodeConflict {
 		return nil
 	}
 	if d.derper.Running() {
-		d.mu.Lock()
-		stopping := d.stopping
-		if !stopping && d.childOK && d.barrierEpoch == barrierEpoch && d.childGeneration == childGeneration {
-			d.admission.SetBarrier(true)
-		}
-		d.mu.Unlock()
-		if stopping {
-			return errors.New("daemon is stopping")
-		}
 		return nil
 	}
-	barrierEpoch = d.denyAdmission()
 	d.mu.Lock()
 	d.childOK = false
 	d.childGeneration++
-	childGeneration = d.childGeneration
+	childGeneration := d.childGeneration
 	d.mu.Unlock()
 	keyPath := filepath.Join(cfg.Storage.StateDir, "derper", "derper.key")
 	d.logf("INFO starting derper child")
-	if err := d.derper.Start(ctx, cfg.Server, d.admissionAddress, keyPath); err != nil {
+	if d.controllerListener == nil {
+		return errors.New("node management listener is not running")
+	}
+	if err := d.derper.Start(ctx, cfg.Server, d.controllerListener.Addr().String(), keyPath); err != nil {
 		return err
 	}
-	readyCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
-	defer cancel()
-	if err := d.derper.WaitReady(readyCtx, cfg.Server); err != nil {
+	if err := d.derper.WaitReady(ctx, cfg.Server); err != nil {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Second)
 		_ = d.derper.Stop(cleanupCtx)
 		cleanupCancel()
@@ -283,7 +241,7 @@ func (d *Daemon) syncDerper(ctx context.Context) error {
 		d.mu.Unlock()
 		return err
 	}
-	if !d.publishChildIfCurrent(barrierEpoch, childGeneration) {
+	if !d.publishChildIfCurrent(childGeneration) {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Second)
 		_ = d.derper.Stop(cleanupCtx)
 		cleanupCancel()
@@ -318,8 +276,6 @@ func (d *Daemon) monitorDerper(generation uint64) {
 		current := d.childGeneration == generation
 		if current {
 			d.childOK = false
-			d.barrierEpoch++
-			d.admission.SetBarrier(false)
 		}
 		d.mu.Unlock()
 		if !intentional {
@@ -327,7 +283,7 @@ func (d *Daemon) monitorDerper(generation uint64) {
 				err = errors.New("derper exited unexpectedly")
 			}
 			d.logf("ERROR derper child exited: %v", err)
-			d.reportFatal(fmt.Errorf("derper child failed: %w", err))
+			d.setApplyError(fmt.Errorf("derper child failed: %w", err))
 		} else {
 			d.logf("INFO derper child stopped")
 		}
@@ -339,26 +295,6 @@ func (d *Daemon) reportFatal(err error) {
 		return
 	}
 	d.fatalOnce.Do(func() { d.fatal <- err })
-}
-
-func (d *Daemon) startAdmissionServer() error {
-	if err := derper.ValidateAdmissionAddress(d.admissionAddress); err != nil {
-		return err
-	}
-	listener, err := net.Listen("tcp", d.admissionAddress)
-	if err != nil {
-		return fmt.Errorf("listen admission controller on %q: %w", d.admissionAddress, err)
-	}
-	d.admissionListener = listener
-	d.admissionServer = &http.Server{Handler: d.admission.Handler()}
-	d.admissionServing.Store(true)
-	go func() {
-		defer d.admissionServing.Store(false)
-		if err := d.admissionServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			d.reportFatal(fmt.Errorf("admission server: %w", err))
-		}
-	}()
-	return nil
 }
 
 func (d *Daemon) startAdminServer(path string) error {
@@ -395,27 +331,37 @@ func (d *Daemon) healthSnapshot() health.Snapshot {
 	live := (d.started || d.starting) && !d.stopping
 	startup := d.startup
 	childOK := d.childOK
+	started := d.started
 	pendingRestart := d.pendingRestart
 	d.mu.RUnlock()
-	if live && d.started {
-		live = d.manager.Running() && d.admission.Running() && d.admissionServing.Load() && d.adminServer != nil && d.adminServer.Running()
+	if live && started {
+		live = d.adminServer != nil && d.adminServer.Running() && d.controllerListener != nil
 	}
-	statuses := d.manager.List(context.Background())
-	requiredFailures := 0
-	for _, status := range statuses {
-		if status.EffectiveRequired && !verifier.Eligible(status) {
-			requiredFailures++
+	var nodeStatus cluster.ControlStatus
+	if d.nodeClient != nil {
+		nodeStatus = d.nodeClient.ControlStatus()
+	}
+	usable := false
+	if childOK && d.derper.Running() {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		applied, err := d.policyClient.Status(ctx)
+		cancel()
+		usable = applied.Usable
+		nodeStatus.Traffic = applied.Traffic
+		nodeStatus.TrafficObservedAt = applied.TrafficObservedAt
+		nodeStatus.ActiveConnections = applied.ActiveConnections
+		if applied.Revision != 0 || err == nil {
+			nodeStatus.AppliedRevision = applied.Revision
 		}
 	}
-	eligible := d.manager.EligibleCount()
+	nodeStatus.Usable = usable
 	return health.Snapshot{
-		Live:              live,
-		Startup:           startup,
-		DerperUsable:      childOK,
-		EligibleVerifiers: eligible,
-		RequiredFailures:  requiredFailures,
-		PendingRestart:    pendingRestart,
-		Ready:             childOK && eligible > 0 && requiredFailures == 0,
+		Live:           live,
+		Startup:        startup,
+		DerperUsable:   usable,
+		Node:           nodeStatus,
+		PendingRestart: pendingRestart,
+		Ready:          usable,
 	}
 }
 
@@ -426,77 +372,14 @@ func (d *Daemon) handleRequest(ctx context.Context, request admin.Request) admin
 	if stopping {
 		return admin.Failure("daemon is stopping")
 	}
-	d.pendingOperationMu.Lock()
-	defer d.pendingOperationMu.Unlock()
-	if err := d.recoverPendingOperationLocked(ctx); err != nil {
-		return admin.Failure("pending operation recovery failed: " + err.Error())
-	}
 	if err := ctx.Err(); err != nil {
 		return admin.Failure("admin request canceled: " + err.Error())
 	}
 	switch request.Action {
-	case "tailnet.list":
-		return admin.Success("", d.manager.List(ctx))
-	case "tailnet.status":
-		var status verifier.Status
-		var err error
-		if request.Verbose {
-			status, err = d.manager.StatusVerbose(request.Name, ctx)
-		} else {
-			status, err = d.manager.Status(request.Name, ctx)
-		}
-		if err != nil {
-			return admin.Failure(err.Error())
-		}
-		return admin.Success("", status)
-	case "tailnet.add":
-		return d.addTailnet(ctx, request)
-	case "tailnet.enable", "tailnet.disable":
-		return d.setTailnetDisabled(ctx, request)
-	case "tailnet.login":
-		d.opMu.Lock()
-		defer d.opMu.Unlock()
-		url, err := d.manager.Login(ctx, request.Name)
-		if err != nil {
-			return admin.Failure(err.Error())
-		}
-		return admin.Success("authentication required", map[string]string{"auth_url": url})
-	case "tailnet.logout":
-		d.opMu.Lock()
-		defer d.opMu.Unlock()
-		if err := d.manager.Logout(ctx, request.Name); err != nil {
-			return admin.Failure(err.Error())
-		}
-		return admin.Success("verifier logged out", nil)
-	case "tailnet.reset":
-		d.opMu.Lock()
-		defer d.opMu.Unlock()
-		if err := d.manager.Reset(ctx, request.Name); err != nil {
-			return admin.Failure(err.Error())
-		}
-		if err := d.syncDerper(ctx); err != nil {
-			d.reportFatal(err)
-			return admin.Failure(err.Error())
-		}
-		return d.verifierResponse(ctx, request.Name, "verifier reset")
-	case "tailnet.remove":
-		return d.removeTailnet(ctx, request)
-	case "orphan.list":
-		items, err := d.manager.ListOrphans()
-		if err != nil {
-			return admin.Failure(err.Error())
-		}
-		return admin.Success("", items)
-	case "orphan.purge":
-		if !request.Confirm {
-			return admin.Failure("orphan purge requires explicit confirmation")
-		}
-		d.opMu.Lock()
-		defer d.opMu.Unlock()
-		if err := d.manager.PurgeOrphan(request.Name); err != nil {
-			return admin.Failure(err.Error())
-		}
-		return admin.Success("orphan state purged: "+request.Name, nil)
+	case "node.enroll":
+		return d.nodeAdmin(ctx, request)
+	case "controller.init", "controller.recover":
+		return d.controllerAdmin(ctx, request)
 	case "config.reload":
 		return d.reloadConfig(ctx)
 	case "derp.restart":
@@ -511,156 +394,11 @@ func (d *Daemon) handleRequest(ctx context.Context, request admin.Request) admin
 	}
 }
 
-func (d *Daemon) addTailnet(ctx context.Context, request admin.Request) admin.Response {
-	d.opMu.Lock()
-	defer d.opMu.Unlock()
-	cfg := d.currentConfig()
-	for _, item := range cfg.Tailnets {
-		if strings.EqualFold(item.Name, request.Name) {
-			return admin.Failure(fmt.Sprintf("verifier %q already exists", request.Name))
-		}
-	}
-	authType := request.AuthType
-	if authType == "" {
-		authType = "web"
-	}
-	item := config.TailnetConfig{Name: request.Name, Auth: config.AuthConfig{Type: authType, ClientSecretFile: request.ClientSecretFile, AuthKeyFile: request.AuthKeyFile, Tags: append([]string(nil), request.Tags...)}}
-	if request.Required != nil {
-		item.Required = *request.Required
-	}
-	cfg.Tailnets = append(cfg.Tailnets, item)
-	if err := d.commitConfig(ctx, cfg, nil); err != nil {
-		return admin.Failure(err.Error())
-	}
-	status, err := d.manager.Status(request.Name, ctx)
-	if err != nil {
-		return admin.Success("verifier created", nil)
-	}
-	message := "verifier created"
-	data := map[string]any{"status": status}
-	if status.AuthURL != "" {
-		message = "authentication required"
-		data["auth_url"] = status.AuthURL
-	}
-	return admin.Success(message, data)
-}
-
-func (d *Daemon) setTailnetDisabled(ctx context.Context, request admin.Request) admin.Response {
-	d.opMu.Lock()
-	defer d.opMu.Unlock()
-	cfg := d.currentConfig()
-	found := false
-	for i := range cfg.Tailnets {
-		if strings.EqualFold(cfg.Tailnets[i].Name, request.Name) {
-			cfg.Tailnets[i].Disabled = request.Action == "tailnet.disable"
-			found = true
-			break
-		}
-	}
-	if !found {
-		return admin.Failure(fmt.Sprintf("verifier %q not found", request.Name))
-	}
-	if err := d.commitConfig(ctx, cfg, nil); err != nil {
-		return admin.Failure(err.Error())
-	}
-	return d.verifierResponse(ctx, request.Name, "verifier configuration updated")
-}
-
-func (d *Daemon) verifierResponse(ctx context.Context, name, message string) admin.Response {
-	status, err := d.manager.Status(name, ctx)
-	if err != nil {
-		return admin.Success(message, nil)
-	}
-	data := map[string]any{"status": status}
-	if status.AuthURL != "" {
-		return admin.Success("authentication required", map[string]any{"status": status, "auth_url": status.AuthURL})
-	}
-	return admin.Success(message, data)
-}
-
-func (d *Daemon) removeTailnet(ctx context.Context, request admin.Request) admin.Response {
-	d.opMu.Lock()
-	defer d.opMu.Unlock()
-	oldConfig := d.currentConfig()
-	cfg := oldConfig.Clone()
-	newTailnets := make([]config.TailnetConfig, 0, len(cfg.Tailnets))
-	actualName := ""
-	for _, item := range cfg.Tailnets {
-		if strings.EqualFold(item.Name, request.Name) {
-			actualName = item.Name
-			continue
-		}
-		newTailnets = append(newTailnets, item)
-	}
-	if actualName == "" {
-		return admin.Failure(fmt.Sprintf("verifier %q not found", request.Name))
-	}
-	cfg.Tailnets = newTailnets
-	if err := cfg.Validate(); err != nil {
-		return admin.Failure(err.Error())
-	}
-	orphan, err := d.manager.PrepareOrphan(actualName)
-	if err != nil {
-		return admin.Failure(err.Error())
-	}
-	runtime := d.activeConfig()
-	stateRoot := runtime.Storage.TailnetStateDir
-	orphanRoot := runtime.Storage.OrphanStateDir
-	stateDir := filepath.Join(stateRoot, actualName)
-	orphanDir := filepath.Join(orphanRoot, orphan.ID)
-	if !config.IsWithin(stateRoot, stateDir) || !config.IsWithin(orphanRoot, orphanDir) {
-		return admin.Failure("remove verifier paths escaped configured storage roots")
-	}
-	operationPath := d.removeOperationPath()
-	operation := config.RemoveOperation{
-		Version:    config.RemoveOperationVersion,
-		Phase:      config.RemovePhasePrepared,
-		Name:       actualName,
-		StateRoot:  stateRoot,
-		OrphanRoot: orphanRoot,
-		StateDir:   stateDir,
-		OrphanDir:  orphanDir,
-		Orphan:     config.OrphanMetadata{ID: orphan.ID, Name: orphan.Name, CreatedAt: orphan.CreatedAt},
-		OldConfig:  oldConfig,
-		NewConfig:  cfg,
-	}
-	if err := config.WriteRemoveOperation(operationPath, operation); err != nil {
-		return admin.Failure(err.Error())
-	}
-	denyEpoch := d.denyAdmission()
-	if err := config.WriteAtomic(d.configPath, cfg); err != nil {
-		removeErr := config.RemoveRemoveOperation(operationPath)
-		d.restoreAdmission(denyEpoch)
-		return admin.Failure(errors.Join(err, removeErr).Error())
-	}
-	operation.Phase = config.RemovePhaseConfigCommit
-	if err := config.WriteRemoveOperation(operationPath, operation); err != nil {
-		return admin.Failure(fmt.Sprintf("remove verifier committed configuration but could not advance pending operation: %v", err))
-	}
-	if _, err := d.manager.OrphanWithInfo(actualName, orphan); err != nil {
-		return admin.Failure(fmt.Sprintf("remove verifier is pending state preservation: %v", err))
-	}
-	operation.Phase = config.RemovePhaseStateMoved
-	if err := config.WriteRemoveOperation(operationPath, operation); err != nil {
-		return admin.Failure(fmt.Sprintf("remove verifier moved state but could not advance pending operation: %v", err))
-	}
-	if err := d.applyCommittedConfig(ctx, cfg, nil); err != nil {
-		return admin.Failure(fmt.Sprintf("remove verifier is pending runtime reconciliation: %v", err))
-	}
-	if err := config.RemoveRemoveOperation(operationPath); err != nil {
-		return admin.Failure(fmt.Sprintf("remove verifier completed but pending operation cleanup failed: %v", err))
-	}
-	return admin.Success(fmt.Sprintf("verifier removed; state preserved as orphan %s", orphan.ID), map[string]string{"orphan_id": orphan.ID})
-}
-
 func (d *Daemon) reloadConfig(ctx context.Context) admin.Response {
 	d.opMu.Lock()
 	defer d.opMu.Unlock()
 	parsed, err := config.LoadFile(d.configPath)
 	if err != nil {
-		return admin.Failure(err.Error())
-	}
-	if err := config.ValidateReload(d.desiredConfig(), parsed.Config); err != nil {
 		return admin.Failure(err.Error())
 	}
 	pendingRestart := config.RestartOnlyChanged(d.activeConfig(), parsed.Config)
@@ -695,6 +433,8 @@ func (d *Daemon) applyCommittedConfig(ctx context.Context, cfg config.Config, wa
 	if started {
 		runtime.Server = active.Server
 		runtime.Storage = active.Storage
+		runtime.Controller = active.Controller
+		runtime.Node = active.Node
 	}
 	pendingRestart := config.RestartOnlyChanged(runtime, cfg)
 	for _, warning := range warnings {
@@ -710,10 +450,6 @@ func (d *Daemon) applyCommittedConfig(ctx context.Context, cfg config.Config, wa
 	}
 	d.pendingRestart = pendingRestart
 	d.mu.Unlock()
-	d.denyAdmission()
-	if err := d.manager.Reconcile(ctx, runtime); err != nil {
-		return err
-	}
 	if err := d.syncDerper(ctx); err != nil {
 		d.reportFatal(err)
 		return err
@@ -742,7 +478,6 @@ func (d *Daemon) activeConfig() config.Config {
 
 func (d *Daemon) restartDerper(ctx context.Context) error {
 	d.derperMu.Lock()
-	d.denyAdmission()
 	d.mu.Lock()
 	d.childOK = false
 	if d.derper.Running() {
@@ -778,21 +513,18 @@ func (d *Daemon) shutdownInternal() error {
 	d.startup = false
 	d.childOK = false
 	d.mu.Unlock()
-	d.denyAdmission()
 	if d.adminServer != nil {
 		if adminErr := d.adminServer.StopAccepting(); adminErr != nil {
 			err = errors.Join(err, adminErr)
 		}
 	}
-	if d.admission != nil {
-		d.admission.Close()
-	}
 	if d.adminServer != nil {
 		d.adminServer.Wait()
 	}
-	if d.manager != nil {
-		d.manager.Pool().Clear()
-	}
+	d.closeListeners()
+	d.opMu.Lock()
+	defer d.opMu.Unlock()
+	d.stopNodeControl()
 	stopCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	if d.derper != nil {
@@ -802,76 +534,59 @@ func (d *Daemon) shutdownInternal() error {
 		d.derperMu.Lock()
 		d.derperMu.Unlock()
 	}
-	if d.manager != nil {
-		if managerErr := d.manager.Close(); managerErr != nil {
-			err = errors.Join(err, managerErr)
-		}
-	}
 	if d.adminServer != nil {
 		if adminErr := d.adminServer.Close(); adminErr != nil {
 			err = errors.Join(err, adminErr)
 		}
 	}
-	d.closeListeners()
+	if d.controllerCancel != nil {
+		d.controllerCancel()
+		<-d.controllerDone
+	}
+	if d.controllerStore != nil {
+		err = errors.Join(err, d.controllerStore.Close())
+	}
 	return err
 }
 
 func (d *Daemon) closeListeners() {
+	if d.controllerServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		if err := d.controllerServer.Shutdown(ctx); err != nil {
+			_ = d.controllerServer.Close()
+		}
+		cancel()
+	}
+	if d.managementServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		if err := d.managementServer.Shutdown(ctx); err != nil {
+			_ = d.managementServer.Close()
+		}
+		cancel()
+	}
 	if d.healthServer != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		_ = d.healthServer.Shutdown(ctx)
-		cancel()
-	}
-	if d.admissionServer != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_ = d.admissionServer.Shutdown(ctx)
 		cancel()
 	}
 	if d.healthListener != nil {
 		_ = d.healthListener.Close()
 		d.healthListener = nil
 	}
-	if d.admissionListener != nil {
-		d.admissionServing.Store(false)
-		_ = d.admissionListener.Close()
-		d.admissionListener = nil
-	}
 	if d.adminListenerStarted {
 		d.adminListenerStarted = false
 	}
 }
 
-func (d *Daemon) denyAdmission() uint64 {
-	d.mu.Lock()
-	d.barrierEpoch++
-	epoch := d.barrierEpoch
-	d.admission.SetBarrier(false)
-	d.mu.Unlock()
-	return epoch
-}
-
-func (d *Daemon) publishChildIfCurrent(epoch, generation uint64) bool {
+func (d *Daemon) publishChildIfCurrent(generation uint64) bool {
 	if !d.derper.Running() {
 		return false
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.stopping || d.barrierEpoch != epoch || d.childGeneration != generation {
+	if d.stopping || d.childGeneration != generation {
 		return false
 	}
 	d.childOK = true
-	d.admission.SetBarrier(true)
 	return true
-}
-
-func (d *Daemon) restoreAdmission(epoch uint64) {
-	if d.manager.EligibleCount() == 0 {
-		return
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.stopping || d.barrierEpoch != epoch || !d.childOK {
-		return
-	}
-	d.admission.SetBarrier(true)
 }
